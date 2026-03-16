@@ -1,0 +1,12 @@
+.env
+server_config.json
+__pycache__/
+*.pyc
+*.pyo
+data/
+*.mp3
+*.wav
+*.tmp
+.venv/
+venv/
+service_account.json
