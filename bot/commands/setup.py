@@ -236,42 +236,60 @@ class ReactionEmojiCollector:
         )
 
 
-# ====== Step 5: メンバー登録 (ロールから自動取得) ======
+# ====== Step 5: メンバー登録 (ロール分類 → 自動登録) ======
 
 class Step5MemberView(View):
     def __init__(self):
         super().__init__(timeout=300)
 
-    @discord.ui.button(label="サーバーメンバーを自動登録", style=discord.ButtonStyle.primary, emoji="👥")
+    @discord.ui.button(label="ロール分類 → メンバー登録", style=discord.ButtonStyle.primary, emoji="👥")
     async def auto_register(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
         guild = interaction.guild
         bot = interaction.client
+        roles = [r for r in guild.roles if r.name != "@everyone"]
 
-        human_members = [m for m in guild.members if not m.bot]
-        members = {}
-        for m in human_members:
-            roles = [r for r in m.roles if r.name != "@everyone"]
-            top_role = roles[-1].name if roles else "メンバー"
-            members[str(m.id)] = {
-                "name": m.display_name,
-                "role": top_role,
-                "tasks": [],
-                "grade": "",
-            }
+        if not roles:
+            await interaction.response.send_message(
+                "ロールがないぽん...先にロールを作ってねぽん。",
+                view=Step6DriveView(),
+            )
+            return
 
-        await bot.config.set_members(guild.id, members)
-        await interaction.followup.send(
-            f"✅ **{len(members)}人** をロールから自動登録したぽん！\n"
-            f"各メンバーは `/member register` で担当・学年を追加できるぽん。\n\n"
-            f"次はGoogle Drive連携だぽん！",
-            view=Step6DriveView(),
+        from bot.commands.member import RoleMappingView, _classify_member_roles
+
+        class SetupRoleMappingView(RoleMappingView):
+            """setup用: 保存後にメンバー自動登録 → Step6へ進む"""
+            @discord.ui.button(label="保存してメンバー登録", style=discord.ButtonStyle.success, row=4)
+            async def save(self, interaction: discord.Interaction, button_: Button):
+                await bot.config.set_role_mapping(guild.id, self.mapping)
+
+                # メンバー自動登録
+                human_members = [m for m in guild.members if not m.bot]
+                members = {}
+                for m in human_members:
+                    members[str(m.id)] = _classify_member_roles(m, self.mapping)
+
+                await bot.config.set_members(guild.id, members)
+
+                await interaction.response.edit_message(
+                    content=f"✅ ロール分類を保存し、**{len(members)}人** を自動登録したぽん！\n"
+                    f"`/member register <呼び名>` で呼び名を変更できるぽん。\n\n"
+                    f"次はGoogle Drive連携だぽん！",
+                    view=Step6DriveView(),
+                )
+
+        view = SetupRoleMappingView(bot, guild, roles)
+        await interaction.response.send_message(
+            "ロールをカテゴリ別に分類するぽん！\n"
+            "👑 役職 / 💼 担当 / 🎓 学年 をそれぞれ選んでねぽん。",
+            view=view,
+            ephemeral=True,
         )
 
     @discord.ui.button(label="あとで登録する", style=discord.ButtonStyle.secondary)
     async def skip(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
-            "メンバー登録はあとで `/member sync` でもできるぽん！\n"
+            "メンバー登録はあとで `/member roles` → `/member sync` でもできるぽん！\n"
             "次はGoogle Drive連携だぽん！",
             view=Step6DriveView(),
         )

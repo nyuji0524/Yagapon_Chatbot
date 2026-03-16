@@ -122,6 +122,16 @@ class ConfigManager:
         }
         await self._save()
 
+    # ------ role mapping ------
+
+    def get_role_mapping(self, guild_id: int) -> dict:
+        """{"position": [role_id, ...], "task": [role_id, ...], "grade": [role_id, ...]}"""
+        return self._guild(guild_id).get("role_mapping", {})
+
+    async def set_role_mapping(self, guild_id: int, mapping: dict):
+        self._guild(guild_id)["role_mapping"] = mapping
+        await self._save()
+
     # ------ members ------
 
     def get_members(self, guild_id: int) -> dict:
