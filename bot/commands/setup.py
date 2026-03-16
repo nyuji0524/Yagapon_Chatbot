@@ -129,16 +129,19 @@ class GithubChannelSelect(ChannelSelect):
         # webhook URL案内
         api_host = os.environ.get("API_HOST", "https://あなたのサーバー")
         webhook_url = f"{api_host}/webhook/github/{interaction.guild_id}"
+        secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+        secret_display = f"`{secret}`" if secret else "⚠️ 未設定（.envにGITHUB_WEBHOOK_SECRETを設定してね）"
 
         await interaction.followup.send(
             f"✅ GitHub通知: <#{ch.id}>\n\n"
-            f"📌 **GitHubリポジトリに以下のWebhookを登録してねぽん！**\n"
+            f"📌 **GitHubリポジトリ → Settings → Webhooks → Add webhook**\n"
             f"```\n"
             f"Payload URL: {webhook_url}\n"
             f"Content type: application/json\n"
-            f"Secret: (サーバー管理者に確認)\n"
+            f"Secret: {secret}\n"
             f"Events: Just the push event\n"
             f"```\n"
+            f"mainブランチへのpushで自動デプロイ＆コードレビューが動くぽん！\n\n"
             f"次はリアクションの設定だぽん！",
             view=Step4ReactionsView(),
         )
