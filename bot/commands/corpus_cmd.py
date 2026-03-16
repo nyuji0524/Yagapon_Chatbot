@@ -8,7 +8,7 @@ def register(bot):
     group = app_commands.Group(name="corpus", description="コーパス管理コマンドだぽん")
 
     @group.command(name="delete", description="このサーバーのコーパスを完全削除するぽん")
-    @app_commands.checks.has_permissions(administrator=True)
+    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
     async def corpus_delete(interaction: discord.Interaction):
         guild_id = interaction.guild_id
         store_name = bot.config.get_corpus(guild_id)

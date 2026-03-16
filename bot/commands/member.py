@@ -40,7 +40,7 @@ def register(bot):
     group = app_commands.Group(name="member", description="メンバー管理だぽん！")
 
     @group.command(name="sync", description="サーバーメンバーをロールから自動登録するぽん！")
-    @app_commands.checks.has_permissions(administrator=True)
+    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
     async def member_sync(interaction: discord.Interaction):
         await interaction.response.defer()
         guild = interaction.guild
@@ -79,7 +79,7 @@ def register(bot):
             )
 
     @group.command(name="roles", description="役職・担当・学年のロールを分類するぽん！")
-    @app_commands.checks.has_permissions(administrator=True)
+    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
     async def member_roles(interaction: discord.Interaction):
         guild = interaction.guild
         roles = [r for r in guild.roles if r.name != "@everyone"]

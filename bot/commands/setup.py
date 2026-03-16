@@ -441,7 +441,7 @@ class Step7BackfillView(View):
 
 def register(bot):
     @bot.tree.command(name="setup", description="初期設定をするぽん！")
-    @app_commands.checks.has_permissions(administrator=True)
+    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
     async def setup_cmd(interaction: discord.Interaction):
         # 既にセットアップ済みかチェック
         existing = bot.config.get_bureau(interaction.guild_id)

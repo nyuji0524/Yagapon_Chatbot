@@ -6,7 +6,7 @@ from discord import app_commands
 
 def register(bot):
     @bot.tree.command(name="reset", description="このサーバーの設定をリセットするぽん")
-    @app_commands.checks.has_permissions(administrator=True)
+    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
     async def reset_cmd(interaction: discord.Interaction):
         guild_id = interaction.guild_id
         bureau = bot.config.get_bureau(guild_id)
