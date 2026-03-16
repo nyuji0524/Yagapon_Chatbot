@@ -41,6 +41,14 @@ class YagaPon(discord.Client):
         log.info("Slash commands synced, flush loop started.")
 
     async def on_ready(self):
+        # ギルドごとにコマンドを即時同期
+        for guild in self.guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                log.info(f"Commands synced to {guild.name}")
+            except Exception as e:
+                log.warning(f"Failed to sync commands to {guild.name}: {e}")
         log.info(f"おしゃべりやがぽん起動: {self.user}")
 
     async def on_guild_join(self, guild: discord.Guild):
