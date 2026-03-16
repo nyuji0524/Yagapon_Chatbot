@@ -49,8 +49,19 @@ class BureauSelect(Select):
             )
             return
 
-        await interaction.response.defer()
         bot = interaction.client
+
+        # 既に局が設定済みなら再実行を防止（コーパス重複防止）
+        existing = bot.config.get_bureau(interaction.guild_id)
+        if existing:
+            await interaction.response.send_message(
+                f"既に「**{existing}**」として登録済みだぽん！\n"
+                f"変更したい場合は `/reset` でリセットしてねぽん。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
 
         try:
             store_name = await bot.corpus.create_corpus(interaction.guild_id, bureau)
