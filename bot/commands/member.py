@@ -1,9 +1,9 @@
 """
-/member sync <sheets_url> - スプレッドシートからメンバー情報を同期
+/member sync - サーバーのメンバー+ロールから自動登録
+/member register - 自分の追加情報（担当・学年）を登録
 /member list - 登録メンバー一覧
 """
 
-import re
 import discord
 from discord import app_commands
 
@@ -11,82 +11,95 @@ from discord import app_commands
 def register(bot):
     group = app_commands.Group(name="member", description="メンバー管理だぽん！")
 
-    @group.command(name="sync", description="スプレッドシートからメンバー情報を同期するぽん！")
-    @app_commands.describe(sheets_url="Google SheetsのURL")
-    async def member_sync(interaction: discord.Interaction, sheets_url: str):
+    @group.command(name="sync", description="サーバーメンバーをロールから自動登録するぽん！")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def member_sync(interaction: discord.Interaction):
         await interaction.response.defer()
+        guild = interaction.guild
 
-        # URLを保存
-        await bot.config.set_sheets_url(interaction.guild_id, sheets_url)
+        # botとシステムユーザーを除外
+        human_members = [m for m in guild.members if not m.bot]
 
-        # スプレッドシートIDを抽出
-        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheets_url)
-        if not match:
-            await interaction.followup.send("❌ 有効なGoogle SheetsのURLじゃないぽん...")
-            return
+        members = bot.config.get_members(guild.id)
 
-        sheet_id = match.group(1)
+        registered = 0
+        for m in human_members:
+            uid = str(m.id)
+            # ロールからトップロール（@everyone以外）を取得
+            roles = [r for r in m.roles if r.name != "@everyone"]
+            top_role = roles[-1].name if roles else "メンバー"
 
-        # Google Sheets API (公開シート or CSV export)
-        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(csv_url) as resp:
-                    if resp.status != 200:
-                        await interaction.followup.send(
-                            "❌ シートを読み込めなかったぽん。\n"
-                            "シートの共有設定を「リンクを知っている全員」にしてほしいぽん！"
-                        )
-                        return
-                    text = await resp.text()
-
-            # CSV解析 (ヘッダー: 名前, Discord ID, 役職, 担当, 学年)
-            lines = text.strip().split("\n")
-            if len(lines) < 2:
-                await interaction.followup.send("❌ データが空っぽいぽん...")
-                return
-
-            members = {}
-            for line in lines[1:]:  # ヘッダースキップ
-                cols = [c.strip().strip('"') for c in line.split(",")]
-                if len(cols) < 5:
-                    continue
-                name, discord_id, role, tasks, grade = cols[:5]
-                discord_id = discord_id.strip()
-                if not discord_id.isdigit():
-                    continue
-                members[discord_id] = {
-                    "name": name,
-                    "role": role,
-                    "tasks": [t.strip() for t in tasks.split("/") if t.strip()],
-                    "grade": grade,
+            if uid in members:
+                # 既存メンバーはロールだけ更新
+                members[uid]["role"] = top_role
+                members[uid]["name"] = m.display_name
+            else:
+                # 新規登録
+                members[uid] = {
+                    "name": m.display_name,
+                    "role": top_role,
+                    "tasks": [],
+                    "grade": "",
                 }
+            registered += 1
 
-            await bot.config.set_members(interaction.guild_id, members)
-            await interaction.followup.send(
-                f"✅ **{len(members)}人** のメンバー情報を同期したぽん！\n"
-                f"これでDMでの質問も受け付けられるぽん！"
+        await bot.config.set_members(guild.id, members)
+        await interaction.followup.send(
+            f"✅ **{registered}人** をサーバーロールから登録/更新したぽん！\n"
+            f"各メンバーは `/member register` で担当・学年を追加できるぽん。"
+        )
+
+    @member_sync.error
+    async def sync_error(interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "管理者権限が必要だぽん！", ephemeral=True
             )
 
-        except ImportError:
-            await interaction.followup.send("❌ aiohttp が必要だぽん。`pip install aiohttp`")
-        except Exception as e:
-            await interaction.followup.send(f"❌ エラーだぽん: {e}")
+    @group.command(name="register", description="自分の担当・学年を登録するぽん！")
+    async def member_register(interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        uid = str(interaction.user.id)
+        members = bot.config.get_members(guild_id)
+
+        if uid not in members:
+            # 未登録なら基本情報で自動追加
+            roles = [r for r in interaction.user.roles if r.name != "@everyone"]
+            top_role = roles[-1].name if roles else "メンバー"
+            members[uid] = {
+                "name": interaction.user.display_name,
+                "role": top_role,
+                "tasks": [],
+                "grade": "",
+            }
+
+        # 現在の情報をモーダルのデフォルトに
+        current = members[uid]
+        modal = MemberInfoModal(
+            default_tasks="/".join(current.get("tasks", [])),
+            default_grade=current.get("grade", ""),
+        )
+        await interaction.response.send_modal(modal)
 
     @group.command(name="list", description="登録メンバー一覧を表示するぽん！")
     async def member_list(interaction: discord.Interaction):
         members = bot.config.get_members(interaction.guild_id)
         if not members:
-            await interaction.response.send_message("まだメンバーが登録されてないぽん。`/member sync` で同期してねぽん！")
+            await interaction.response.send_message(
+                "まだメンバーが登録されてないぽん。\n"
+                "管理者が `/member sync` するか、各自 `/member register` してねぽん！"
+            )
             return
 
         embed = discord.Embed(title="登録メンバー一覧", color=discord.Color.blue())
         for uid, info in members.items():
             tasks_str = ", ".join(info.get("tasks", []))
+            grade = info.get("grade", "")
+            name_line = f"{info['name']}"
+            if grade:
+                name_line += f" ({grade})"
             embed.add_field(
-                name=f"{info['name']} ({info.get('grade', '')})",
+                name=name_line,
                 value=f"役職: {info.get('role', '-')} | 担当: {tasks_str or '-'}",
                 inline=False,
             )
@@ -94,3 +107,48 @@ def register(bot):
         await interaction.response.send_message(embed=embed)
 
     bot.tree.add_command(group)
+
+
+class MemberInfoModal(discord.ui.Modal, title="メンバー情報の登録"):
+    tasks = discord.ui.TextInput(
+        label="担当（複数は / 区切り）",
+        placeholder="bot開発 / サーバー管理",
+        required=False,
+        max_length=200,
+    )
+    grade = discord.ui.TextInput(
+        label="学年",
+        placeholder="B3, M1 など",
+        required=False,
+        max_length=10,
+    )
+
+    def __init__(self, default_tasks: str = "", default_grade: str = ""):
+        super().__init__()
+        self.tasks.default = default_tasks
+        self.grade.default = default_grade
+
+    async def on_submit(self, interaction: discord.Interaction):
+        bot = interaction.client
+        guild_id = interaction.guild_id
+        uid = str(interaction.user.id)
+        members = bot.config.get_members(guild_id)
+
+        if uid not in members:
+            roles = [r for r in interaction.user.roles if r.name != "@everyone"]
+            top_role = roles[-1].name if roles else "メンバー"
+            members[uid] = {
+                "name": interaction.user.display_name,
+                "role": top_role,
+            }
+
+        members[uid]["tasks"] = [t.strip() for t in str(self.tasks).split("/") if t.strip()]
+        members[uid]["grade"] = str(self.grade).strip()
+
+        await bot.config.set_members(guild_id, members)
+        await interaction.response.send_message(
+            f"✅ 登録完了だぽん！\n"
+            f"担当: {', '.join(members[uid]['tasks']) or '-'} / "
+            f"学年: {members[uid]['grade'] or '-'}",
+            ephemeral=True,
+        )

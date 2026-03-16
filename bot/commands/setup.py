@@ -236,64 +236,45 @@ class ReactionEmojiCollector:
         )
 
 
-# ====== Step 5: メンバー登録 (CSV形式メッセージ入力) ======
+# ====== Step 5: メンバー登録 (ロールから自動取得) ======
 
 class Step5MemberView(View):
     def __init__(self):
         super().__init__(timeout=300)
 
-    @discord.ui.button(label="メンバーを登録する", style=discord.ButtonStyle.primary, emoji="👥")
-    async def register_members(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(MemberInputModal())
+    @discord.ui.button(label="サーバーメンバーを自動登録", style=discord.ButtonStyle.primary, emoji="👥")
+    async def auto_register(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer()
+        guild = interaction.guild
+        bot = interaction.client
+
+        human_members = [m for m in guild.members if not m.bot]
+        members = {}
+        for m in human_members:
+            roles = [r for r in m.roles if r.name != "@everyone"]
+            top_role = roles[-1].name if roles else "メンバー"
+            members[str(m.id)] = {
+                "name": m.display_name,
+                "role": top_role,
+                "tasks": [],
+                "grade": "",
+            }
+
+        await bot.config.set_members(guild.id, members)
+        await interaction.followup.send(
+            f"✅ **{len(members)}人** をロールから自動登録したぽん！\n"
+            f"各メンバーは `/member register` で担当・学年を追加できるぽん。\n\n"
+            f"次はGoogle Drive連携だぽん！",
+            view=Step6DriveView(),
+        )
 
     @discord.ui.button(label="あとで登録する", style=discord.ButtonStyle.secondary)
     async def skip(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
-            "メンバー登録はあとで `/member add` でもできるぽん！\n"
+            "メンバー登録はあとで `/member sync` でもできるぽん！\n"
             "次はGoogle Drive連携だぽん！",
             view=Step6DriveView(),
         )
-
-
-class MemberInputModal(discord.ui.Modal, title="メンバー一括登録"):
-    members_csv = discord.ui.TextInput(
-        label="1行1人: 名前, Discord ID, 役職, 担当, 学年",
-        style=discord.TextStyle.paragraph,
-        placeholder="中山裕二, 123456789012345678, 局長, bot開発/サーバー管理, M1\n田中太郎, 987654321098765432, 局員, デザイン, B3",
-        max_length=4000,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        bot = interaction.client
-        lines = str(self.members_csv).strip().split("\n")
-
-        members = {}
-        errors = []
-        for i, line in enumerate(lines, 1):
-            cols = [c.strip() for c in line.split(",")]
-            if len(cols) < 5:
-                errors.append(f"行{i}: カラム不足 (5つ必要)")
-                continue
-            name, discord_id, role, tasks, grade = cols[:5]
-            discord_id = discord_id.strip()
-            if not discord_id.isdigit():
-                errors.append(f"行{i}: Discord IDが数字じゃないぽん ({discord_id})")
-                continue
-            members[discord_id] = {
-                "name": name,
-                "role": role,
-                "tasks": [t.strip() for t in tasks.split("/") if t.strip()],
-                "grade": grade,
-            }
-
-        await bot.config.set_members(interaction.guild_id, members)
-
-        msg = f"✅ **{len(members)}人** 登録したぽん！\n"
-        if errors:
-            msg += "⚠️ エラー:\n" + "\n".join(errors[:5]) + "\n"
-        msg += "\n次はGoogle Drive連携だぽん！"
-
-        await interaction.response.send_message(msg, view=Step6DriveView())
 
 
 # ====== Step 6: Google Drive連携 ======
