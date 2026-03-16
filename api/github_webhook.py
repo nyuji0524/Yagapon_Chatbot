@@ -1,10 +1,13 @@
-"""GitHub webhook - push通知 + コードレビュー"""
+"""GitHub webhook - push通知 + コードレビュー + 自動デプロイ"""
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
+import subprocess
+import sys
 
 import discord
 from fastapi import APIRouter, HTTPException, Request
@@ -114,4 +117,47 @@ async def github_webhook(guild_id: int, request: Request):
         if channel:
             await channel.send(embed=embed)
 
+    # 自動デプロイ (git pull + 再起動)
+    if branch == "main":
+        asyncio.create_task(_auto_deploy(bot, channel_id))
+
     return {"status": "processed", "commits": len(data.get("commits", []))}
+
+
+async def _auto_deploy(bot, notify_channel_id: int | None = None):
+    """git pull して bot を再起動"""
+    loop = asyncio.get_event_loop()
+
+    def _pull():
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            capture_output=True, text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
+        return result
+
+    try:
+        result = await loop.run_in_executor(None, _pull)
+        if result.returncode != 0:
+            log.error(f"git pull failed: {result.stderr}")
+            return
+
+        if "Already up to date" in result.stdout:
+            log.info("No changes to deploy")
+            return
+
+        log.info(f"git pull success: {result.stdout.strip()}")
+
+        # 通知
+        if notify_channel_id and bot:
+            channel = bot.get_channel(notify_channel_id)
+            if channel:
+                await channel.send("🔄 コードを更新したぽん！再起動するぽん...")
+
+        # 少し待ってから再起動
+        await asyncio.sleep(2)
+        log.info("Restarting bot...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    except Exception as e:
+        log.error(f"Auto-deploy error: {e}")
