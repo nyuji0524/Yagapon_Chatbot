@@ -141,7 +141,7 @@ class GithubChannelSelect(ChannelSelect):
             f"Secret: {secret}\n"
             f"Events: Just the push event\n"
             f"```\n"
-            f"mainブランチへのpushで自動デプロイ＆コードレビューが動くぽん！\n\n"
+            f"mainブランチへのpushでコードレビューが動くぽん！\n\n"
             f"次はリアクションの設定だぽん！",
             view=Step4ReactionsView(),
         )
@@ -160,7 +160,7 @@ class Step3GithubView(View):
         )
 
 
-# ====== Step 4: リアクション絵文字 ======
+# ====== Step 4: リアクション絵文字 (リアクションで選択) ======
 
 class Step4ReactionsView(View):
     def __init__(self):
@@ -168,7 +168,13 @@ class Step4ReactionsView(View):
 
     @discord.ui.button(label="リアクション有効化", style=discord.ButtonStyle.primary, emoji="✨")
     async def enable(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(ReactionEmojiModal())
+        await interaction.response.send_message(
+            "リアクションに使う絵文字を設定するぽん！\n"
+            "下のメッセージにそれぞれ使いたい絵文字でリアクションしてねぽん！\n"
+            "（サーバー独自の絵文字もOKだぽん）"
+        )
+        collector = ReactionEmojiCollector(interaction)
+        await collector.start()
 
     @discord.ui.button(label="リアクション無効", style=discord.ButtonStyle.secondary)
     async def disable(self, interaction: discord.Interaction, button: Button):
@@ -180,20 +186,51 @@ class Step4ReactionsView(View):
         )
 
 
-class ReactionEmojiModal(discord.ui.Modal, title="リアクション絵文字の設定"):
-    interesting = discord.ui.TextInput(label="興味深い", default="💡", max_length=5)
-    surprised = discord.ui.TextInput(label="びっくり", default="😲", max_length=5)
-    funny = discord.ui.TextInput(label="笑える", default="😂", max_length=5)
+class ReactionEmojiCollector:
+    """3つのメッセージを送り、ユーザーのリアクションで絵文字を収集"""
 
-    async def on_submit(self, interaction: discord.Interaction):
-        bot = interaction.client
-        await bot.config.set_reactions(
-            interaction.guild_id, True,
-            str(self.interesting), str(self.surprised), str(self.funny),
+    EMOTIONS = [
+        ("interesting", "💡 **興味深い** と思ったときのリアクションを付けてぽん！"),
+        ("surprised", "😲 **びっくり** したときのリアクションを付けてぽん！"),
+        ("funny", "😂 **笑える** と思ったときのリアクションを付けてぽん！"),
+    ]
+
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.bot = interaction.client
+        self.guild_id = interaction.guild_id
+        self.user = interaction.user
+        self.channel = interaction.channel
+        self.emojis = {}
+
+    async def start(self):
+        for key, prompt in self.EMOTIONS:
+            msg = await self.channel.send(prompt)
+
+            def check(reaction, user):
+                return user == self.user and reaction.message.id == msg.id
+
+            try:
+                reaction, _ = await self.bot.wait_for("reaction_add", timeout=60, check=check)
+                self.emojis[key] = str(reaction.emoji)
+                await msg.edit(content=f"✅ {prompt.split('**')[1]}: {reaction.emoji}")
+            except Exception:
+                # タイムアウト時はデフォルト
+                defaults = {"interesting": "💡", "surprised": "😲", "funny": "😂"}
+                self.emojis[key] = defaults[key]
+                await msg.edit(content=f"⏰ タイムアウト → デフォルト: {defaults[key]}")
+
+        await self.bot.config.set_reactions(
+            self.guild_id, True,
+            self.emojis["interesting"],
+            self.emojis["surprised"],
+            self.emojis["funny"],
         )
-        await interaction.response.send_message(
+        await self.channel.send(
             f"✅ リアクション設定完了だぽん！\n"
-            f"  興味深い: {self.interesting} / びっくり: {self.surprised} / 笑える: {self.funny}\n\n"
+            f"  興味深い: {self.emojis['interesting']} / "
+            f"びっくり: {self.emojis['surprised']} / "
+            f"笑える: {self.emojis['funny']}\n\n"
             f"次はメンバー登録だぽん！",
             view=Step5MemberView(),
         )
