@@ -84,6 +84,7 @@ async def upload_to_drive(
             body=file_metadata,
             media_body=media,
             fields="id, webViewLink",
+            supportsAllDrives=True,
         ).execute()
 
         return file.get("webViewLink")
