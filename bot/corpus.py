@@ -98,7 +98,7 @@ class CorpusManager:
         await loop.run_in_executor(
             None,
             lambda: self._client.file_search_stores.delete(
-                name=store_name, force=True
+                name=store_name,
             ),
         )
         log.info(f"Deleted corpus: {store_name}")
