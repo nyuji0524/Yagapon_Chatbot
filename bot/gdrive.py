@@ -25,7 +25,7 @@ def _get_credentials():
 
     return service_account.Credentials.from_service_account_file(
         creds_path,
-        scopes=["https://www.googleapis.com/auth/drive.file"],
+        scopes=["https://www.googleapis.com/auth/drive"],
     )
 
 
