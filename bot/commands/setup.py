@@ -431,7 +431,18 @@ class Step7BackfillView(View):
 
 def register(bot):
     @bot.tree.command(name="setup", description="初期設定をするぽん！")
+    @app_commands.checks.has_permissions(administrator=True)
     async def setup_cmd(interaction: discord.Interaction):
+        # 既にセットアップ済みかチェック
+        existing = bot.config.get_bureau(interaction.guild_id)
+        if existing:
+            await interaction.response.send_message(
+                f"このサーバーは既に **{existing}** として設定済みだぽん！\n"
+                f"やり直したい場合は先に `/reset` で設定をリセットしてねぽん。",
+                ephemeral=True,
+            )
+            return
+
         # 使用済みの局を取得
         used_bureaus = set()
         for gid, gdata in bot.config._config.items():
@@ -442,3 +453,10 @@ def register(bot):
             "セットアップを始めるぽん！まずは局を選んでねぽん！",
             view=Step1BureauView(used_bureaus),
         )
+
+    @setup_cmd.error
+    async def setup_error(interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "管理者権限が必要だぽん！", ephemeral=True
+            )
