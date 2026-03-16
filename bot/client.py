@@ -24,7 +24,7 @@ class YagaPon(discord.Client):
         self.corpus = CorpusManager()
 
     async def setup_hook(self):
-        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset
+        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd
 
         setup.register(self)
         status.register(self)
@@ -35,6 +35,7 @@ class YagaPon(discord.Client):
         voice_cmd.register(self)
         report.register(self)
         reset.register(self)
+        corpus_cmd.register(self)
 
         await self.tree.sync()
         self.corpus.start_flush_loop()

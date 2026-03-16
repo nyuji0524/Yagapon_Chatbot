@@ -1,4 +1,4 @@
-"""コマンド: /reset - サーバー設定をリセット"""
+"""コマンド: /reset - サーバー設定をリセット（コーパス削除オプション付き）"""
 
 import discord
 from discord import app_commands
@@ -17,13 +17,14 @@ def register(bot):
             )
             return
 
-        # 確認ボタン
-        view = ConfirmResetView(bot, guild_id, bureau)
+        store_name = bot.config.get_corpus(guild_id)
+        view = ConfirmResetView(bot, guild_id, bureau, store_name)
         await interaction.response.send_message(
-            f"**⚠️ 本当にリセットするぽん？**\n\n"
+            f"**⚠️ リセット方法を選んでねぽん**\n\n"
             f"局: **{bureau}**\n"
-            f"コーパス・メンバー・リアクション等すべての設定が削除されるぽん。\n"
-            f"（コーパスのデータ自体はGemini側に残るぽん）",
+            f"コーパス: `{store_name or 'なし'}`\n\n"
+            f"**設定のみリセット**: 設定を消すけどコーパス（学習データ）は残すぽん\n"
+            f"**設定+コーパス削除**: 設定もコーパスも完全に消すぽん（取り消し不可）",
             view=view,
             ephemeral=True,
         )
@@ -37,22 +38,52 @@ def register(bot):
 
 
 class ConfirmResetView(discord.ui.View):
-    def __init__(self, bot, guild_id: int, bureau: str):
+    def __init__(self, bot, guild_id: int, bureau: str, store_name: str | None):
         super().__init__(timeout=60)
         self.bot = bot
         self.guild_id = guild_id
         self.bureau = bureau
+        self.store_name = store_name
 
-    @discord.ui.button(label="リセットする", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="設定のみリセット", style=discord.ButtonStyle.primary)
+    async def config_only(self, interaction: discord.Interaction, button: discord.ui.Button):
         key = str(self.guild_id)
         if key in self.bot.config._config:
             del self.bot.config._config[key]
             await self.bot.config._save()
 
         await interaction.response.edit_message(
-            content=f"**{self.bureau}** の設定をリセットしたぽん！\n`/setup` で再設定できるぽん。",
+            content=f"**{self.bureau}** の設定をリセットしたぽん！\n"
+            f"コーパスはGemini側に残っているぽん。\n"
+            f"`/setup` で再設定できるぽん。",
             view=None,
+        )
+
+    @discord.ui.button(label="設定+コーパス削除", style=discord.ButtonStyle.danger)
+    async def config_and_corpus(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=f"設定とコーパスを削除中だぽん... ⏳", view=None
+        )
+
+        # コーパス削除
+        if self.store_name:
+            try:
+                await self.bot.corpus.delete_corpus(self.store_name)
+            except Exception as e:
+                await interaction.edit_original_response(
+                    content=f"コーパス削除に失敗したぽん...: {e}"
+                )
+                return
+
+        # 設定削除
+        key = str(self.guild_id)
+        if key in self.bot.config._config:
+            del self.bot.config._config[key]
+            await self.bot.config._save()
+
+        await interaction.edit_original_response(
+            content=f"**{self.bureau}** の設定とコーパスを完全削除したぽん！\n"
+            f"`/setup` で再設定できるぽん。",
         )
 
     @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)

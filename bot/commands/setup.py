@@ -309,7 +309,7 @@ async def _run_backfill(interaction: discord.Interaction, days: int | None):
         return
 
     label = "全期間" if days is None else f"過去{days}日分"
-    await interaction.followup.send(f"📚 {label}の過去ログ取り込みを開始するぽん！⏳")
+    await interaction.followup.send(f"📚 {label}の過去ログ取り込みを処理中だぽん...")
 
     from datetime import datetime, timedelta, timezone
     after = None
@@ -347,20 +347,39 @@ async def _run_backfill(interaction: discord.Interaction, days: int | None):
 class Step7BackfillView(View):
     def __init__(self):
         super().__init__(timeout=300)
+        self._started = False
+
+    async def _disable_buttons(self, interaction: discord.Interaction, label: str):
+        """ボタンを無効化して連打防止"""
+        if self._started:
+            await interaction.response.send_message(
+                "すでにバックフィルを実行中だぽん！⏳", ephemeral=True
+            )
+            return False
+        self._started = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"📚 {label}の取り込みを開始するぽん！⏳", view=self
+        )
+        return True
 
     @discord.ui.button(label="全部取り込む", style=discord.ButtonStyle.success, emoji="📚")
     async def backfill_all(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
+        if not await self._disable_buttons(interaction, "全期間"):
+            return
         await _run_backfill(interaction, days=None)
 
     @discord.ui.button(label="過去180日", style=discord.ButtonStyle.primary, emoji="📅")
     async def backfill_180(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
+        if not await self._disable_buttons(interaction, "過去180日"):
+            return
         await _run_backfill(interaction, days=180)
 
     @discord.ui.button(label="過去30日", style=discord.ButtonStyle.primary, emoji="📆")
     async def backfill_30(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
+        if not await self._disable_buttons(interaction, "過去30日"):
+            return
         await _run_backfill(interaction, days=30)
 
     @discord.ui.button(label="あとでやる", style=discord.ButtonStyle.secondary)
