@@ -14,10 +14,16 @@ log = logging.getLogger("yagapon.reactions")
 BATCH_SIZE = 5
 BATCH_INTERVAL = 180  # 3分
 
-JUDGE_PROMPT = """以下のDiscordメッセージそれぞれに対し、感情を判定せよ。
-選択肢: interesting, surprised, funny, none
-ほとんどのメッセージは "none" にすべき。本当に際立つものだけ判定せよ。
-JSON配列のみ返せ（説明不要）。例: ["none", "funny", "none"]
+JUDGE_PROMPT = """大学の学園祭実行委員会のDiscordメッセージを感情判定する。
+
+ルール:
+- 選択肢: interesting, surprised, funny, none
+- 8割以上は "none" にすること。本当に際立つものだけ判定する
+- interesting: 新しい知見、鋭い意見、重要な提案
+- surprised: 予想外の事実、驚くべき報告、意外な展開
+- funny: ユーモア、ボケ、思わず笑える発言
+- 普通の報告・挨拶・質問・短い返事は必ず "none"
+- JSON配列のみ返せ。説明不要。例: ["none", "funny", "none", "none", "none"]
 
 メッセージ:
 {messages}"""
