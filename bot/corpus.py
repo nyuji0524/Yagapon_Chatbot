@@ -107,26 +107,25 @@ class CorpusManager:
         while True:
             docs = await loop.run_in_executor(
                 None,
-                lambda: self._client.file_search_stores.list_file_search_store_files(
-                    file_search_store_name=store_name,
+                lambda: list(self._client.file_search_stores.documents.list(
+                    parent=store_name,
                     config={"page_size": 20},
-                ),
+                )),
             )
-            doc_list = list(docs)
-            if not doc_list:
+            if not docs:
                 break
-            for doc in doc_list:
+            for doc in docs:
                 try:
                     await loop.run_in_executor(
                         None,
-                        lambda d=doc: self._client.file_search_stores.delete_file_search_store_file(
-                            file_search_store_name=store_name,
-                            file_search_store_file_name=d.name,
+                        lambda d=doc: self._client.file_search_stores.documents.delete(
+                            name=d.name,
+                            config={"force": True},
                         ),
                     )
                 except Exception as e:
                     log.warning(f"Failed to delete doc {doc.name}: {e}")
-            log.info(f"Deleted {len(doc_list)} docs from {store_name}")
+            log.info(f"Deleted {len(docs)} docs from {store_name}")
 
         # ストアを削除
         await loop.run_in_executor(

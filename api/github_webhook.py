@@ -74,27 +74,25 @@ async def github_webhook(guild_id: int, request: Request):
             f"  Files: {', '.join(files[:10])}\n"
         )
 
-    # GitHub APIでdiffを取得
+    # GitHub APIで各コミットのpatchを取得
     diff_text = ""
-    compare_url = data.get("compare", "")
-    if compare_url:
-        diff_api_url = compare_url.replace("github.com", "api.github.com/repos").replace("/compare/", "/compare/") + ".diff"
-        # もしくは直接API
-        before = data.get("before", "")
-        after = data.get("after", "")
-        if before and after:
-            api_url = f"https://api.github.com/repos/{repo}/compare/{before}...{after}"
-            try:
-                async with aiohttp.ClientSession() as session:
-                    headers = {"Accept": "application/vnd.github.v3.diff"}
-                    async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status == 200:
-                            diff_text = await resp.text()
-                            # 長すぎる場合は切り詰め
-                            if len(diff_text) > 10000:
-                                diff_text = diff_text[:10000] + "\n... (差分が長いため省略)"
-            except Exception as e:
-                log.warning(f"Failed to fetch diff: {e}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            for c in data.get("commits", [])[:5]:
+                patch_url = f"https://github.com/{repo}/commit/{c['id']}.diff"
+                async with session.get(
+                    patch_url,
+                    headers={"User-Agent": "YagaPon-Bot"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        patch = await resp.text()
+                        diff_text += f"\n--- Commit {c['id'][:7]}: {c['message'][:60]} ---\n{patch}\n"
+            # 長すぎる場合は切り詰め
+            if len(diff_text) > 15000:
+                diff_text = diff_text[:15000] + "\n... (差分が長いため省略)"
+    except Exception as e:
+        log.warning(f"Failed to fetch diff: {e}")
 
     # Geminiでレビュー生成
     prompt = REVIEW_PROMPT.format(
@@ -130,13 +128,19 @@ async def github_webhook(guild_id: int, request: Request):
         ) or "なし",
         inline=False,
     )
-    embed.add_field(name="AIレビュー", value=review[:1024], inline=False)
+    # レビューが短ければEmbedに、長ければ別メッセージで送信
+    if len(review) <= 1024:
+        embed.add_field(name="AIレビュー", value=review, inline=False)
 
     # 送信先チャンネル取得
     channel_id = bot.config.get_github_channel(guild_id)
     if channel_id:
         channel = bot.get_channel(channel_id)
         if channel:
-            await channel.send(embed=embed)
+            await channel.send(embed=embed, silent=True)
+            if len(review) > 1024:
+                for i in range(0, len(review), 1900):
+                    chunk = review[i:i + 1900]
+                    await channel.send(chunk, silent=True)
 
     return {"status": "processed", "commits": len(data.get("commits", []))}
