@@ -130,10 +130,10 @@ class CorpusManager:
         if not buf or not buf.messages:
             return
 
-        text = "\n".join(buf.messages)
         start = buf.first_message_at.strftime("%Y-%m-%d %H:%M")
         end = datetime.now(timezone.utc).strftime("%H:%M")
         display_name = f"#{buf.channel_name} | {start}-{end}"
+        text = f"チャンネル: #{buf.channel_name}\n期間: {start}-{end}\n\n" + "\n".join(buf.messages)
 
         if corpus_store_name:
             await self._upload_document(corpus_store_name, display_name, text)
@@ -196,18 +196,23 @@ class CorpusManager:
 
     # ------ RAG query ------
 
-    async def query(self, question: str, corpus_store_name: str, guild_id: int = 0) -> str:
+    async def query(self, question: str, corpus_store_name: str,
+                    guild_id: int = 0, members_info: str = "") -> str:
         if guild_id and not self._check_rate_limit(guild_id):
             return (
                 f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n"
                 "明日またたくさん聞いてねぽん！🙏"
             )
         try:
+            system = SYSTEM_INSTRUCTION
+            if members_info:
+                system += f"\n\n【メンバー情報】\n{members_info}"
+
             response = await self._client.aio.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=question,
                 config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
+                    system_instruction=system,
                     tools=[
                         types.Tool(
                             file_search=types.FileSearch(
@@ -253,7 +258,7 @@ class CorpusManager:
             if not lines:
                 continue
             display_name = f"#{channel.name} | {bucket_key}"
-            text = "\n".join(lines)
+            text = f"チャンネル: #{channel.name}\n期間: {bucket_key}\n\n" + "\n".join(lines)
             await self._upload_document(corpus_store_name, display_name, text)
 
         return count

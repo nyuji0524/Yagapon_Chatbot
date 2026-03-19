@@ -9,8 +9,11 @@ Step 6: Google Drive連携 (議事録・レポート保存先)
 Step 7: 過去ログ取り込み (全部/30日/180日)
 """
 
+import logging
 import os
 import discord
+
+log = logging.getLogger("yagapon.setup")
 from discord import app_commands
 from discord.ui import Select, View, Button, ChannelSelect
 
@@ -69,7 +72,7 @@ class BureauSelect(Select):
             await interaction.followup.send(
                 f"✅ 「**{bureau}**」として登録したぽん！コーパスも作成済みだぽん。\n"
                 f"次はこのサーバーで学習してほしくないチャンネルを選ぶぽん！",
-                view=Step2IgnoreView(),
+                view=Step2IgnoreView(interaction.guild),
             )
         except Exception as e:
             await interaction.followup.send(f"❌ エラーだぽん...: {e}")
@@ -83,36 +86,79 @@ class Step1BureauView(View):
 
 # ====== Step 2: 学習除外チャンネル ======
 
-class IgnoreChannelSelect(ChannelSelect):
-    def __init__(self):
-        super().__init__(
-            placeholder="学習しないチャンネルを選ぶぽん（複数OK）",
-            min_values=0,
-            max_values=25,
-            channel_types=[discord.ChannelType.text],
-        )
+class Step2IgnoreView(View):
+    """テキストチャンネル一覧をSelectMenuで表示（カテゴリ横断・25件超対応）"""
 
-    async def callback(self, interaction: discord.Interaction):
+    def __init__(self, guild: discord.Guild, page: int = 0):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.page = page
+        text_channels = [ch for ch in guild.text_channels]
+        self.all_channels = text_channels
+        self.page_size = 25
+        self.max_page = max(0, (len(text_channels) - 1) // self.page_size)
+
+        start = page * self.page_size
+        page_channels = text_channels[start:start + self.page_size]
+
+        options = []
+        for ch in page_channels:
+            category = ch.category.name if ch.category else "カテゴリなし"
+            options.append(discord.SelectOption(
+                label=f"#{ch.name}",
+                value=str(ch.id),
+                description=category,
+            ))
+
+        if options:
+            select = Select(
+                placeholder=f"学習しないチャンネルを選ぶぽん（{page+1}/{self.max_page+1}ページ）",
+                min_values=0,
+                max_values=len(options),
+                options=options,
+            )
+            select.callback = self._select_callback
+            self.add_item(select)
+
+    async def _select_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         bot = interaction.client
+        selected_ids = interaction.data.get("values", [])
 
-        for ch in self.values:
-            await bot.config.add_ignore_channel(interaction.guild_id, ch.id)
+        for ch_id in selected_ids:
+            await bot.config.add_ignore_channel(interaction.guild_id, int(ch_id))
 
-        ignored = ", ".join(f"<#{ch.id}>" for ch in self.values) if self.values else "なし"
-        await interaction.followup.send(
-            f"✅ 除外チャンネル: {ignored}\n"
-            f"次はGitHub連携の設定だぽん！",
+        ignored = ", ".join(f"<#{cid}>" for cid in selected_ids) if selected_ids else "なし"
+        if self.page < self.max_page:
+            await interaction.followup.send(
+                f"✅ 除外チャンネル追加: {ignored}\n"
+                f"まだチャンネルがあるぽん！次のページも確認してねぽん。",
+                view=Step2IgnoreView(self.guild, self.page + 1),
+            )
+        else:
+            await interaction.followup.send(
+                f"✅ 除外チャンネル追加: {ignored}\n"
+                f"次はGitHub連携の設定だぽん！",
+                view=Step3GithubView(),
+            )
+
+    @discord.ui.button(label="次のページ", style=discord.ButtonStyle.primary, emoji="➡️", row=1)
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        if self.page < self.max_page:
+            await interaction.response.edit_message(
+                view=Step2IgnoreView(self.guild, self.page + 1),
+            )
+        else:
+            await interaction.response.send_message("最後のページだぽん！", ephemeral=True)
+
+    @discord.ui.button(label="完了 → 次へ", style=discord.ButtonStyle.success, row=1)
+    async def done(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message(
+            "除外チャンネルの設定完了だぽん！\n次はGitHub連携だぽん！",
             view=Step3GithubView(),
         )
 
-
-class Step2IgnoreView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
-        self.add_item(IgnoreChannelSelect())
-
-    @discord.ui.button(label="スキップ (除外なし)", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="スキップ (除外なし)", style=discord.ButtonStyle.secondary, row=1)
     async def skip(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
             "除外チャンネルなしだぽん！\n次はGitHub連携だぽん！",
@@ -356,7 +402,9 @@ async def _run_backfill(interaction: discord.Interaction, days: int | None):
         return
 
     label = "全期間" if days is None else f"過去{days}日分"
-    await interaction.followup.send(f"📚 {label}の過去ログ取り込みを処理中だぽん...")
+    status_msg = await interaction.followup.send(
+        f"📚 {label}の過去ログ取り込みを処理中だぽん...", wait=True, silent=True
+    )
 
     from datetime import datetime, timedelta, timezone
     after = None
@@ -372,20 +420,21 @@ async def _run_backfill(interaction: discord.Interaction, days: int | None):
 
     for i, ch in enumerate(channels, 1):
         try:
-            count = await bot.corpus.backfill_channel(
-                ch, corpus,
-                after=after,
-                progress_callback=lambda c, _ch=ch, _i=i:
-                    interaction.followup.send(f"📖 #{_ch.name}: {c:,}件取得中... ({_i}/{len(channels)})"),
-            )
-            total += count
-            if count > 0:
-                await interaction.followup.send(f"✅ #{ch.name}: {count:,}件")
-        except Exception as e:
-            await interaction.followup.send(f"⚠️ #{ch.name}: {e}")
+            async def progress(c, _ch=ch, _i=i):
+                await status_msg.edit(
+                    content=f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件取得中... | 合計: {total:,}件"
+                )
 
-    await interaction.followup.send(
-        f"🎉 セットアップ完了だぽん！\n"
+            count = await bot.corpus.backfill_channel(ch, corpus, after=after, progress_callback=progress)
+            total += count
+            await status_msg.edit(
+                content=f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: {count:,}件完了 | 合計: {total:,}件"
+            )
+        except Exception as e:
+            log.warning(f"Backfill error #{ch.name}: {e}")
+
+    await status_msg.edit(
+        content=f"🎉 セットアップ完了だぽん！\n"
         f"合計 **{total:,}件** のメッセージを学習したぽん！\n"
         f"何でも聞いてねぽん！"
     )

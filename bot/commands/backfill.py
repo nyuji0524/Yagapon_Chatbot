@@ -2,10 +2,13 @@
 /backfill - 過去ログ取り込み (期間指定可)
 """
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
+
+log = logging.getLogger("yagapon.backfill")
 
 
 def register(bot):
@@ -47,25 +50,25 @@ def register(bot):
                 and not bot.config.is_ignored(interaction.guild_id, ch.id)
             ]
 
-        await interaction.followup.send(
-            f"📚 {len(channels)}チャンネルの{label}を取り込むぽん！しばらく待ってねぽん..."
+        status_msg = await interaction.followup.send(
+            f"📚 {len(channels)}チャンネルの{label}を取り込むぽん！しばらく待ってねぽん...",
+            wait=True, silent=True
         )
 
         total = 0
         for i, ch in enumerate(channels, 1):
             try:
-                async def progress(count, _ch=ch, _i=i):
-                    await interaction.followup.send(
-                        f"📖 #{_ch.name}: {count:,}件取得中... ({_i}/{len(channels)})"
+                async def progress(c, _ch=ch, _i=i):
+                    await status_msg.edit(
+                        content=f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件取得中... | 合計: {total:,}件"
                     )
 
-                count = await bot.corpus.backfill_channel(
-                    ch, corpus, after=after, progress_callback=progress
-                )
+                count = await bot.corpus.backfill_channel(ch, corpus, after=after, progress_callback=progress)
                 total += count
-                if count > 0:
-                    await interaction.followup.send(f"✅ #{ch.name}: {count:,}件完了")
+                await status_msg.edit(
+                    content=f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: {count:,}件完了 | 合計: {total:,}件"
+                )
             except Exception as e:
-                await interaction.followup.send(f"⚠️ #{ch.name}: エラー ({e})")
+                log.warning(f"Backfill error #{ch.name}: {e}")
 
-        await interaction.followup.send(f"🎉 取り込み完了！合計 **{total:,}件** 学習したぽん！")
+        await status_msg.edit(content=f"🎉 取り込み完了！合計 **{total:,}件** 学習したぽん！")

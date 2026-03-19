@@ -128,6 +128,27 @@ class YagaPon(discord.Client):
 
         await self._handle_question(message, corpus, guild_id)
 
+    def _build_members_info(self, guild_id: int) -> str:
+        """メンバー情報をテキストに変換"""
+        members = self.config.get_members(guild_id)
+        if not members:
+            return ""
+        lines = []
+        for uid, info in members.items():
+            name = info.get("name", "不明")
+            role = info.get("role", "")
+            tasks = ", ".join(info.get("tasks", []))
+            grade = info.get("grade", "")
+            parts = [name]
+            if role:
+                parts.append(f"役職:{role}")
+            if tasks:
+                parts.append(f"担当:{tasks}")
+            if grade:
+                parts.append(f"学年:{grade}")
+            lines.append(" | ".join(parts))
+        return "\n".join(lines)
+
     async def _handle_question(self, message: discord.Message, corpus: str, guild_id: int = 0):
         """RAGで質問に回答"""
         query = message.content
@@ -137,8 +158,10 @@ class YagaPon(discord.Client):
         if not query:
             return
 
+        members_info = self._build_members_info(guild_id) if guild_id else ""
+
         async with message.channel.typing():
-            answer = await self.corpus.query(query, corpus, guild_id=guild_id)
+            answer = await self.corpus.query(query, corpus, guild_id=guild_id, members_info=members_info)
             await self.send_split_message(message.channel, answer)
 
             # VCにいればTTSも
