@@ -6,6 +6,7 @@ import json
 import logging
 import os
 
+import aiohttp
 import discord
 from fastapi import APIRouter, HTTPException, Request
 from google import genai
@@ -73,10 +74,34 @@ async def github_webhook(guild_id: int, request: Request):
             f"  Files: {', '.join(files[:10])}\n"
         )
 
+    # GitHub APIでdiffを取得
+    diff_text = ""
+    compare_url = data.get("compare", "")
+    if compare_url:
+        diff_api_url = compare_url.replace("github.com", "api.github.com/repos").replace("/compare/", "/compare/") + ".diff"
+        # もしくは直接API
+        before = data.get("before", "")
+        after = data.get("after", "")
+        if before and after:
+            api_url = f"https://api.github.com/repos/{repo}/compare/{before}...{after}"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    headers = {"Accept": "application/vnd.github.v3.diff"}
+                    async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            diff_text = await resp.text()
+                            # 長すぎる場合は切り詰め
+                            if len(diff_text) > 10000:
+                                diff_text = diff_text[:10000] + "\n... (差分が長いため省略)"
+            except Exception as e:
+                log.warning(f"Failed to fetch diff: {e}")
+
     # Geminiでレビュー生成
     prompt = REVIEW_PROMPT.format(
         repo=repo, branch=branch, pusher=pusher, commits=commits_text
     )
+    if diff_text:
+        prompt += f"\n\n### コード差分\n```diff\n{diff_text}\n```"
 
     try:
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))

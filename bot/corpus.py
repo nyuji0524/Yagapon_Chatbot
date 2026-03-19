@@ -23,12 +23,18 @@ DAILY_QUERY_LIMIT = 400  # 1ギルドあたり1日の質問上限
 SYSTEM_INSTRUCTION = (
     "あなたは慶應義塾大学 矢上祭実行委員会の専属AI「おしゃべりやがぽん」だぽん。\n"
     "ユーザーの質問に対し、ナレッジベース（コード、議事録、Discordログ）を検索し、"
-    "事実に基づいて回答するぽん。\n"
+    "事実に基づいて回答するぽん。\n\n"
+    "【回答ルール】\n"
     "- ナレッジに含まれていない情報は、絶対に回答に含めてはいけないぽん。\n"
     "- もしナレッジに関連情報がない場合は「その件に関する情報は、"
     "今のボクの記憶には見当たらないぽん...🙏」と正直に答えるぽん。\n"
     "- 語尾には「ぽん」をつけるぽん。\n"
-    "- 回答は簡潔にするぽん。"
+    "- 回答は簡潔にするぽん。\n\n"
+    "【検索・回答の注意】\n"
+    "- 複数のチャンネル・期間・人物の情報を横断的に検索するぽん。\n"
+    "- 特定の発言者に偏らず、関連する全メンバーの発言を考慮するぽん。\n"
+    "- 人物について聞かれたら、その人の発言だけでなく他者がその人について言及した内容も探すぽん。\n"
+    "- ドキュメントの「参加者」「チャンネル」情報も参考にして、幅広く検索するぽん。"
 )
 
 
@@ -39,6 +45,7 @@ class MessageBuffer:
     channel_id: int
     first_message_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     messages: list[str] = field(default_factory=list)
+    authors: dict[str, int] = field(default_factory=dict)
 
 
 class CorpusManager:
@@ -95,6 +102,33 @@ class CorpusManager:
 
     async def delete_corpus(self, store_name: str):
         loop = asyncio.get_event_loop()
+
+        # まずストア内のドキュメントを全削除
+        while True:
+            docs = await loop.run_in_executor(
+                None,
+                lambda: self._client.file_search_stores.list_file_search_store_files(
+                    file_search_store_name=store_name,
+                    config={"page_size": 20},
+                ),
+            )
+            doc_list = list(docs)
+            if not doc_list:
+                break
+            for doc in doc_list:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda d=doc: self._client.file_search_stores.delete_file_search_store_file(
+                            file_search_store_name=store_name,
+                            file_search_store_file_name=d.name,
+                        ),
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to delete doc {doc.name}: {e}")
+            log.info(f"Deleted {len(doc_list)} docs from {store_name}")
+
+        # ストアを削除
         await loop.run_in_executor(
             None,
             lambda: self._client.file_search_stores.delete(
@@ -120,6 +154,7 @@ class CorpusManager:
         buf = self._buffers[key]
         ts = timestamp.strftime("%H:%M")
         buf.messages.append(f"[{ts}] [{author}]: {content}")
+        buf.authors[author] = buf.authors.get(author, 0) + 1
 
         # メッセージ数閾値
         if len(buf.messages) >= FLUSH_MESSAGE_THRESHOLD:
@@ -133,7 +168,7 @@ class CorpusManager:
         start = buf.first_message_at.strftime("%Y-%m-%d %H:%M")
         end = datetime.now(timezone.utc).strftime("%H:%M")
         display_name = f"#{buf.channel_name} | {start}-{end}"
-        text = f"チャンネル: #{buf.channel_name}\n期間: {start}-{end}\n\n" + "\n".join(buf.messages)
+        text = self._build_document_text(buf.channel_name, f"{start}-{end}", buf.messages, buf.authors)
 
         if corpus_store_name:
             await self._upload_document(corpus_store_name, display_name, text)
@@ -229,11 +264,28 @@ class CorpusManager:
 
     # ------ backfill ------
 
+    @staticmethod
+    def _build_document_text(channel_name: str, bucket_key: str, lines: list[str],
+                              authors: dict[str, int]) -> str:
+        """ドキュメントテキストを構築。参加者サマリー付き。"""
+        # 参加者サマリー（発言数順）
+        sorted_authors = sorted(authors.items(), key=lambda x: x[1], reverse=True)
+        participants = ", ".join(f"{name}({count}件)" for name, count in sorted_authors)
+
+        return (
+            f"チャンネル: #{channel_name}\n"
+            f"期間: {bucket_key}\n"
+            f"参加者: {participants}\n"
+            f"発言数: {len(lines)}\n\n"
+            + "\n".join(lines)
+        )
+
     async def backfill_channel(self, channel, corpus_store_name: str,
                                after=None, progress_callback=None) -> int:
         """チャンネルの履歴を取得してバッチアップロード。after=Noneで全量。件数を返す。"""
         count = 0
-        hour_bucket: dict[str, list[str]] = {}  # "YYYY-MM-DD HH:00" -> lines
+        # バケット: key -> {"lines": [...], "authors": {name: count}}
+        buckets: dict[str, dict] = {}
 
         async for message in channel.history(limit=None, after=after, oldest_first=True):
             if message.author.bot or len(message.content) < 4:
@@ -243,22 +295,56 @@ class CorpusManager:
 
             ts = message.created_at
             bucket_key = ts.strftime("%Y-%m-%d %H:00")
-            line = f"[{ts.strftime('%H:%M')}] [{message.author.display_name}]: {message.content}"
+            author_name = message.author.display_name
+            line = f"[{ts.strftime('%H:%M')}] [{author_name}]: {message.content}"
 
-            if bucket_key not in hour_bucket:
-                hour_bucket[bucket_key] = []
-            hour_bucket[bucket_key].append(line)
+            if bucket_key not in buckets:
+                buckets[bucket_key] = {"lines": [], "authors": {}}
+            buckets[bucket_key]["lines"].append(line)
+            buckets[bucket_key]["authors"][author_name] = buckets[bucket_key]["authors"].get(author_name, 0) + 1
             count += 1
 
             if progress_callback and count % 500 == 0:
                 await progress_callback(count)
 
+        # 小さすぎるバケットを隣接バケットと統合（最低10件）
+        merged = self._merge_small_buckets(buckets, min_lines=10)
+
         # バケットごとにアップロード
-        for bucket_key, lines in hour_bucket.items():
-            if not lines:
+        for bucket_key, data in merged.items():
+            if not data["lines"]:
                 continue
             display_name = f"#{channel.name} | {bucket_key}"
-            text = f"チャンネル: #{channel.name}\n期間: {bucket_key}\n\n" + "\n".join(lines)
+            text = self._build_document_text(
+                channel.name, bucket_key, data["lines"], data["authors"]
+            )
             await self._upload_document(corpus_store_name, display_name, text)
 
         return count
+
+    @staticmethod
+    def _merge_small_buckets(buckets: dict, min_lines: int = 10) -> dict:
+        """小さいバケットを次のバケットに統合してドキュメント品質を上げる"""
+        sorted_keys = sorted(buckets.keys())
+        if not sorted_keys:
+            return {}
+
+        merged = {}
+        current_key = sorted_keys[0]
+        current = {"lines": list(buckets[sorted_keys[0]]["lines"]),
+                    "authors": dict(buckets[sorted_keys[0]]["authors"])}
+
+        for key in sorted_keys[1:]:
+            if len(current["lines"]) < min_lines:
+                # 小さいので次と統合
+                current["lines"].extend(buckets[key]["lines"])
+                for author, cnt in buckets[key]["authors"].items():
+                    current["authors"][author] = current["authors"].get(author, 0) + cnt
+            else:
+                merged[current_key] = current
+                current_key = key
+                current = {"lines": list(buckets[key]["lines"]),
+                            "authors": dict(buckets[key]["authors"])}
+
+        merged[current_key] = current
+        return merged

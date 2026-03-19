@@ -51,7 +51,8 @@ class ConfirmCorpusDeleteView(discord.ui.View):
     @discord.ui.button(label="完全削除する", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content=f"コーパスを削除中だぽん... ⏳", view=None
+            content=f"コーパス内のドキュメントを削除中だぽん... ⏳\n（ドキュメント数が多いと少し時間がかかるぽん）",
+            view=None,
         )
 
         try:
