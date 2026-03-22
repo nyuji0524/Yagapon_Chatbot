@@ -216,7 +216,22 @@ class VoiceSession:
             # chatモードではSKIPしない（必ず返事する）
             if self.mode == VoiceMode.CHAT:
                 if not text or text.upper() == "SKIP":
-                    return "うんうん、なるほどぽん！"
+                    import random
+                    fallbacks = [
+                        "うんうん、なるほどぽん！",
+                        "へぇ〜、そうなんだぽん！",
+                        "おもしろいぽん！",
+                        "わかるわかるぽん〜！",
+                        "それいいねぽん！",
+                        "ふむふむ、続きが気になるぽん！",
+                        "すごいぽん！",
+                        "たしかに〜ぽん！",
+                        "えー！まじぽん？",
+                        "なるほどなるほどぽん〜",
+                        "いいと思うぽん！",
+                        "ほほ〜、勉強になるぽん！",
+                    ]
+                    return random.choice(fallbacks)
                 return text
             else:
                 if text.upper() == "SKIP" or not text:
