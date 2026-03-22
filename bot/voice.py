@@ -38,6 +38,7 @@ class VoiceSession:
         self._recording_done = asyncio.Event()
         self._realtime_task: asyncio.Task | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
+        self._last_audio_len: dict[int, int] = {}  # user_id -> 前回処理済みの音声バイト数
 
     async def start(self):
         self.voice_client = await self.channel.connect()
@@ -87,46 +88,52 @@ class VoiceSession:
             await asyncio.sleep(REALTIME_INTERVAL)
 
     async def _process_realtime_chunk(self):
-        """現在の録音チャンクを取得 → 文字起こし → 応答判定"""
+        """録音中のsinkから直接データを読み取り → 文字起こし → 応答判定"""
         if not self.voice_client or not self.voice_client.is_connected():
             return
 
-        # 録音を一時停止して音声を取得
-        self._recording_done.clear()
+        # 録音中のsinkから直接音声データを読み取る（録音は止めない）
+        current_audio = {}
         try:
-            if hasattr(self.voice_client, 'recording') and self.voice_client.recording:
-                self.voice_client.stop_recording()
-                await asyncio.wait_for(self._recording_done.wait(), timeout=10)
-        except (asyncio.TimeoutError, Exception) as e:
-            log.warning(f"Chunk recording stop error: {e}")
+            if hasattr(self.voice_client, '_reader') and self.voice_client._reader:
+                sink = self.voice_client._reader.sink
+                audio_data = getattr(sink, 'audio_data', {})
+                for user_id, audio in audio_data.items():
+                    if hasattr(audio, 'file'):
+                        pos = audio.file.tell()  # 現在位置を保存
+                        audio.file.seek(0)
+                        audio_bytes = audio.file.read()
+                        audio.file.seek(pos)  # 元に戻す
+                        if len(audio_bytes) > 1000:
+                            current_audio[user_id] = audio_bytes
+        except Exception as e:
+            log.error(f"Sink read error: {e}")
+            return
 
-        # すぐに録音を再開
-        if self.is_active and self.voice_client and self.voice_client.is_connected():
-            try:
-                sink = discord.sinks.WaveSink()
-                self.voice_client.start_recording(
-                    sink,
-                    self._recording_finished,
-                )
-            except Exception as e:
-                log.error(f"Failed to restart recording: {e}")
-                return
+        if not current_audio:
+            log.info("No audio data in sink yet")
+            return
 
-        # 直前のチャンクの音声を文字起こし
+        # 前回からの差分だけ文字起こし
         chunk_texts = []
-        for user_id, audio_data in list(self.full_audio.items()):
-            # 最新のチャンク分だけ処理（簡易: full_audioの末尾）
-            if len(audio_data) < 1000:
-                continue
+        for user_id, audio_bytes in current_audio.items():
+            prev_len = self._last_audio_len.get(user_id, 0)
+            if len(audio_bytes) <= prev_len + 1000:
+                continue  # 新しい音声がほぼない
 
+            self._last_audio_len[user_id] = len(audio_bytes)
+
+            # 差分の音声を文字起こし
+            new_audio = audio_bytes[prev_len:]
             member = self.channel.guild.get_member(user_id)
             name = member.display_name if member else f"User {user_id}"
 
-            # 直近の音声チャンクのみ文字起こし
-            text = await self._transcribe_audio(bytes(audio_data[-500000:]), name)
+            log.info(f"Transcribing {len(new_audio)} bytes from {name}")
+            text = await self._transcribe_audio(new_audio, name)
             if text and text.strip():
                 chunk_texts.append({"speaker": name, "text": text})
                 self.transcript.append(f"[{name}]: {text}")
+                log.info(f"Transcribed: [{name}]: {text[:50]}...")
 
         if not chunk_texts:
             return
