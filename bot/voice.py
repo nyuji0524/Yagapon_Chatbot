@@ -69,10 +69,28 @@ class VoiceSession:
     def _recording_finished(self, error):
         """録音完了コールバック（同期）"""
         if error:
-            log.error(f"Recording finished with error: {error}")
+            log.warning(f"Recording finished with error: {error}, will restart")
+            # エラーで録音が止まった場合、再開をスケジュール
+            if self.is_active:
+                asyncio.get_event_loop().call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._restart_recording())
+                )
         else:
             log.info("Recording finished callback called")
         self._recording_done.set()
+
+    async def _restart_recording(self):
+        """録音を再開"""
+        await asyncio.sleep(1)
+        if not self.is_active or not self.voice_client or not self.voice_client.is_connected():
+            return
+        try:
+            if not self.voice_client.is_recording():
+                sink = discord.sinks.WaveSink()
+                self.voice_client.start_recording(sink, self._recording_finished)
+                log.info("Recording restarted after error")
+        except Exception as e:
+            log.error(f"Failed to restart recording: {e}")
 
     async def _realtime_loop(self):
         """定期的に音声を取得 → 文字起こし → 応答"""
@@ -111,7 +129,6 @@ class VoiceSession:
             return
 
         if not current_audio:
-            log.info("No audio data in sink yet")
             return
 
         # 前回からの差分だけ文字起こし
