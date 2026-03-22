@@ -309,10 +309,26 @@ class VoiceSession:
         except Exception as e:
             log.error(f"Sink read error: {e}")
 
+    @staticmethod
+    def _pcm_to_wav(pcm_data: bytes, channels: int = 2, sample_rate: int = 48000, sample_width: int = 2) -> bytes:
+        """生のPCMデータにWAVヘッダーを付与"""
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_data)
+        return buf.getvalue()
+
     async def _transcribe_audio(self, audio_bytes: bytes, speaker_name: str) -> str:
         """Gemini Audio APIで音声を文字起こし"""
         if len(audio_bytes) < 1000:  # ほぼ無音
             return ""
+
+        # WAVヘッダーがなければ付与（sinkからの生PCMデータ対応）
+        if not audio_bytes[:4] == b'RIFF':
+            audio_bytes = self._pcm_to_wav(audio_bytes)
 
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
 
