@@ -76,12 +76,18 @@ class YagaPon(discord.Bot):
             minutes = await leave_voice(member.guild.id)
 
             if minutes and has_minutes:
-                # 通知先: GitHub通知チャンネル or システムチャンネル or 最初のテキストチャンネル
+                # 通知先の優先順位: GitHub通知チャンネル → システムチャンネル → 最初のテキストチャンネル
                 notify_ch = None
-                for ch in member.guild.text_channels:
-                    if ch.permissions_for(member.guild.me).send_messages:
-                        notify_ch = ch
-                        break
+                github_ch_id = self.config.get_github_channel(member.guild.id)
+                if github_ch_id:
+                    notify_ch = member.guild.get_channel(github_ch_id)
+                if not notify_ch and member.guild.system_channel:
+                    notify_ch = member.guild.system_channel
+                if not notify_ch:
+                    for ch in member.guild.text_channels:
+                        if ch.permissions_for(member.guild.me).send_messages:
+                            notify_ch = ch
+                            break
 
                 if notify_ch:
                     from bot.gdrive import upload_minutes
