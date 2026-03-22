@@ -66,34 +66,11 @@ class VoiceSession:
             log.error("Voice client not connected after join")
 
     def _recording_finished(self, error):
-        """録音完了コールバック（同期）- 新API: 引数はexceptionのみ"""
+        """録音完了コールバック（同期）"""
         if error:
-            log.error(f"Recording error: {error}")
-
-        try:
-            # VoiceClientからsinkを取得
-            if self.voice_client and hasattr(self.voice_client, '_reader') and self.voice_client._reader:
-                sink = self.voice_client._reader.sink
-                audio_data = getattr(sink, 'audio_data', {})
-
-                for user_id, audio in audio_data.items():
-                    if hasattr(audio, 'file'):
-                        audio_bytes = audio.file.read()
-                        audio.file.seek(0)
-                    elif isinstance(audio, bytes):
-                        audio_bytes = audio
-                    else:
-                        audio_bytes = bytes(audio)
-
-                    if user_id not in self.full_audio:
-                        self.full_audio[user_id] = bytearray()
-                    self.full_audio[user_id].extend(audio_bytes)
-
-                log.info(f"Recording chunk: {len(audio_data)} users, total {sum(len(v) for v in self.full_audio.values())} bytes")
-            else:
-                log.warning("No reader/sink found on voice client")
-        except Exception as e:
-            log.error(f"Recording callback error: {e}")
+            log.error(f"Recording finished with error: {error}")
+        else:
+            log.info("Recording finished callback called")
         self._recording_done.set()
 
     async def _realtime_loop(self):
@@ -254,18 +231,21 @@ class VoiceSession:
             # 録音を停止してデータを取得
             try:
                 if self.voice_client.is_recording():
-                    self._recording_done.clear()
+                    # stop前にsinkへの参照を保持
+                    sink = None
+                    if hasattr(self.voice_client, '_reader') and self.voice_client._reader:
+                        sink = self.voice_client._reader.sink
+
                     self.voice_client.stop_recording()
-                    # callbackが呼ばれるのを待つ
-                    try:
-                        await asyncio.wait_for(self._recording_done.wait(), timeout=15)
-                    except asyncio.TimeoutError:
-                        log.warning("Recording callback timed out, trying to read sink directly")
-                        # タイムアウト時は直接sinkからデータ取得
-                        self._read_sink_directly()
+                    await asyncio.sleep(1)  # データ書き込み完了を待つ
+
+                    # sinkからデータを読み取り
+                    if sink:
+                        self._read_from_sink(sink)
+                    else:
+                        log.warning("No sink reference found before stop")
             except Exception as e:
                 log.warning(f"Stop recording error: {e}")
-                self._read_sink_directly()
 
             await self.voice_client.disconnect()
 
@@ -273,27 +253,27 @@ class VoiceSession:
             return await self._generate_minutes()
         return None
 
-    def _read_sink_directly(self):
-        """sinkから直接データを読み取る（フォールバック）"""
+    def _read_from_sink(self, sink):
+        """sinkからオーディオデータを読み取る"""
         try:
-            if self.voice_client and hasattr(self.voice_client, '_reader') and self.voice_client._reader:
-                sink = self.voice_client._reader.sink
-                audio_data = getattr(sink, 'audio_data', {})
-                for user_id, audio in audio_data.items():
-                    if hasattr(audio, 'file'):
-                        audio_bytes = audio.file.read()
-                        audio.file.seek(0)
-                    elif isinstance(audio, bytes):
-                        audio_bytes = audio
-                    else:
-                        audio_bytes = bytes(audio)
+            audio_data = getattr(sink, 'audio_data', {})
+            log.info(f"Sink has {len(audio_data)} user(s) audio data")
+            for user_id, audio in audio_data.items():
+                if hasattr(audio, 'file'):
+                    audio.file.seek(0)
+                    audio_bytes = audio.file.read()
+                elif isinstance(audio, bytes):
+                    audio_bytes = audio
+                else:
+                    audio_bytes = bytes(audio)
 
-                    if user_id not in self.full_audio:
-                        self.full_audio[user_id] = bytearray()
-                    self.full_audio[user_id].extend(audio_bytes)
-                log.info(f"Direct sink read: {len(audio_data)} users, {sum(len(v) for v in self.full_audio.values())} bytes")
+                log.info(f"User {user_id}: {len(audio_bytes)} bytes of audio")
+                if user_id not in self.full_audio:
+                    self.full_audio[user_id] = bytearray()
+                self.full_audio[user_id].extend(audio_bytes)
+            log.info(f"Total audio: {sum(len(v) for v in self.full_audio.values())} bytes from {len(self.full_audio)} users")
         except Exception as e:
-            log.error(f"Direct sink read error: {e}")
+            log.error(f"Sink read error: {e}")
 
     async def _transcribe_audio(self, audio_bytes: bytes, speaker_name: str) -> str:
         """Gemini Audio APIで音声を文字起こし"""
