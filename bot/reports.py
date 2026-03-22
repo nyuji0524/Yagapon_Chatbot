@@ -155,4 +155,4 @@ async def post_weekly_report(bot, guild_id: int, channel: discord.TextChannel):
         color=discord.Color.teal(),
         timestamp=datetime.now(timezone.utc),
     )
-    await channel.send(embed=embed)
+    await channel.send(embed=embed, silent=True)

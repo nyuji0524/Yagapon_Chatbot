@@ -84,6 +84,10 @@ class Step1View(View):
         try:
             store_name = await self.wizard.bot.corpus.create_corpus(self.wizard.guild.id, bureau)
             await self.wizard.bot.config.set_bureau(self.wizard.guild.id, bureau, store_name)
+            # セットアップ回数を記録
+            g = self.wizard.bot.config._guild(self.wizard.guild.id)
+            g["setup_count"] = g.get("setup_count", 0) + 1
+            await self.wizard.bot.config._save()
             self.wizard.step = 1
             await show_step2(self.wizard)
         except Exception as e:
@@ -475,7 +479,6 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
 
 def register(bot):
     @bot.slash_command(name="setup", description="初期設定をするぽん！")
-    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
     async def setup_cmd(ctx: discord.ApplicationContext):
         existing = bot.config.get_bureau(ctx.guild_id)
         if existing:
@@ -483,6 +486,14 @@ def register(bot):
                 f"このサーバーは既に **{existing}** として設定済みだぽん！\n"
                 f"`/reset` でリセットしてねぽん。",
                 ephemeral=True,
+            )
+            return
+
+        # 2回目以降のsetup（reset後）は管理者のみ
+        setup_count = bot.config._guild(ctx.guild_id).get("setup_count", 0)
+        if setup_count > 0 and not ctx.author.guild_permissions.administrator:
+            await ctx.respond(
+                "再セットアップは管理者のみ実行できるぽん！", ephemeral=True
             )
             return
 

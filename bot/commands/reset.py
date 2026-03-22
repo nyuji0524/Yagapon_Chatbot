@@ -5,7 +5,7 @@ import discord
 
 def register(bot):
     @bot.slash_command(name="reset", description="このサーバーの設定をリセットするぽん")
-    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    @discord.default_permissions(administrator=True)
     async def reset_cmd(ctx: discord.ApplicationContext):
         guild_id = ctx.guild_id
         bureau = bot.config.get_bureau(guild_id)
@@ -41,7 +41,10 @@ class ConfirmResetView(discord.ui.View):
     async def config_only(self, button: discord.ui.Button, interaction: discord.Interaction):
         key = str(self.guild_id)
         if key in self.bot.config._config:
+            setup_count = self.bot.config._config[key].get("setup_count", 0)
             del self.bot.config._config[key]
+            # setup_countは保持（再setup時の管理者チェック用）
+            self.bot.config._config[key] = {"setup_count": setup_count}
             await self.bot.config._save()
 
         await interaction.response.edit_message(
@@ -67,10 +70,12 @@ class ConfirmResetView(discord.ui.View):
                 )
                 return
 
-        # 設定削除
+        # 設定削除（setup_countは保持）
         key = str(self.guild_id)
         if key in self.bot.config._config:
+            setup_count = self.bot.config._config[key].get("setup_count", 0)
             del self.bot.config._config[key]
+            self.bot.config._config[key] = {"setup_count": setup_count}
             await self.bot.config._save()
 
         await interaction.edit_original_response(
