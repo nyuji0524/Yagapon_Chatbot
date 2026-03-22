@@ -1,9 +1,8 @@
-"""YagaPon Discord Client - メイン処理"""
+"""YagaPon Discord Client - メイン処理 (pycord)"""
 
 import logging
 
 import discord
-from discord import app_commands
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
@@ -11,7 +10,7 @@ from bot.corpus import CorpusManager
 log = logging.getLogger("yagapon.client")
 
 
-class YagaPon(discord.Client):
+class YagaPon(discord.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -19,13 +18,11 @@ class YagaPon(discord.Client):
         intents.members = True
         super().__init__(intents=intents)
 
-        self.tree = app_commands.CommandTree(self)
         self.config = ConfigManager()
         self.corpus = CorpusManager()
 
-    async def setup_hook(self):
+        # コマンド登録
         from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd
-
         setup.register(self)
         status.register(self)
         ignore.register(self)
@@ -37,25 +34,13 @@ class YagaPon(discord.Client):
         reset.register(self)
         corpus_cmd.register(self)
 
-        await self.tree.sync()
-        self.corpus.start_flush_loop()
-        log.info("Slash commands synced, flush loop started.")
-
     async def on_ready(self):
-        # ギルドごとにコマンドを即時同期
-        for guild in self.guilds:
-            try:
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-                log.info(f"Commands synced to {guild.name}")
-            except Exception as e:
-                log.warning(f"Failed to sync commands to {guild.name}: {e}")
+        self.corpus.start_flush_loop()
         log.info(f"おしゃべりやがぽん起動: {self.user}")
 
     async def on_guild_join(self, guild: discord.Guild):
         for channel in guild.text_channels:
             if channel.permissions_for(guild.me).send_messages:
-                from bot.commands.setup import SetupView
                 await channel.send(
                     f"こんにちはぽん！矢上祭実行委員会「**{self.user.name}**」だぽん！\n"
                     f"このサーバーの会話を学習して、みんなの役に立ちたいぽん！\n"

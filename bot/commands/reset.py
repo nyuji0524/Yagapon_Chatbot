@@ -1,25 +1,24 @@
-"""コマンド: /reset - サーバー設定をリセット（コーパス削除オプション付き）"""
+"""コマンド: /reset - サーバー設定をリセット（コーパス削除オプション付き）pycord版"""
 
 import discord
-from discord import app_commands
 
 
 def register(bot):
-    @bot.tree.command(name="reset", description="このサーバーの設定をリセットするぽん")
-    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
-    async def reset_cmd(interaction: discord.Interaction):
-        guild_id = interaction.guild_id
+    @bot.slash_command(name="reset", description="このサーバーの設定をリセットするぽん")
+    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    async def reset_cmd(ctx: discord.ApplicationContext):
+        guild_id = ctx.guild_id
         bureau = bot.config.get_bureau(guild_id)
 
         if not bureau:
-            await interaction.response.send_message(
+            await ctx.respond(
                 "このサーバーにはまだ設定がないぽん！", ephemeral=True
             )
             return
 
         store_name = bot.config.get_corpus(guild_id)
         view = ConfirmResetView(bot, guild_id, bureau, store_name)
-        await interaction.response.send_message(
+        await ctx.respond(
             f"**⚠️ リセット方法を選んでねぽん**\n\n"
             f"局: **{bureau}**\n"
             f"コーパス: `{store_name or 'なし'}`\n\n"
@@ -28,13 +27,6 @@ def register(bot):
             view=view,
             ephemeral=True,
         )
-
-    @reset_cmd.error
-    async def reset_error(interaction: discord.Interaction, error):
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "管理者権限が必要だぽん！", ephemeral=True
-            )
 
 
 class ConfirmResetView(discord.ui.View):
@@ -46,7 +38,7 @@ class ConfirmResetView(discord.ui.View):
         self.store_name = store_name
 
     @discord.ui.button(label="設定のみリセット", style=discord.ButtonStyle.primary)
-    async def config_only(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def config_only(self, button: discord.ui.Button, interaction: discord.Interaction):
         key = str(self.guild_id)
         if key in self.bot.config._config:
             del self.bot.config._config[key]
@@ -60,7 +52,7 @@ class ConfirmResetView(discord.ui.View):
         )
 
     @discord.ui.button(label="設定+コーパス削除", style=discord.ButtonStyle.danger)
-    async def config_and_corpus(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def config_and_corpus(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.edit_message(
             content=f"設定とコーパスを削除中だぽん... ⏳", view=None
         )
@@ -87,7 +79,7 @@ class ConfirmResetView(discord.ui.View):
         )
 
     @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.edit_message(
             content="リセットをキャンセルしたぽん。", view=None
         )

@@ -1,22 +1,20 @@
 """
-/meigen - 名言bot
+/meigen - 名言bot (pycord)
 過去の会話からGeminiが選んだ面白い・印象的な発言を表示
 """
 
-import random
 import discord
-from discord import app_commands
 
 
 def register(bot):
-    @bot.tree.command(name="meigen", description="名言を表示するぽん！")
-    @app_commands.describe(user="特定ユーザーの名言を見たい場合")
-    async def meigen_cmd(interaction: discord.Interaction, user: discord.Member = None):
-        await interaction.response.defer()
+    @bot.slash_command(name="meigen", description="名言を表示するぽん！")
+    @discord.option("user", description="特定ユーザーの名言を見たい場合", type=discord.Member, required=False, default=None)
+    async def meigen_cmd(ctx: discord.ApplicationContext, user: discord.Member = None):
+        await ctx.defer()
 
-        corpus = bot.config.get_corpus(interaction.guild_id)
+        corpus = bot.config.get_corpus(ctx.guild_id)
         if not corpus:
-            await interaction.followup.send("先に `/setup` をしてほしいぽん！")
+            await ctx.followup.send("先に `/setup` をしてほしいぽん！")
             return
 
         if user:
@@ -48,4 +46,4 @@ def register(bot):
         if user:
             embed.set_footer(text=f"{user.display_name}の名言")
 
-        await interaction.followup.send(embed=embed)
+        await ctx.followup.send(embed=embed)

@@ -1,10 +1,10 @@
 """
-/setup - 多段階セットアップ
+/setup - 多段階セットアップ (pycord)
 Step 1: 局選択 (使用済みの局はグレーアウト) → コーパス作成
 Step 2: 学習除外チャンネル選択
 Step 3: GitHub連携 (通知ch + webhook URL案内)
 Step 4: リアクション絵文字登録
-Step 5: メンバー登録 (CSV形式でメッセージ入力)
+Step 5: メンバー登録 (ロール分類 → 自動登録)
 Step 6: Google Drive連携 (議事録・レポート保存先)
 Step 7: 過去ログ取り込み (全部/30日/180日)
 """
@@ -14,7 +14,6 @@ import os
 import discord
 
 log = logging.getLogger("yagapon.setup")
-from discord import app_commands
 from discord.ui import Select, View, Button, ChannelSelect
 
 BUREAUS = [
@@ -143,7 +142,7 @@ class Step2IgnoreView(View):
             )
 
     @discord.ui.button(label="次のページ", style=discord.ButtonStyle.primary, emoji="➡️", row=1)
-    async def next_page(self, interaction: discord.Interaction, button: Button):
+    async def next_page(self, button: Button, interaction: discord.Interaction):
         if self.page < self.max_page:
             await interaction.response.edit_message(
                 view=Step2IgnoreView(self.guild, self.page + 1),
@@ -152,14 +151,14 @@ class Step2IgnoreView(View):
             await interaction.response.send_message("最後のページだぽん！", ephemeral=True)
 
     @discord.ui.button(label="完了 → 次へ", style=discord.ButtonStyle.success, row=1)
-    async def done(self, interaction: discord.Interaction, button: Button):
+    async def done(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "除外チャンネルの設定完了だぽん！\n次はGitHub連携だぽん！",
             view=Step3GithubView(),
         )
 
     @discord.ui.button(label="スキップ (除外なし)", style=discord.ButtonStyle.secondary, row=1)
-    async def skip(self, interaction: discord.Interaction, button: Button):
+    async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "除外チャンネルなしだぽん！\n次はGitHub連携だぽん！",
             view=Step3GithubView(),
@@ -210,7 +209,7 @@ class Step3GithubView(View):
         self.add_item(GithubChannelSelect())
 
     @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
-    async def skip(self, interaction: discord.Interaction, button: Button):
+    async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "GitHub連携はスキップだぽん！\n次はリアクション設定だぽん！",
             view=Step4ReactionsView(),
@@ -224,7 +223,7 @@ class Step4ReactionsView(View):
         super().__init__(timeout=300)
 
     @discord.ui.button(label="リアクション有効化", style=discord.ButtonStyle.primary, emoji="✨")
-    async def enable(self, interaction: discord.Interaction, button: Button):
+    async def enable(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "リアクションに使う絵文字を設定するぽん！\n"
             "下のメッセージにそれぞれ使いたい絵文字でリアクションしてねぽん！\n"
@@ -234,7 +233,7 @@ class Step4ReactionsView(View):
         await collector.start()
 
     @discord.ui.button(label="リアクション無効", style=discord.ButtonStyle.secondary)
-    async def disable(self, interaction: discord.Interaction, button: Button):
+    async def disable(self, button: Button, interaction: discord.Interaction):
         bot = interaction.client
         await bot.config.set_reactions(interaction.guild_id, False, "💡", "😲", "😂")
         await interaction.response.send_message(
@@ -300,7 +299,7 @@ class Step5MemberView(View):
         super().__init__(timeout=300)
 
     @discord.ui.button(label="ロール分類 → メンバー登録", style=discord.ButtonStyle.primary, emoji="👥")
-    async def auto_register(self, interaction: discord.Interaction, button: Button):
+    async def auto_register(self, button: Button, interaction: discord.Interaction):
         guild = interaction.guild
         bot = interaction.client
         roles = [r for r in guild.roles if r.name != "@everyone"]
@@ -317,7 +316,7 @@ class Step5MemberView(View):
         class SetupRoleMappingView(RoleMappingView):
             """setup用: 保存後にメンバー自動登録 → Step6へ進む"""
             @discord.ui.button(label="保存してメンバー登録", style=discord.ButtonStyle.success, row=4)
-            async def save(self, interaction: discord.Interaction, button_: Button):
+            async def save(self, button_: Button, interaction: discord.Interaction):
                 await bot.config.set_role_mapping(guild.id, self.mapping)
 
                 # メンバー自動登録
@@ -344,7 +343,7 @@ class Step5MemberView(View):
         )
 
     @discord.ui.button(label="あとで登録する", style=discord.ButtonStyle.secondary)
-    async def skip(self, interaction: discord.Interaction, button: Button):
+    async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "メンバー登録はあとで `/member roles` → `/member sync` でもできるぽん！\n"
             "次はGoogle Drive連携だぽん！",
@@ -359,11 +358,11 @@ class Step6DriveView(View):
         super().__init__(timeout=300)
 
     @discord.ui.button(label="Google Driveフォルダを設定", style=discord.ButtonStyle.primary, emoji="📁")
-    async def set_drive(self, interaction: discord.Interaction, button: Button):
+    async def set_drive(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_modal(DriveUrlModal())
 
     @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
-    async def skip(self, interaction: discord.Interaction, button: Button):
+    async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "Google Drive連携はスキップだぽん！\n"
             "議事録やレポートはDiscord上にのみ投稿するぽん。\n\n"
@@ -372,16 +371,18 @@ class Step6DriveView(View):
         )
 
 
-class DriveUrlModal(discord.ui.Modal, title="Google Drive連携"):
-    drive_url = discord.ui.TextInput(
-        label="議事録・レポート保存先のフォルダURL",
-        placeholder="https://drive.google.com/drive/folders/xxxx",
-        max_length=500,
-    )
+class DriveUrlModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Google Drive連携")
+        self.add_item(discord.ui.InputText(
+            label="議事録・レポート保存先のフォルダURL",
+            placeholder="https://drive.google.com/drive/folders/xxxx",
+            max_length=500,
+        ))
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction):
         bot = interaction.client
-        url = str(self.drive_url).strip()
+        url = self.children[0].value.strip()
         await bot.config.set_drive_folder(interaction.guild_id, url)
         await interaction.response.send_message(
             f"✅ Google Drive連携: 設定済み\n"
@@ -403,7 +404,7 @@ async def _run_backfill(interaction: discord.Interaction, days: int | None):
 
     label = "全期間" if days is None else f"過去{days}日分"
     status_msg = await interaction.followup.send(
-        f"📚 {label}の過去ログ取り込みを処理中だぽん...", wait=True, silent=True
+        f"📚 {label}の過去ログ取り込みを処理中だぽん...", wait=True
     )
 
     from datetime import datetime, timedelta, timezone
@@ -461,25 +462,25 @@ class Step7BackfillView(View):
         return True
 
     @discord.ui.button(label="全部取り込む", style=discord.ButtonStyle.success, emoji="📚")
-    async def backfill_all(self, interaction: discord.Interaction, button: Button):
+    async def backfill_all(self, button: Button, interaction: discord.Interaction):
         if not await self._disable_buttons(interaction, "全期間"):
             return
         await _run_backfill(interaction, days=None)
 
     @discord.ui.button(label="過去180日", style=discord.ButtonStyle.primary, emoji="📅")
-    async def backfill_180(self, interaction: discord.Interaction, button: Button):
+    async def backfill_180(self, button: Button, interaction: discord.Interaction):
         if not await self._disable_buttons(interaction, "過去180日"):
             return
         await _run_backfill(interaction, days=180)
 
     @discord.ui.button(label="過去30日", style=discord.ButtonStyle.primary, emoji="📆")
-    async def backfill_30(self, interaction: discord.Interaction, button: Button):
+    async def backfill_30(self, button: Button, interaction: discord.Interaction):
         if not await self._disable_buttons(interaction, "過去30日"):
             return
         await _run_backfill(interaction, days=30)
 
     @discord.ui.button(label="あとでやる", style=discord.ButtonStyle.secondary)
-    async def skip(self, interaction: discord.Interaction, button: Button):
+    async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "🎉 セットアップ完了だぽん！\n"
             "過去ログは後から `/backfill` で取り込めるぽん！"
@@ -489,13 +490,13 @@ class Step7BackfillView(View):
 # ====== register ======
 
 def register(bot):
-    @bot.tree.command(name="setup", description="初期設定をするぽん！")
-    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
-    async def setup_cmd(interaction: discord.Interaction):
+    @bot.slash_command(name="setup", description="初期設定をするぽん！")
+    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    async def setup_cmd(ctx: discord.ApplicationContext):
         # 既にセットアップ済みかチェック
-        existing = bot.config.get_bureau(interaction.guild_id)
+        existing = bot.config.get_bureau(ctx.guild_id)
         if existing:
-            await interaction.response.send_message(
+            await ctx.respond(
                 f"このサーバーは既に **{existing}** として設定済みだぽん！\n"
                 f"やり直したい場合は先に `/reset` で設定をリセットしてねぽん。",
                 ephemeral=True,
@@ -505,17 +506,10 @@ def register(bot):
         # 使用済みの局を取得
         used_bureaus = set()
         for gid, gdata in bot.config._config.items():
-            if gid != str(interaction.guild_id) and "bureau" in gdata:
+            if gid != str(ctx.guild_id) and "bureau" in gdata:
                 used_bureaus.add(gdata["bureau"])
 
-        await interaction.response.send_message(
+        await ctx.respond(
             "セットアップを始めるぽん！まずは局を選んでねぽん！",
             view=Step1BureauView(used_bureaus),
         )
-
-    @setup_cmd.error
-    async def setup_error(interaction: discord.Interaction, error):
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "管理者権限が必要だぽん！", ephemeral=True
-            )

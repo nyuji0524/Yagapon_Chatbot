@@ -1,4 +1,4 @@
-"""VC 3モード - listen / meeting / chat + 声紋登録"""
+"""VC 3モード - listen / meeting / chat + 音声録音・文字起こし・リアルタイム応答"""
 
 import asyncio
 import io
@@ -9,14 +9,18 @@ from enum import Enum
 
 import discord
 from google import genai
+from google.genai import types
 
 log = logging.getLogger("yagapon.voice")
+
+# リアルタイム処理の間隔（秒）
+REALTIME_INTERVAL = 15
 
 
 class VoiceMode(Enum):
     LISTEN = "listen"    # 聞き専: 議事録作成のみ
-    MEETING = "meeting"  # 参加者: 議事録 + 質問対応
-    CHAT = "chat"        # おしゃべり: 議事録なし、積極発話
+    MEETING = "meeting"  # 参加者: 議事録 + リアルタイム応答
+    CHAT = "chat"        # おしゃべり: リアルタイム応答（議事録なし）
 
 
 class VoiceSession:
@@ -28,36 +32,280 @@ class VoiceSession:
         self.channel = channel
         self.mode = mode
         self.voice_client: discord.VoiceClient | None = None
-        self.transcript: list[str] = []
+        self.transcript: list[str] = []  # テキストチャットの記録
+        self.full_audio: dict[int, bytearray] = {}  # user_id -> 全音声（議事録用）
         self.is_active = False
+        self._recording_done = asyncio.Event()
+        self._realtime_task: asyncio.Task | None = None
+        self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
 
     async def start(self):
         self.voice_client = await self.channel.connect()
         self.is_active = True
         log.info(f"VC joined: {self.channel.name} (mode={self.mode.value})")
 
-        # TODO: 音声受信 + 文字起こし (Gemini Audio API)
-        # discord.pyのrecvは別途Sink実装が必要
-        # 将来: pyannote で話者分離 + Gemini で文字起こし
+        # 録音開始
+        try:
+            self.voice_client.start_recording(
+                discord.sinks.WaveSink(),
+                self._recording_finished,
+                self.channel,
+            )
+            log.info(f"Recording started in {self.channel.name}")
+        except Exception as e:
+            log.error(f"Failed to start recording: {e}")
+
+        # meeting/chatモードならリアルタイム処理ループ開始
+        if self.mode in (VoiceMode.MEETING, VoiceMode.CHAT):
+            self._realtime_task = asyncio.create_task(self._realtime_loop())
+
+    async def _recording_finished(self, sink, channel, *args):
+        """録音チャンク完了コールバック"""
+        for user_id, audio in sink.audio_data.items():
+            audio_bytes = audio.file.read()
+            # 全体音声に追記（議事録用）
+            if user_id not in self.full_audio:
+                self.full_audio[user_id] = bytearray()
+            self.full_audio[user_id].extend(audio_bytes)
+        self._recording_done.set()
+
+    async def _realtime_loop(self):
+        """定期的に音声を取得 → 文字起こし → 応答"""
+        await asyncio.sleep(REALTIME_INTERVAL)  # 最初の間隔を待つ
+
+        while self.is_active:
+            try:
+                await self._process_realtime_chunk()
+            except Exception as e:
+                log.error(f"Realtime processing error: {e}")
+            await asyncio.sleep(REALTIME_INTERVAL)
+
+    async def _process_realtime_chunk(self):
+        """現在の録音チャンクを取得 → 文字起こし → 応答判定"""
+        if not self.voice_client or not self.voice_client.is_connected():
+            return
+
+        # 録音を一時停止して音声を取得
+        self._recording_done.clear()
+        try:
+            if hasattr(self.voice_client, 'recording') and self.voice_client.recording:
+                self.voice_client.stop_recording()
+                await asyncio.wait_for(self._recording_done.wait(), timeout=10)
+        except (asyncio.TimeoutError, Exception) as e:
+            log.warning(f"Chunk recording stop error: {e}")
+
+        # すぐに録音を再開
+        if self.is_active and self.voice_client and self.voice_client.is_connected():
+            try:
+                self.voice_client.start_recording(
+                    discord.sinks.WaveSink(),
+                    self._recording_finished,
+                    self.channel,
+                )
+            except Exception as e:
+                log.error(f"Failed to restart recording: {e}")
+                return
+
+        # 直前のチャンクの音声を文字起こし
+        chunk_texts = []
+        for user_id, audio_data in list(self.full_audio.items()):
+            # 最新のチャンク分だけ処理（簡易: full_audioの末尾）
+            if len(audio_data) < 1000:
+                continue
+
+            member = self.channel.guild.get_member(user_id)
+            name = member.display_name if member else f"User {user_id}"
+
+            # 直近の音声チャンクのみ文字起こし
+            text = await self._transcribe_audio(bytes(audio_data[-500000:]), name)
+            if text and text.strip():
+                chunk_texts.append({"speaker": name, "text": text})
+                self.transcript.append(f"[{name}]: {text}")
+
+        if not chunk_texts:
+            return
+
+        # 応答が必要か判定 → 応答生成
+        response = await self._generate_realtime_response(chunk_texts)
+        if response:
+            await self.speak(response)
+            self._conversation_history.append({"role": "assistant", "text": response})
+
+    async def _generate_realtime_response(self, chunk_texts: list[dict]) -> str | None:
+        """文字起こし結果から応答が必要か判定し、必要なら応答を生成"""
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+
+        # 会話履歴を含めたコンテキスト
+        history = ""
+        if self._conversation_history:
+            recent = self._conversation_history[-10:]  # 直近10件
+            history = "\n".join(
+                f"[{'やがぽん' if h['role'] == 'assistant' else h.get('speaker', '?')}]: {h['text']}"
+                for h in recent
+            )
+
+        current = "\n".join(f"[{t['speaker']}]: {t['text']}" for t in chunk_texts)
+
+        # 会話履歴に追加
+        for t in chunk_texts:
+            self._conversation_history.append({"role": "user", "speaker": t["speaker"], "text": t["text"]})
+
+        if self.mode == VoiceMode.CHAT:
+            prompt = (
+                "あなたはボイスチャンネルで友達とおしゃべりしている「やがぽん」です。\n"
+                "以下の会話を聞いて、自然に会話に参加してください。\n"
+                "ただし、以下の場合は「SKIP」とだけ返してください：\n"
+                "- メンバー同士の会話に割り込む必要がないとき\n"
+                "- 特に自分に話しかけられていないとき\n"
+                "- 相槌だけで十分なとき\n\n"
+                "返答する場合は短く自然に（1-2文）。語尾に「ぽん」をつけて。\n\n"
+            )
+        else:  # MEETING
+            prompt = (
+                "あなたは会議に参加している「やがぽん」です。\n"
+                "以下の会話を聞いて、以下の場合のみ返答してください：\n"
+                "- 名前（やがぽん）を呼ばれたとき\n"
+                "- 質問されたとき\n"
+                "- 重要な情報を補足できるとき\n"
+                "それ以外は「SKIP」とだけ返してください。\n\n"
+                "返答する場合は簡潔に。語尾に「ぽん」をつけて。\n\n"
+            )
+
+        if history:
+            prompt += f"=== これまでの会話 ===\n{history}\n\n"
+        prompt += f"=== 今の発言 ===\n{current}"
+
+        try:
+            # meetingモードならRAG検索も使う
+            if self.mode == VoiceMode.MEETING:
+                corpus = self.bot.config.get_corpus(self.guild_id)
+                if corpus:
+                    response = await client.aio.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            tools=[
+                                types.Tool(
+                                    file_search=types.FileSearch(
+                                        file_search_store_names=[corpus]
+                                    )
+                                )
+                            ],
+                        ),
+                    )
+                else:
+                    response = await client.aio.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=prompt,
+                    )
+            else:
+                response = await client.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                )
+
+            text = (response.text or "").strip()
+            if text.upper() == "SKIP" or not text:
+                return None
+            return text
+        except Exception as e:
+            log.error(f"Realtime response error: {e}")
+            return None
 
     async def stop(self) -> str | None:
         self.is_active = False
+
+        # リアルタイム処理を停止
+        if self._realtime_task:
+            self._realtime_task.cancel()
+            try:
+                await self._realtime_task
+            except asyncio.CancelledError:
+                pass
+
         if self.voice_client and self.voice_client.is_connected():
+            # 録音を停止
+            try:
+                if hasattr(self.voice_client, 'recording') and self.voice_client.recording:
+                    self._recording_done.clear()
+                    self.voice_client.stop_recording()
+                    await asyncio.wait_for(self._recording_done.wait(), timeout=15)
+            except asyncio.TimeoutError:
+                log.warning("Recording callback timed out")
+            except Exception as e:
+                log.warning(f"Stop recording error: {e}")
+
             await self.voice_client.disconnect()
 
-        if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING) and self.transcript:
+        if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
             return await self._generate_minutes()
         return None
 
-    async def _generate_minutes(self) -> str:
-        """議事録を生成"""
-        transcript_text = "\n".join(self.transcript)
+    async def _transcribe_audio(self, audio_bytes: bytes, speaker_name: str) -> str:
+        """Gemini Audio APIで音声を文字起こし"""
+        if len(audio_bytes) < 1000:  # ほぼ無音
+            return ""
+
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
 
+        try:
+            loop = asyncio.get_event_loop()
+            uploaded = await loop.run_in_executor(
+                None,
+                lambda: client.files.upload(
+                    file=io.BytesIO(audio_bytes),
+                    config={"mime_type": "audio/wav", "display_name": f"vc-{speaker_name}"},
+                ),
+            )
+
+            response = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_uri(file_uri=uploaded.uri, mime_type="audio/wav"),
+                    f"この音声を日本語で文字起こししてください。話者は「{speaker_name}」です。\n"
+                    "発言内容をそのまま書き起こしてください。無音部分は省略してください。\n"
+                    "無音のみの場合は空文字を返してください。"
+                ],
+            )
+
+            # アップロードしたファイルを削除
+            try:
+                await loop.run_in_executor(None, lambda: client.files.delete(name=uploaded.name))
+            except Exception:
+                pass
+
+            return response.text or ""
+        except Exception as e:
+            log.error(f"Transcription error for {speaker_name}: {e}")
+            return ""
+
+    async def _generate_minutes(self) -> str:
+        """全体の音声文字起こし + テキストから議事録を生成"""
+        # リアルタイム処理で既に文字起こし済みならtranscriptを使う
+        if self.transcript:
+            all_content = self.transcript
+        else:
+            # 未処理の音声を文字起こし
+            all_content = []
+            for user_id, audio_bytes in self.full_audio.items():
+                if len(audio_bytes) < 1000:
+                    continue
+                member = self.channel.guild.get_member(user_id)
+                name = member.display_name if member else f"User {user_id}"
+                text = await self._transcribe_audio(bytes(audio_bytes), name)
+                if text:
+                    all_content.append(f"【{name}】\n{text}")
+
+        if not all_content:
+            return "会議の内容が記録されていないぽん..."
+
+        transcript_text = "\n".join(all_content)
+
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
         response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=(
-                "以下の会議の文字起こしから、構造化された議事録を作成してください。\n"
+                "以下の会議の記録から、構造化された議事録を作成してください。\n"
                 "形式: 日時、参加者、議題、議論内容、決定事項、アクションアイテム\n\n"
                 f"{transcript_text}"
             ),

@@ -2,10 +2,10 @@
 /member sync - サーバーのメンバー+ロールから自動登録
 /member register <nickname> - 自分の呼び名を変更
 /member list - 登録メンバー一覧
+/member roles - ロール分類設定
 """
 
 import discord
-from discord import app_commands
 
 
 def _classify_member_roles(member: discord.Member, role_mapping: dict) -> dict:
@@ -37,17 +37,17 @@ def _classify_member_roles(member: discord.Member, role_mapping: dict) -> dict:
 
 
 def register(bot):
-    group = app_commands.Group(name="member", description="メンバー管理だぽん！")
+    group = bot.create_group("member", "メンバー管理だぽん！")
 
     @group.command(name="sync", description="サーバーメンバーをロールから自動登録するぽん！")
-    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
-    async def member_sync(interaction: discord.Interaction):
-        await interaction.response.defer()
-        guild = interaction.guild
+    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    async def member_sync(ctx: discord.ApplicationContext):
+        await ctx.defer()
+        guild = ctx.guild
         role_mapping = bot.config.get_role_mapping(guild.id)
 
         if not role_mapping:
-            await interaction.followup.send(
+            await ctx.followup.send(
                 "⚠️ ロールの分類がまだ設定されてないぽん！\n"
                 "`/member roles` で役職・担当・学年のロールを設定してねぽん。"
             )
@@ -66,68 +66,54 @@ def register(bot):
             members[uid] = info
 
         await bot.config.set_members(guild.id, members)
-        await interaction.followup.send(
+        await ctx.followup.send(
             f"✅ **{len(human_members)}人** をロールから登録/更新したぽん！\n"
             f"`/member register` で呼び名を変更できるぽん。"
         )
 
-    @member_sync.error
-    async def sync_error(interaction: discord.Interaction, error):
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "管理者権限が必要だぽん！", ephemeral=True
-            )
-
     @group.command(name="roles", description="役職・担当・学年のロールを分類するぽん！")
-    # @app_commands.checks.has_permissions(administrator=True)  # TODO: テスト後に戻す
-    async def member_roles(interaction: discord.Interaction):
-        guild = interaction.guild
+    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    async def member_roles(ctx: discord.ApplicationContext):
+        guild = ctx.guild
         roles = [r for r in guild.roles if r.name != "@everyone"]
         if not roles:
-            await interaction.response.send_message("ロールがないぽん...", ephemeral=True)
+            await ctx.respond("ロールがないぽん...", ephemeral=True)
             return
 
         view = RoleMappingView(bot, guild, roles)
-        await interaction.response.send_message(
+        await ctx.respond(
             "ロールをカテゴリ別に分類するぽん！\n"
             "それぞれのプルダウンから該当するロールを選んでねぽん。",
             view=view,
             ephemeral=True,
         )
 
-    @member_roles.error
-    async def roles_error(interaction: discord.Interaction, error):
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "管理者権限が必要だぽん！", ephemeral=True
-            )
-
     @group.command(name="register", description="自分の呼び名を登録するぽん！")
-    @app_commands.describe(nickname="呼ばれたい名前")
-    async def member_register(interaction: discord.Interaction, nickname: str):
-        guild_id = interaction.guild_id
-        uid = str(interaction.user.id)
+    @discord.option("nickname", description="呼ばれたい名前")
+    async def member_register(ctx: discord.ApplicationContext, nickname: str):
+        guild_id = ctx.guild_id
+        uid = str(ctx.author.id)
         members = bot.config.get_members(guild_id)
 
         if uid not in members:
             # 未登録なら基本情報で追加
             role_mapping = bot.config.get_role_mapping(guild_id)
-            info = _classify_member_roles(interaction.user, role_mapping)
+            info = _classify_member_roles(ctx.author, role_mapping)
             members[uid] = info
 
         members[uid]["nickname"] = nickname
         await bot.config.set_members(guild_id, members)
 
-        await interaction.response.send_message(
+        await ctx.respond(
             f"✅ 呼び名を「**{nickname}**」に設定したぽん！",
             ephemeral=True,
         )
 
     @group.command(name="list", description="登録メンバー一覧を表示するぽん！")
-    async def member_list(interaction: discord.Interaction):
-        members = bot.config.get_members(interaction.guild_id)
+    async def member_list(ctx: discord.ApplicationContext):
+        members = bot.config.get_members(ctx.guild_id)
         if not members:
-            await interaction.response.send_message(
+            await ctx.respond(
                 "まだメンバーが登録されてないぽん。\n"
                 "管理者が `/member roles` → `/member sync` してねぽん！"
             )
@@ -148,9 +134,7 @@ def register(bot):
                 inline=False,
             )
 
-        await interaction.response.send_message(embed=embed)
-
-    bot.tree.add_command(group)
+        await ctx.respond(embed=embed)
 
 
 class RoleMappingView(discord.ui.View):
@@ -177,7 +161,7 @@ class RoleMappingView(discord.ui.View):
         ))
 
     @discord.ui.button(label="保存する", style=discord.ButtonStyle.success, row=4)
-    async def save(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def save(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.bot.config.set_role_mapping(self.guild.id, self.mapping)
 
         summary = []
@@ -212,7 +196,4 @@ class RoleCategorySelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.parent_view.mapping[self.category] = [int(v) for v in self.values]
-        selected = ", ".join(
-            opt.label for opt in self.options if opt.value in self.values
-        )
         await interaction.response.defer()

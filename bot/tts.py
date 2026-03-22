@@ -12,7 +12,7 @@ log = logging.getLogger("yagapon.tts")
 VOICE = "ja-JP-NanamiNeural"
 
 
-async def speak_in_vc(bot: discord.Client, message: discord.Message, text: str):
+async def speak_in_vc(bot, message: discord.Message, text: str):
     """メッセージ送信者がVCにいれば、そこに入って読み上げる"""
     if not message.guild:
         return

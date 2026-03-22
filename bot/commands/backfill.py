@@ -1,38 +1,41 @@
 """
-/backfill - 過去ログ取り込み (期間指定可)
+/backfill - 過去ログ取り込み (期間指定可) - pycord
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
 
 import discord
-from discord import app_commands
 
 log = logging.getLogger("yagapon.backfill")
 
 
 def register(bot):
-    @bot.tree.command(name="backfill", description="過去ログを取り込むぽん！")
-    @app_commands.describe(
-        days="何日分遡るか (省略で全量)",
-        channel="特定チャンネルのみ取り込む場合に指定（省略で全チャンネル）",
+    @bot.slash_command(name="backfill", description="過去ログを取り込むぽん！")
+    @discord.option(
+        "days", description="何日分遡るか (省略で全量)",
+        choices=[
+            discord.OptionChoice("全部", 0),
+            discord.OptionChoice("過去30日", 30),
+            discord.OptionChoice("過去180日", 180),
+            discord.OptionChoice("過去365日", 365),
+        ],
+        default=0,
     )
-    @app_commands.choices(days=[
-        app_commands.Choice(name="全部", value=0),
-        app_commands.Choice(name="過去30日", value=30),
-        app_commands.Choice(name="過去180日", value=180),
-        app_commands.Choice(name="過去365日", value=365),
-    ])
+    @discord.option(
+        "channel", description="特定チャンネルのみ取り込む場合に指定",
+        type=discord.TextChannel, required=False, default=None,
+    )
     async def backfill_cmd(
-        interaction: discord.Interaction,
+        ctx: discord.ApplicationContext,
         days: int = 0,
         channel: discord.TextChannel = None,
     ):
-        await interaction.response.defer()
+        await ctx.defer()
 
-        corpus = bot.config.get_corpus(interaction.guild_id)
+        corpus = bot.config.get_corpus(ctx.guild_id)
         if not corpus:
-            await interaction.followup.send("先に `/setup` をしてほしいぽん！")
+            await ctx.followup.send("先に `/setup` をしてほしいぽん！")
             return
 
         after = None
@@ -45,14 +48,14 @@ def register(bot):
             channels = [channel]
         else:
             channels = [
-                ch for ch in interaction.guild.text_channels
-                if ch.permissions_for(interaction.guild.me).read_message_history
-                and not bot.config.is_ignored(interaction.guild_id, ch.id)
+                ch for ch in ctx.guild.text_channels
+                if ch.permissions_for(ctx.guild.me).read_message_history
+                and not bot.config.is_ignored(ctx.guild_id, ch.id)
             ]
 
-        status_msg = await interaction.followup.send(
+        status_msg = await ctx.followup.send(
             f"📚 {len(channels)}チャンネルの{label}を取り込むぽん！しばらく待ってねぽん...",
-            wait=True, silent=True
+            wait=True,
         )
 
         total = 0

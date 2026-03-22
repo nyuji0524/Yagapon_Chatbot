@@ -1,18 +1,18 @@
 """
-/status - 現在の設定状況を表示
+/status - 現在の設定状況を表示 (pycord)
 """
 
 import discord
 
 
 def register(bot):
-    @bot.tree.command(name="status", description="現在の設定状況を確認するぽん！")
-    async def status_cmd(interaction: discord.Interaction):
-        gid = interaction.guild_id
+    @bot.slash_command(name="status", description="現在の設定状況を確認するぽん！")
+    async def status_cmd(ctx: discord.ApplicationContext):
+        gid = ctx.guild_id
         bureau = bot.config.get_bureau(gid)
 
         if not bureau:
-            await interaction.response.send_message(
+            await ctx.respond(
                 "🔴 まだ設定されていないぽん。`/setup` を実行してほしいぽん。"
             )
             return
@@ -44,4 +44,4 @@ def register(bot):
             ignore_str = ", ".join(f"<#{cid}>" for cid in ignored[:10])
             embed.add_field(name="学習除外", value=ignore_str, inline=False)
 
-        await interaction.response.send_message(embed=embed)
+        await ctx.respond(embed=embed)
