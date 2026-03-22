@@ -75,10 +75,12 @@ class VoiceSession:
 
     async def _realtime_loop(self):
         """定期的に音声を取得 → 文字起こし → 応答"""
+        log.info(f"Realtime loop started (interval={REALTIME_INTERVAL}s)")
         await asyncio.sleep(REALTIME_INTERVAL)  # 最初の間隔を待つ
 
         while self.is_active:
             try:
+                log.info("Processing realtime chunk...")
                 await self._process_realtime_chunk()
             except Exception as e:
                 log.error(f"Realtime processing error: {e}")
