@@ -14,7 +14,7 @@ import os
 import discord
 
 log = logging.getLogger("yagapon.setup")
-from discord.ui import Select, View, Button, ChannelSelect
+from discord.ui import Select, View, Button
 
 BUREAUS = [
     ("IT局", "🩵"), ("総務局", "🩶"), ("装飾局", "💛"), ("ステージ局", "❤️"),
@@ -138,7 +138,7 @@ class Step2IgnoreView(View):
             await interaction.followup.send(
                 f"✅ 除外チャンネル追加: {ignored}\n"
                 f"次はGitHub連携の設定だぽん！",
-                view=Step3GithubView(),
+                view=Step3GithubView(interaction.guild),
             )
 
     @discord.ui.button(label="次のページ", style=discord.ButtonStyle.primary, emoji="➡️", row=1)
@@ -154,42 +154,53 @@ class Step2IgnoreView(View):
     async def done(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "除外チャンネルの設定完了だぽん！\n次はGitHub連携だぽん！",
-            view=Step3GithubView(),
+            view=Step3GithubView(interaction.guild),
         )
 
     @discord.ui.button(label="スキップ (除外なし)", style=discord.ButtonStyle.secondary, row=1)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "除外チャンネルなしだぽん！\n次はGitHub連携だぽん！",
-            view=Step3GithubView(),
+            view=Step3GithubView(interaction.guild),
         )
 
 
 # ====== Step 3: GitHub連携 (通知ch + webhook URL案内) ======
 
-class GithubChannelSelect(ChannelSelect):
-    def __init__(self):
+class GithubChannelSelect(Select):
+    def __init__(self, guild: discord.Guild):
+        text_channels = [
+            ch for ch in guild.text_channels
+            if ch.permissions_for(guild.me).send_messages
+        ]
+        options = [
+            discord.SelectOption(
+                label=f"#{ch.name}",
+                value=str(ch.id),
+                description=ch.category.name if ch.category else "カテゴリなし",
+            )
+            for ch in text_channels[:25]
+        ]
         super().__init__(
             placeholder="GitHub通知を送るチャンネルを選ぶぽん",
             min_values=1,
             max_values=1,
-            channel_types=[discord.ChannelType.text],
+            options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         bot = interaction.client
-        ch = self.values[0]
-        await bot.config.set_github_channel(interaction.guild_id, ch.id)
+        ch_id = int(self.values[0])
+        await bot.config.set_github_channel(interaction.guild_id, ch_id)
 
         # webhook URL案内
         api_host = os.environ.get("API_HOST", "https://あなたのサーバー")
         webhook_url = f"{api_host}/webhook/github/{interaction.guild_id}"
         secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-        secret_display = f"`{secret}`" if secret else "⚠️ 未設定（.envにGITHUB_WEBHOOK_SECRETを設定してね）"
 
         await interaction.followup.send(
-            f"✅ GitHub通知: <#{ch.id}>\n\n"
+            f"✅ GitHub通知: <#{ch_id}>\n\n"
             f"📌 **GitHubリポジトリ → Settings → Webhooks → Add webhook**\n"
             f"```\n"
             f"Payload URL: {webhook_url}\n"
@@ -204,9 +215,10 @@ class GithubChannelSelect(ChannelSelect):
 
 
 class Step3GithubView(View):
-    def __init__(self):
+    def __init__(self, guild: discord.Guild = None):
         super().__init__(timeout=300)
-        self.add_item(GithubChannelSelect())
+        if guild:
+            self.add_item(GithubChannelSelect(guild))
 
     @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
