@@ -1,12 +1,6 @@
 """
-/setup - 多段階セットアップ (pycord)
-Step 1: 局選択 (使用済みの局はグレーアウト) → コーパス作成
-Step 2: 学習除外チャンネル選択
-Step 3: GitHub連携 (通知ch + webhook URL案内)
-Step 4: リアクション絵文字登録
-Step 5: メンバー登録 (ロール分類 → 自動登録)
-Step 6: Google Drive連携 (議事録・レポート保存先)
-Step 7: 過去ログ取り込み (全部/30日/180日)
+/setup - 1メッセージ完結型セットアップ (pycord)
+全ステップを同一メッセージの編集で進行。重複登録防止。
 """
 
 import logging
@@ -22,260 +16,236 @@ BUREAUS = [
 ]
 
 
-# ====== Step 1: 局選択 (使用済みはグレーアウト) ======
+class SetupWizard:
+    """1つのメッセージでセットアップを進行"""
 
-class BureauSelect(Select):
-    def __init__(self, used_bureaus: set[str]):
+    def __init__(self, bot, guild: discord.Guild, message: discord.Message):
+        self.bot = bot
+        self.guild = guild
+        self.message = message  # 編集対象の固定メッセージ
+        self.step = 0
+        self.completed = {
+            "bureau": False, "ignore": False, "github": False,
+            "reactions": False, "members": False, "drive": False, "backfill": False,
+        }
+
+    def _progress_bar(self) -> str:
+        steps = ["局選択", "除外CH", "GitHub", "リアクション", "メンバー", "Drive", "過去ログ"]
+        parts = []
+        for i, name in enumerate(steps):
+            if i < self.step:
+                parts.append(f"✅ {name}")
+            elif i == self.step:
+                parts.append(f"▶️ **{name}**")
+            else:
+                parts.append(f"⬜ {name}")
+        return " → ".join(parts)
+
+    async def update(self, content: str, view: View):
+        """メッセージを編集して次のステップを表示"""
+        full_content = f"**🔧 おしゃべりやがぽん セットアップ**\n{self._progress_bar()}\n\n{content}"
+        try:
+            await self.message.edit(content=full_content, view=view)
+        except Exception as e:
+            log.error(f"Setup message edit error: {e}")
+
+
+# ====== Step 1: 局選択 ======
+
+class Step1View(View):
+    def __init__(self, wizard: SetupWizard, used_bureaus: set[str]):
+        super().__init__(timeout=600)
+        self.wizard = wizard
         options = []
         for name, emoji in BUREAUS:
             taken = name in used_bureaus
             options.append(discord.SelectOption(
-                label=name,
-                emoji=emoji,
-                description="⛔ 他のサーバーで使用中" if taken else f"{name}のサーバーとして登録",
-                default=False,
+                label=name, emoji=emoji,
+                description="⛔ 使用中" if taken else f"{name}として登録",
             ))
-        super().__init__(
-            placeholder="ここは何局のサーバーだぽん？",
-            min_values=1, max_values=1,
-            options=options,
-        )
+        select = Select(placeholder="局を選んでねぽん", min_values=1, max_values=1, options=options)
+        select.callback = self._select
         self._used = used_bureaus
+        self.add_item(select)
 
-    async def callback(self, interaction: discord.Interaction):
-        bureau = self.values[0]
+    async def _select(self, interaction: discord.Interaction):
+        bureau = interaction.data["values"][0]
         if bureau in self._used:
-            await interaction.response.send_message(
-                f"❌ 「{bureau}」はすでに他のサーバーで使われてるぽん！別の局を選んでねぽん。",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"❌ 「{bureau}」は使用中だぽん！", ephemeral=True)
             return
 
-        bot = interaction.client
-
-        # 既に局が設定済みなら再実行を防止（コーパス重複防止）
-        existing = bot.config.get_bureau(interaction.guild_id)
+        existing = self.wizard.bot.config.get_bureau(self.wizard.guild.id)
         if existing:
             await interaction.response.send_message(
-                f"既に「**{existing}**」として登録済みだぽん！\n"
-                f"変更したい場合は `/reset` でリセットしてねぽん。",
-                ephemeral=True,
-            )
+                f"既に「{existing}」として登録済みだぽん！`/reset` してねぽん。", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
-            store_name = await bot.corpus.create_corpus(interaction.guild_id, bureau)
-            await bot.config.set_bureau(interaction.guild_id, bureau, store_name)
-            await interaction.followup.send(
-                f"✅ 「**{bureau}**」として登録したぽん！コーパスも作成済みだぽん。\n"
-                f"次はこのサーバーで学習してほしくないチャンネルを選ぶぽん！",
-                view=Step2IgnoreView(interaction.guild),
-                silent=True,
-            )
+            store_name = await self.wizard.bot.corpus.create_corpus(self.wizard.guild.id, bureau)
+            await self.wizard.bot.config.set_bureau(self.wizard.guild.id, bureau, store_name)
+            self.wizard.step = 1
+            await show_step2(self.wizard)
         except Exception as e:
-            await interaction.followup.send(f"❌ エラーだぽん...: {e}", silent=True)
+            await interaction.followup.send(f"❌ エラー: {e}", ephemeral=True)
 
 
-class Step1BureauView(View):
-    def __init__(self, used_bureaus: set[str]):
-        super().__init__(timeout=300)
-        self.add_item(BureauSelect(used_bureaus))
+# ====== Step 2: 除外チャンネル ======
+
+async def show_step2(wizard: SetupWizard, page: int = 0):
+    channels = [ch for ch in wizard.guild.text_channels]
+    page_size = 25
+    max_page = max(0, (len(channels) - 1) // page_size)
+    page_channels = channels[page * page_size:(page + 1) * page_size]
+
+    view = Step2View(wizard, page, max_page)
+
+    options = [
+        discord.SelectOption(
+            label=f"#{ch.name}", value=str(ch.id),
+            description=ch.category.name if ch.category else "カテゴリなし",
+        )
+        for ch in page_channels
+    ]
+    if options:
+        select = Select(
+            placeholder=f"除外チャンネル ({page+1}/{max_page+1})",
+            min_values=0, max_values=len(options), options=options,
+        )
+
+        async def on_select(interaction: discord.Interaction):
+            await interaction.response.defer()
+            for ch_id in interaction.data.get("values", []):
+                await wizard.bot.config.add_ignore_channel(wizard.guild.id, int(ch_id))
+
+        select.callback = on_select
+        view.add_item(select)
+
+    await wizard.update("学習しないチャンネルを選んでねぽん。選ばなくてもOKだぽん。", view)
 
 
-# ====== Step 2: 学習除外チャンネル ======
-
-class Step2IgnoreView(View):
-    """テキストチャンネル一覧をSelectMenuで表示（カテゴリ横断・25件超対応）"""
-
-    def __init__(self, guild: discord.Guild, page: int = 0):
-        super().__init__(timeout=300)
-        self.guild = guild
+class Step2View(View):
+    def __init__(self, wizard: SetupWizard, page: int, max_page: int):
+        super().__init__(timeout=600)
+        self.wizard = wizard
         self.page = page
-        text_channels = [ch for ch in guild.text_channels]
-        self.all_channels = text_channels
-        self.page_size = 25
-        self.max_page = max(0, (len(text_channels) - 1) // self.page_size)
-
-        start = page * self.page_size
-        page_channels = text_channels[start:start + self.page_size]
-
-        options = []
-        for ch in page_channels:
-            category = ch.category.name if ch.category else "カテゴリなし"
-            options.append(discord.SelectOption(
-                label=f"#{ch.name}",
-                value=str(ch.id),
-                description=category,
-            ))
-
-        if options:
-            select = Select(
-                placeholder=f"学習しないチャンネルを選ぶぽん（{page+1}/{self.max_page+1}ページ）",
-                min_values=0,
-                max_values=len(options),
-                options=options,
-            )
-            select.callback = self._select_callback
-            self.add_item(select)
-
-    async def _select_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        bot = interaction.client
-        selected_ids = interaction.data.get("values", [])
-
-        for ch_id in selected_ids:
-            await bot.config.add_ignore_channel(interaction.guild_id, int(ch_id))
-
-        ignored = ", ".join(f"<#{cid}>" for cid in selected_ids) if selected_ids else "なし"
-        if self.page < self.max_page:
-            await interaction.followup.send(
-                f"✅ 除外チャンネル追加: {ignored}\n"
-                f"まだチャンネルがあるぽん！次のページも確認してねぽん。",
-                view=Step2IgnoreView(self.guild, self.page + 1),
-                silent=True,
-            )
-        else:
-            await interaction.followup.send(
-                f"✅ 除外チャンネル追加: {ignored}\n"
-                f"次はGitHub連携の設定だぽん！",
-                view=Step3GithubView(interaction.guild),
-                silent=True,
-            )
+        self.max_page = max_page
 
     @discord.ui.button(label="次のページ", style=discord.ButtonStyle.primary, emoji="➡️", row=1)
     async def next_page(self, button: Button, interaction: discord.Interaction):
         if self.page < self.max_page:
-            await interaction.response.edit_message(
-                view=Step2IgnoreView(self.guild, self.page + 1),
-            )
+            await interaction.response.defer()
+            await show_step2(self.wizard, self.page + 1)
         else:
             await interaction.response.send_message("最後のページだぽん！", ephemeral=True)
 
-    @discord.ui.button(label="完了 → 次へ", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="次へ進む", style=discord.ButtonStyle.success, row=1)
     async def done(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "除外チャンネルの設定完了だぽん！\n次はGitHub連携だぽん！",
-            view=Step3GithubView(interaction.guild),
-            silent=True,
-        )
-
-    @discord.ui.button(label="スキップ (除外なし)", style=discord.ButtonStyle.secondary, row=1)
-    async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "除外チャンネルなしだぽん！\n次はGitHub連携だぽん！",
-            view=Step3GithubView(interaction.guild),
-            silent=True,
-        )
+        await interaction.response.defer()
+        self.wizard.step = 2
+        await show_step3(self.wizard)
 
 
-# ====== Step 3: GitHub連携 (通知ch + webhook URL案内) ======
+# ====== Step 3: GitHub連携 ======
 
-class GithubChannelSelect(Select):
-    def __init__(self, guild: discord.Guild):
-        text_channels = [
-            ch for ch in guild.text_channels
-            if ch.permissions_for(guild.me).send_messages
-        ]
+async def show_step3(wizard: SetupWizard):
+    channels = [
+        ch for ch in wizard.guild.text_channels
+        if ch.permissions_for(wizard.guild.me).send_messages
+    ]
+    view = Step3View(wizard, channels)
+    await wizard.update("GitHub通知を送るチャンネルを選んでねぽん。", view)
+
+
+class Step3View(View):
+    def __init__(self, wizard: SetupWizard, channels: list):
+        super().__init__(timeout=600)
+        self.wizard = wizard
+
         options = [
             discord.SelectOption(
-                label=f"#{ch.name}",
-                value=str(ch.id),
-                description=ch.category.name if ch.category else "カテゴリなし",
+                label=f"#{ch.name}", value=str(ch.id),
+                description=ch.category.name if ch.category else "",
             )
-            for ch in text_channels[:25]
+            for ch in channels[:25]
         ]
-        super().__init__(
-            placeholder="GitHub通知を送るチャンネルを選ぶぽん",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+        if options:
+            select = Select(placeholder="GitHub通知チャンネル", min_values=1, max_values=1, options=options)
+            select.callback = self._select
+            self.add_item(select)
 
-    async def callback(self, interaction: discord.Interaction):
+    async def _select(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        bot = interaction.client
-        ch_id = int(self.values[0])
-        await bot.config.set_github_channel(interaction.guild_id, ch_id)
+        ch_id = int(interaction.data["values"][0])
+        await self.wizard.bot.config.set_github_channel(self.wizard.guild.id, ch_id)
 
-        # webhook URL案内
-        api_host = os.environ.get("API_HOST", "https://あなたのサーバー")
-        webhook_url = f"{api_host}/webhook/github/{interaction.guild_id}"
+        api_host = os.environ.get("API_HOST", "https://your-server")
+        webhook_url = f"{api_host}/webhook/github/{self.wizard.guild.id}"
         secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
         await interaction.followup.send(
-            f"✅ GitHub通知: <#{ch_id}>\n\n"
-            f"📌 **GitHubリポジトリ → Settings → Webhooks → Add webhook**\n"
-            f"```\n"
+            f"📌 **GitHub Webhook設定情報**\n```\n"
             f"Payload URL: {webhook_url}\n"
             f"Content type: application/json\n"
             f"Secret: {secret}\n"
-            f"Events: Just the push event\n"
-            f"```\n"
-            f"mainブランチへのpushでコードレビューが動くぽん！\n\n"
-            f"次はリアクションの設定だぽん！",
-            view=Step4ReactionsView(),
-            silent=True,
+            f"Events: Just the push event\n```",
+            ephemeral=True,
         )
+        self.wizard.step = 3
+        await show_step4(self.wizard)
 
-
-class Step3GithubView(View):
-    def __init__(self, guild: discord.Guild = None):
-        super().__init__(timeout=300)
-        if guild:
-            self.add_item(GithubChannelSelect(guild))
-
-    @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary, row=1)
     async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "GitHub連携はスキップだぽん！\n次はリアクション設定だぽん！",
-            view=Step4ReactionsView(),
-            silent=True,
-        )
+        await interaction.response.defer()
+        self.wizard.step = 3
+        await show_step4(self.wizard)
 
 
-# ====== Step 4: リアクション絵文字 (リアクションで選択) ======
+# ====== Step 4: リアクション ======
 
-class Step4ReactionsView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
+async def show_step4(wizard: SetupWizard):
+    view = Step4View(wizard)
+    await wizard.update(
+        "スマートリアクションを設定するぽん？\n"
+        "有効にすると、面白い発言に自動でリアクションを付けるぽん！",
+        view,
+    )
 
-    @discord.ui.button(label="リアクション有効化", style=discord.ButtonStyle.primary, emoji="✨")
+
+class Step4View(View):
+    def __init__(self, wizard: SetupWizard):
+        super().__init__(timeout=600)
+        self.wizard = wizard
+
+    @discord.ui.button(label="有効化（絵文字を設定）", style=discord.ButtonStyle.primary, emoji="✨")
     async def enable(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "リアクションに使う絵文字を設定するぽん！\n"
             "下のメッセージにそれぞれ使いたい絵文字でリアクションしてねぽん！\n"
             "（サーバー独自の絵文字もOKだぽん）",
-            silent=True,
+            ephemeral=True,
         )
-        collector = ReactionEmojiCollector(interaction)
+        collector = ReactionCollector(self.wizard, interaction)
         await collector.start()
 
-    @discord.ui.button(label="リアクション無効", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="無効のまま", style=discord.ButtonStyle.secondary)
     async def disable(self, button: Button, interaction: discord.Interaction):
-        bot = interaction.client
-        await bot.config.set_reactions(interaction.guild_id, False, "💡", "😲", "😂")
-        await interaction.response.send_message(
-            "リアクションは無効にしたぽん！\n次はメンバー登録だぽん！",
-            view=Step5MemberView(),
-            silent=True,
-        )
+        await interaction.response.defer()
+        await self.wizard.bot.config.set_reactions(self.wizard.guild.id, False, "💡", "😲", "😂")
+        self.wizard.step = 4
+        await show_step5(self.wizard)
 
 
-class ReactionEmojiCollector:
-    """3つのメッセージを送り、ユーザーのリアクションで絵文字を収集"""
-
+class ReactionCollector:
     EMOTIONS = [
-        ("interesting", "💡 **興味深い** と思ったときのリアクションを付けてぽん！"),
-        ("surprised", "😲 **びっくり** したときのリアクションを付けてぽん！"),
-        ("funny", "😂 **笑える** と思ったときのリアクションを付けてぽん！"),
+        ("interesting", "💡 **興味深い** のリアクションを付けてぽん！"),
+        ("surprised", "😲 **びっくり** のリアクションを付けてぽん！"),
+        ("funny", "😂 **笑える** のリアクションを付けてぽん！"),
     ]
 
-    def __init__(self, interaction: discord.Interaction):
-        self.interaction = interaction
-        self.bot = interaction.client
-        self.guild_id = interaction.guild_id
+    def __init__(self, wizard: SetupWizard, interaction: discord.Interaction):
+        self.wizard = wizard
+        self.bot = wizard.bot
         self.user = interaction.user
         self.channel = interaction.channel
         self.emojis = {}
@@ -292,227 +262,213 @@ class ReactionEmojiCollector:
                 self.emojis[key] = str(reaction.emoji)
                 await msg.edit(content=f"✅ {prompt.split('**')[1]}: {reaction.emoji}")
             except Exception:
-                # タイムアウト時はデフォルト
                 defaults = {"interesting": "💡", "surprised": "😲", "funny": "😂"}
                 self.emojis[key] = defaults[key]
-                await msg.edit(content=f"⏰ タイムアウト → デフォルト: {defaults[key]}")
+                await msg.edit(content=f"⏰ デフォルト: {defaults[key]}")
 
         await self.bot.config.set_reactions(
-            self.guild_id, True,
-            self.emojis["interesting"],
-            self.emojis["surprised"],
-            self.emojis["funny"],
+            self.wizard.guild.id, True,
+            self.emojis["interesting"], self.emojis["surprised"], self.emojis["funny"],
         )
-        await self.channel.send(
-            f"✅ リアクション設定完了だぽん！\n"
-            f"  興味深い: {self.emojis['interesting']} / "
-            f"びっくり: {self.emojis['surprised']} / "
-            f"笑える: {self.emojis['funny']}\n\n"
-            f"次はメンバー登録だぽん！",
-            view=Step5MemberView(),
-            silent=True,
-        )
+        self.wizard.step = 4
+        await show_step5(self.wizard)
 
 
-# ====== Step 5: メンバー登録 (ロール分類 → 自動登録) ======
+# ====== Step 5: メンバー登録 ======
 
-class Step5MemberView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
+async def show_step5(wizard: SetupWizard):
+    view = Step5View(wizard)
+    await wizard.update(
+        "メンバーをロールから自動登録するぽん？\n"
+        "役職・担当・学年のロールを分類して一括登録できるぽん。",
+        view,
+    )
 
-    @discord.ui.button(label="ロール分類 → メンバー登録", style=discord.ButtonStyle.primary, emoji="👥")
-    async def auto_register(self, button: Button, interaction: discord.Interaction):
-        guild = interaction.guild
-        bot = interaction.client
+
+class Step5View(View):
+    def __init__(self, wizard: SetupWizard):
+        super().__init__(timeout=600)
+        self.wizard = wizard
+
+    @discord.ui.button(label="ロール分類 → 登録", style=discord.ButtonStyle.primary, emoji="👥")
+    async def register(self, button: Button, interaction: discord.Interaction):
+        guild = self.wizard.guild
         roles = [r for r in guild.roles if r.name != "@everyone"]
-
         if not roles:
-            await interaction.response.send_message(
-                "ロールがないぽん...先にロールを作ってねぽん。",
-                view=Step6DriveView(),
-                silent=True,
-            )
+            await interaction.response.send_message("ロールがないぽん...", ephemeral=True)
+            self.wizard.step = 5
+            await show_step6(self.wizard)
             return
 
         from bot.commands.member import RoleMappingView, _classify_member_roles
 
         class SetupRoleMappingView(RoleMappingView):
-            """setup用: 保存後にメンバー自動登録 → Step6へ進む"""
             @discord.ui.button(label="保存してメンバー登録", style=discord.ButtonStyle.success, row=4)
-            async def save(self, button_: Button, interaction: discord.Interaction):
-                await bot.config.set_role_mapping(guild.id, self.mapping)
-
-                # メンバー自動登録
+            async def save(self_, button_: Button, interaction_: discord.Interaction):
+                await self.wizard.bot.config.set_role_mapping(guild.id, self_.mapping)
                 human_members = [m for m in guild.members if not m.bot]
                 members = {}
                 for m in human_members:
-                    members[str(m.id)] = _classify_member_roles(m, self.mapping)
-
-                await bot.config.set_members(guild.id, members)
-
-                await interaction.response.edit_message(
-                    content=f"✅ ロール分類を保存し、**{len(members)}人** を自動登録したぽん！\n"
-                    f"`/member register <呼び名>` で呼び名を変更できるぽん。\n\n"
-                    f"次はGoogle Drive連携だぽん！",
-                    view=Step6DriveView(),
+                    members[str(m.id)] = _classify_member_roles(m, self_.mapping)
+                await self.wizard.bot.config.set_members(guild.id, members)
+                await interaction_.response.send_message(
+                    f"✅ **{len(members)}人** 登録したぽん！", ephemeral=True
                 )
+                self.wizard.step = 5
+                await show_step6(self.wizard)
 
-        view = SetupRoleMappingView(bot, guild, roles)
+        view = SetupRoleMappingView(self.wizard.bot, guild, roles)
         await interaction.response.send_message(
-            "ロールをカテゴリ別に分類するぽん！\n"
-            "👑 役職 / 💼 担当 / 🎓 学年 をそれぞれ選んでねぽん。",
-            view=view,
-            ephemeral=True,
+            "ロールを分類してねぽん。", view=view, ephemeral=True
         )
 
-    @discord.ui.button(label="あとで登録する", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="あとで", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "メンバー登録はあとで `/member roles` → `/member sync` でもできるぽん！\n"
-            "次はGoogle Drive連携だぽん！",
-            view=Step6DriveView(),
-            silent=True,
-        )
+        await interaction.response.defer()
+        self.wizard.step = 5
+        await show_step6(self.wizard)
 
 
-# ====== Step 6: Google Drive連携 ======
+# ====== Step 6: Google Drive ======
 
-class Step6DriveView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
+async def show_step6(wizard: SetupWizard):
+    view = Step6View(wizard)
+    await wizard.update(
+        "議事録・レポートの保存先Google DriveフォルダURLを設定するぽん？",
+        view,
+    )
 
-    @discord.ui.button(label="Google Driveフォルダを設定", style=discord.ButtonStyle.primary, emoji="📁")
+
+class Step6View(View):
+    def __init__(self, wizard: SetupWizard):
+        super().__init__(timeout=600)
+        self.wizard = wizard
+
+    @discord.ui.button(label="フォルダURLを入力", style=discord.ButtonStyle.primary, emoji="📁")
     async def set_drive(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_modal(DriveUrlModal())
+        await interaction.response.send_modal(DriveModal(self.wizard))
 
     @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "Google Drive連携はスキップだぽん！\n"
-            "議事録やレポートはDiscord上にのみ投稿するぽん。\n\n"
-            "最後に、過去ログの取り込みだぽん！",
-            view=Step7BackfillView(),
-            silent=True,
-        )
+        await interaction.response.defer()
+        self.wizard.step = 6
+        await show_step7(self.wizard)
 
 
-class DriveUrlModal(discord.ui.Modal):
-    def __init__(self):
+class DriveModal(discord.ui.Modal):
+    def __init__(self, wizard: SetupWizard):
         super().__init__(title="Google Drive連携")
+        self.wizard = wizard
         self.add_item(discord.ui.InputText(
-            label="議事録・レポート保存先のフォルダURL",
+            label="フォルダURL",
             placeholder="https://drive.google.com/drive/folders/xxxx",
             max_length=500,
         ))
 
     async def callback(self, interaction: discord.Interaction):
-        bot = interaction.client
         url = self.children[0].value.strip()
-        await bot.config.set_drive_folder(interaction.guild_id, url)
-        await interaction.response.send_message(
-            f"✅ Google Drive連携: 設定済み\n"
-            f"議事録やレポートをこのフォルダに保存するぽん！\n\n"
-            f"最後に、過去ログの取り込みだぽん！",
-            view=Step7BackfillView(),
-            silent=True,
-        )
+        await self.wizard.bot.config.set_drive_folder(self.wizard.guild.id, url)
+        await interaction.response.send_message("✅ Drive連携設定したぽん！", ephemeral=True)
+        self.wizard.step = 6
+        await show_step7(self.wizard)
 
 
 # ====== Step 7: 過去ログ取り込み ======
 
-async def _run_backfill(interaction: discord.Interaction, days: int | None):
-    """days=None で全量"""
-    bot = interaction.client
-    corpus = bot.config.get_corpus(interaction.guild_id)
-    if not corpus:
-        await interaction.followup.send("コーパスが見つからないぽん...", silent=True)
-        return
-
-    label = "全期間" if days is None else f"過去{days}日分"
-    status_msg = await interaction.followup.send(
-        f"📚 {label}の過去ログ取り込みを処理中だぽん...", wait=True,
-        silent=True,
+async def show_step7(wizard: SetupWizard):
+    view = Step7View(wizard)
+    await wizard.update(
+        "最後に、過去ログの取り込みだぽん！\n"
+        "どのくらい遡って学習するか選んでねぽん。",
+        view,
     )
 
+
+class Step7View(View):
+    def __init__(self, wizard: SetupWizard):
+        super().__init__(timeout=600)
+        self.wizard = wizard
+        self._started = False
+
+    async def _start_backfill(self, interaction: discord.Interaction, days: int | None):
+        if self._started:
+            await interaction.response.send_message("実行中だぽん！", ephemeral=True)
+            return
+        self._started = True
+        for item in self.children:
+            item.disabled = True
+        label = "全期間" if days is None else f"過去{days}日"
+        await interaction.response.defer()
+        await self.wizard.update(f"📚 {label}の取り込みを開始するぽん！⏳", self)
+        await _run_backfill(self.wizard, days)
+
+    @discord.ui.button(label="全部", style=discord.ButtonStyle.success, emoji="📚")
+    async def all(self, button: Button, interaction: discord.Interaction):
+        await self._start_backfill(interaction, None)
+
+    @discord.ui.button(label="180日", style=discord.ButtonStyle.primary, emoji="📅")
+    async def d180(self, button: Button, interaction: discord.Interaction):
+        await self._start_backfill(interaction, 180)
+
+    @discord.ui.button(label="30日", style=discord.ButtonStyle.primary, emoji="📆")
+    async def d30(self, button: Button, interaction: discord.Interaction):
+        await self._start_backfill(interaction, 30)
+
+    @discord.ui.button(label="あとで", style=discord.ButtonStyle.secondary)
+    async def skip(self, button: Button, interaction: discord.Interaction):
+        await interaction.response.defer()
+        self.wizard.step = 7
+        await self.wizard.update(
+            "🎉 **セットアップ完了だぽん！**\n"
+            "過去ログは `/backfill` で取り込めるぽん。\n"
+            "何でも聞いてねぽん！",
+            View(),  # 空View（ボタンなし）
+        )
+
+
+async def _run_backfill(wizard: SetupWizard, days: int | None):
     from datetime import datetime, timedelta, timezone
+
+    corpus = wizard.bot.config.get_corpus(wizard.guild.id)
+    if not corpus:
+        return
+
+    label = "全期間" if days is None else f"過去{days}日"
     after = None
     if days:
         after = datetime.now(timezone.utc) - timedelta(days=days)
 
-    total = 0
     channels = [
-        ch for ch in interaction.guild.text_channels
-        if ch.permissions_for(interaction.guild.me).read_message_history
-        and not bot.config.is_ignored(interaction.guild_id, ch.id)
+        ch for ch in wizard.guild.text_channels
+        if ch.permissions_for(wizard.guild.me).read_message_history
+        and not wizard.bot.config.is_ignored(wizard.guild.id, ch.id)
     ]
 
+    total = 0
     for i, ch in enumerate(channels, 1):
         try:
             async def progress(c, _ch=ch, _i=i):
-                await status_msg.edit(
-                    content=f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件取得中... | 合計: {total:,}件"
+                await wizard.update(
+                    f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件 | 合計: {total:,}件",
+                    View(),
                 )
 
-            count = await bot.corpus.backfill_channel(ch, corpus, after=after, progress_callback=progress)
+            count = await wizard.bot.corpus.backfill_channel(ch, corpus, after=after, progress_callback=progress)
             total += count
-            await status_msg.edit(
-                content=f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: {count:,}件完了 | 合計: {total:,}件"
+            await wizard.update(
+                f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: {count:,}件完了 | 合計: {total:,}件",
+                View(),
             )
         except Exception as e:
             log.warning(f"Backfill error #{ch.name}: {e}")
 
-    await status_msg.edit(
-        content=f"🎉 セットアップ完了だぽん！\n"
+    wizard.step = 7
+    await wizard.update(
+        f"🎉 **セットアップ完了だぽん！**\n"
         f"合計 **{total:,}件** のメッセージを学習したぽん！\n"
-        f"何でも聞いてねぽん！"
+        f"何でも聞いてねぽん！",
+        View(),
     )
-
-
-class Step7BackfillView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
-        self._started = False
-
-    async def _disable_buttons(self, interaction: discord.Interaction, label: str):
-        """ボタンを無効化して連打防止"""
-        if self._started:
-            await interaction.response.send_message(
-                "すでにバックフィルを実行中だぽん！⏳", ephemeral=True
-            )
-            return False
-        self._started = True
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(
-            content=f"📚 {label}の取り込みを開始するぽん！⏳", view=self
-        )
-        return True
-
-    @discord.ui.button(label="全部取り込む", style=discord.ButtonStyle.success, emoji="📚")
-    async def backfill_all(self, button: Button, interaction: discord.Interaction):
-        if not await self._disable_buttons(interaction, "全期間"):
-            return
-        await _run_backfill(interaction, days=None)
-
-    @discord.ui.button(label="過去180日", style=discord.ButtonStyle.primary, emoji="📅")
-    async def backfill_180(self, button: Button, interaction: discord.Interaction):
-        if not await self._disable_buttons(interaction, "過去180日"):
-            return
-        await _run_backfill(interaction, days=180)
-
-    @discord.ui.button(label="過去30日", style=discord.ButtonStyle.primary, emoji="📆")
-    async def backfill_30(self, button: Button, interaction: discord.Interaction):
-        if not await self._disable_buttons(interaction, "過去30日"):
-            return
-        await _run_backfill(interaction, days=30)
-
-    @discord.ui.button(label="あとでやる", style=discord.ButtonStyle.secondary)
-    async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "🎉 セットアップ完了だぽん！\n"
-            "過去ログは後から `/backfill` で取り込めるぽん！",
-            silent=True,
-        )
 
 
 # ====== register ======
@@ -521,24 +477,29 @@ def register(bot):
     @bot.slash_command(name="setup", description="初期設定をするぽん！")
     # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
     async def setup_cmd(ctx: discord.ApplicationContext):
-        # 既にセットアップ済みかチェック
         existing = bot.config.get_bureau(ctx.guild_id)
         if existing:
             await ctx.respond(
                 f"このサーバーは既に **{existing}** として設定済みだぽん！\n"
-                f"やり直したい場合は先に `/reset` で設定をリセットしてねぽん。",
+                f"`/reset` でリセットしてねぽん。",
                 ephemeral=True,
             )
             return
 
-        # 使用済みの局を取得
         used_bureaus = set()
         for gid, gdata in bot.config._config.items():
             if gid != str(ctx.guild_id) and "bureau" in gdata:
                 used_bureaus.add(gdata["bureau"])
 
-        await ctx.respond(
-            "セットアップを始めるぽん！まずは局を選んでねぽん！",
-            view=Step1BureauView(used_bureaus),
+        # 固定メッセージを作成
+        msg = await ctx.respond(
+            "**🔧 おしゃべりやがぽん セットアップ**\n準備中...",
             silent=True,
         )
+        # InteractionResponseのメッセージを取得
+        if hasattr(msg, 'original_response'):
+            msg = await msg.original_response()
+
+        wizard = SetupWizard(bot, ctx.guild, msg)
+        view = Step1View(wizard, used_bureaus)
+        await wizard.update("まずは局を選んでねぽん！", view)
