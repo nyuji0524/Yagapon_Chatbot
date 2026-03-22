@@ -11,8 +11,8 @@ log = logging.getLogger("yagapon.tts")
 
 VOICE = "ja-JP-NanamiNeural"
 # マスコットっぽい可愛い声にするための調整
-PITCH = "+15Hz"   # ピッチを上げる（高い声）
-RATE = "+8%"      # 少し速めでテンポよく
+PITCH = "+60Hz"   # かなり高い声
+RATE = "-10%"     # ゆっくり喋る
 
 
 async def speak_in_vc(bot, message: discord.Message, text: str):
