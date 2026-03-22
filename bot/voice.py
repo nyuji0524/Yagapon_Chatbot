@@ -154,54 +154,58 @@ class VoiceSession:
         for t in chunk_texts:
             self._conversation_history.append({"role": "user", "speaker": t["speaker"], "text": t["text"]})
 
+        # メンバー情報と語録を取得
+        members_info = self.bot._build_members_info(self.guild_id) if hasattr(self.bot, '_build_members_info') else ""
+        glossary_text = self.bot.config.get_glossary_text(self.guild_id)
+
         if self.mode == VoiceMode.CHAT:
             prompt = (
-                "あなたはボイスチャンネルで友達とおしゃべりしている「やがぽん」です。\n"
-                "以下の会話を聞いて、自然に会話に参加してください。\n"
-                "ただし、以下の場合は「SKIP」とだけ返してください：\n"
-                "- メンバー同士の会話に割り込む必要がないとき\n"
-                "- 特に自分に話しかけられていないとき\n"
-                "- 相槌だけで十分なとき\n\n"
-                "返答する場合は短く自然に（1-2文）。語尾に「ぽん」をつけて。\n\n"
+                "あなたは慶應義塾大学 矢上祭実行委員会のマスコット「やがぽん」です。\n"
+                "ボイスチャンネルで友達とおしゃべりしています。\n\n"
+                "【行動ルール】\n"
+                "- 誰かが話したら必ず返事をする。「SKIP」は絶対に使わない\n"
+                "- 質問されたら、ナレッジベースを検索して具体的に回答する\n"
+                "- 雑談には楽しくノリよく返す。相槌・感想・質問返しなど自然に\n"
+                "- 返答は短く自然に（1-3文）。語尾に「ぽん」をつける\n"
+                "- 質問への回答はしっかり答えつつも簡潔に\n"
+                "- 明るく元気なキャラクターで、会話を盛り上げる\n\n"
             )
         else:  # MEETING
             prompt = (
-                "あなたは会議に参加している「やがぽん」です。\n"
-                "以下の会話を聞いて、以下の場合のみ返答してください：\n"
-                "- 名前（やがぽん）を呼ばれたとき\n"
-                "- 質問されたとき\n"
-                "- 重要な情報を補足できるとき\n"
-                "それ以外は「SKIP」とだけ返してください。\n\n"
-                "返答する場合は簡潔に。語尾に「ぽん」をつけて。\n\n"
+                "あなたは会議に参加している「やがぽん」です。\n\n"
+                "【行動ルール】\n"
+                "- 名前（やがぽん）を呼ばれたら必ず返答する\n"
+                "- 質問されたらナレッジベースを検索して回答する\n"
+                "- 重要な情報を補足できるときは発言する\n"
+                "- それ以外は「SKIP」とだけ返す\n"
+                "- 返答は簡潔に。語尾に「ぽん」をつける\n\n"
             )
 
+        if members_info:
+            prompt += f"【メンバー情報】\n{members_info}\n\n"
+        if glossary_text:
+            prompt += f"【用語辞書】\n{glossary_text}\n\n"
         if history:
             prompt += f"=== これまでの会話 ===\n{history}\n\n"
         prompt += f"=== 今の発言 ===\n{current}"
 
         try:
-            # meetingモードならRAG検索も使う
-            if self.mode == VoiceMode.MEETING:
-                corpus = self.bot.config.get_corpus(self.guild_id)
-                if corpus:
-                    response = await client.aio.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            tools=[
-                                types.Tool(
-                                    file_search=types.FileSearch(
-                                        file_search_store_names=[corpus]
-                                    )
+            # chat/meetingどちらもRAG検索を使う
+            corpus = self.bot.config.get_corpus(self.guild_id)
+            if corpus:
+                response = await client.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[
+                            types.Tool(
+                                file_search=types.FileSearch(
+                                    file_search_store_names=[corpus]
                                 )
-                            ],
-                        ),
-                    )
-                else:
-                    response = await client.aio.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt,
-                    )
+                            )
+                        ],
+                    ),
+                )
             else:
                 response = await client.aio.models.generate_content(
                     model="gemini-2.5-flash",
@@ -209,9 +213,15 @@ class VoiceSession:
                 )
 
             text = (response.text or "").strip()
-            if text.upper() == "SKIP" or not text:
-                return None
-            return text
+            # chatモードではSKIPしない（必ず返事する）
+            if self.mode == VoiceMode.CHAT:
+                if not text or text.upper() == "SKIP":
+                    return "うんうん、なるほどぽん！"
+                return text
+            else:
+                if text.upper() == "SKIP" or not text:
+                    return None
+                return text
         except Exception as e:
             log.error(f"Realtime response error: {e}")
             return None
@@ -358,11 +368,11 @@ class VoiceSession:
         if not self.voice_client or not self.voice_client.is_connected():
             return
 
-        from bot.tts import VOICE
+        from bot.tts import VOICE, PITCH, RATE
         try:
             import edge_tts
 
-            communicate = edge_tts.Communicate(text[:500], VOICE)
+            communicate = edge_tts.Communicate(text[:500], VOICE, pitch=PITCH, rate=RATE)
             tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
             tmp_path = tmp.name
             tmp.close()

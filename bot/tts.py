@@ -10,6 +10,9 @@ import discord
 log = logging.getLogger("yagapon.tts")
 
 VOICE = "ja-JP-NanamiNeural"
+# マスコットっぽい可愛い声にするための調整
+PITCH = "+15%"   # ピッチを上げる（高い声）
+RATE = "+8%"     # 少し速めでテンポよく
 
 
 async def speak_in_vc(bot, message: discord.Message, text: str):
@@ -34,7 +37,7 @@ async def speak_in_vc(bot, message: discord.Message, text: str):
 
     try:
         # 音声生成
-        communicate = edge_tts.Communicate(text[:500], VOICE)  # 長すぎる場合は切る
+        communicate = edge_tts.Communicate(text[:500], VOICE, pitch=PITCH, rate=RATE)  # 長すぎる場合は切る
         tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
         tmp_path = tmp.name
         tmp.close()

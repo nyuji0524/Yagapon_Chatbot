@@ -6,6 +6,7 @@ import discord
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
+from bot.voice import VoiceMode
 
 log = logging.getLogger("yagapon.client")
 
@@ -50,6 +51,54 @@ class YagaPon(discord.Bot):
                     silent=True,
                 )
                 break
+
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        """VCから人がいなくなったら自動退出"""
+        # 誰かがVCから抜けた場合のみ処理
+        if not before.channel or member.id == self.user.id:
+            return
+
+        # botがそのVCにいるか確認
+        from bot.voice import get_session, leave_voice
+        session = get_session(member.guild.id)
+        if not session or not session.voice_client or not session.voice_client.is_connected():
+            return
+        if session.channel.id != before.channel.id:
+            return
+
+        # VCに残っているのがbotだけか確認
+        humans = [m for m in before.channel.members if not m.bot]
+        if len(humans) == 0:
+            log.info(f"VC {before.channel.name} に誰もいなくなったので自動退出")
+
+            # 議事録生成がある場合はテキストチャンネルに通知
+            has_minutes = session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING)
+            minutes = await leave_voice(member.guild.id)
+
+            if minutes and has_minutes:
+                # 通知先: GitHub通知チャンネル or システムチャンネル or 最初のテキストチャンネル
+                notify_ch = None
+                for ch in member.guild.text_channels:
+                    if ch.permissions_for(member.guild.me).send_messages:
+                        notify_ch = ch
+                        break
+
+                if notify_ch:
+                    from bot.gdrive import upload_minutes
+                    from bot.commands.voice_cmd import _summarize_minutes
+
+                    drive_url = await upload_minutes(self.config, member.guild.id, minutes, session.channel.name)
+                    summary = await _summarize_minutes(minutes)
+
+                    embed = discord.Embed(
+                        title=f"📝 議事録（自動生成） - {session.channel.name}",
+                        description=summary[:4096],
+                        color=discord.Color.blue(),
+                    )
+                    if drive_url:
+                        embed.add_field(name="📄 全文", value=f"[Google Docsで見る]({drive_url})", inline=False)
+
+                    await notify_ch.send(embed=embed, silent=True)
 
     async def on_message(self, message: discord.Message):
         if message.author == self.user or message.author.bot:
