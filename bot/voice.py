@@ -44,20 +44,26 @@ class VoiceSession:
         self.is_active = True
         log.info(f"VC joined: {self.channel.name} (mode={self.mode.value})")
 
-        # 録音開始
-        try:
-            self.voice_client.start_recording(
-                discord.sinks.WaveSink(),
-                self._recording_finished,
-                self.channel,
-            )
-            log.info(f"Recording started in {self.channel.name}")
-        except Exception as e:
-            log.error(f"Failed to start recording: {e}")
+        # 接続が安定するまで待つ
+        await asyncio.sleep(2)
 
-        # meeting/chatモードならリアルタイム処理ループ開始
-        if self.mode in (VoiceMode.MEETING, VoiceMode.CHAT):
-            self._realtime_task = asyncio.create_task(self._realtime_loop())
+        # 録音開始
+        if self.voice_client and self.voice_client.is_connected():
+            try:
+                self.voice_client.start_recording(
+                    discord.sinks.WaveSink(),
+                    self._recording_finished,
+                    self.channel,
+                )
+                log.info(f"Recording started in {self.channel.name}")
+            except Exception as e:
+                log.error(f"Failed to start recording: {e}")
+
+            # meeting/chatモードならリアルタイム処理ループ開始
+            if self.mode in (VoiceMode.MEETING, VoiceMode.CHAT):
+                self._realtime_task = asyncio.create_task(self._realtime_loop())
+        else:
+            log.error("Voice client not connected after join")
 
     async def _recording_finished(self, sink, channel, *args):
         """録音チャンク完了コールバック"""
