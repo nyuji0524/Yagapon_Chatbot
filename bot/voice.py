@@ -50,10 +50,10 @@ class VoiceSession:
         # 録音開始
         if self.voice_client and self.voice_client.is_connected():
             try:
+                sink = discord.sinks.WaveSink()
                 self.voice_client.start_recording(
-                    discord.sinks.WaveSink(),
+                    sink,
                     self._recording_finished,
-                    self.channel,
                 )
                 log.info(f"Recording started in {self.channel.name}")
             except Exception as e:
@@ -65,14 +65,31 @@ class VoiceSession:
         else:
             log.error("Voice client not connected after join")
 
-    async def _recording_finished(self, sink, channel, *args):
+    async def _recording_finished(self, sink, *args):
         """録音チャンク完了コールバック"""
-        for user_id, audio in sink.audio_data.items():
-            audio_bytes = audio.file.read()
-            # 全体音声に追記（議事録用）
-            if user_id not in self.full_audio:
-                self.full_audio[user_id] = bytearray()
-            self.full_audio[user_id].extend(audio_bytes)
+        try:
+            # 新API: get_all_audio() または audio_data
+            audio_data = {}
+            if hasattr(sink, 'get_all_audio'):
+                audio_data = sink.get_all_audio()
+            elif hasattr(sink, 'audio_data'):
+                audio_data = sink.audio_data
+
+            for user_id, audio in audio_data.items():
+                if hasattr(audio, 'file'):
+                    audio_bytes = audio.file.read()
+                elif isinstance(audio, bytes):
+                    audio_bytes = audio
+                else:
+                    audio_bytes = bytes(audio)
+
+                if user_id not in self.full_audio:
+                    self.full_audio[user_id] = bytearray()
+                self.full_audio[user_id].extend(audio_bytes)
+
+            log.info(f"Recording chunk: {len(audio_data)} users, total {sum(len(v) for v in self.full_audio.values())} bytes")
+        except Exception as e:
+            log.error(f"Recording callback error: {e}")
         self._recording_done.set()
 
     async def _realtime_loop(self):
@@ -103,10 +120,10 @@ class VoiceSession:
         # すぐに録音を再開
         if self.is_active and self.voice_client and self.voice_client.is_connected():
             try:
+                sink = discord.sinks.WaveSink()
                 self.voice_client.start_recording(
-                    discord.sinks.WaveSink(),
+                    sink,
                     self._recording_finished,
-                    self.channel,
                 )
             except Exception as e:
                 log.error(f"Failed to restart recording: {e}")
