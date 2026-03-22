@@ -22,7 +22,7 @@ class YagaPon(discord.Bot):
         self.corpus = CorpusManager()
 
         # コマンド登録
-        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd
+        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd, voiceprint, glossary
         setup.register(self)
         status.register(self)
         ignore.register(self)
@@ -33,6 +33,8 @@ class YagaPon(discord.Bot):
         report.register(self)
         reset.register(self)
         corpus_cmd.register(self)
+        voiceprint.register(self)
+        glossary.register(self)
 
     async def on_ready(self):
         self.corpus.start_flush_loop()
@@ -45,6 +47,7 @@ class YagaPon(discord.Bot):
                     f"こんにちはぽん！矢上祭実行委員会「**{self.user.name}**」だぽん！\n"
                     f"このサーバーの会話を学習して、みんなの役に立ちたいぽん！\n"
                     f"まずは `/setup` で初期設定をしてほしいぽん！",
+                    silent=True,
                 )
                 break
 
@@ -64,7 +67,8 @@ class YagaPon(discord.Bot):
         if not corpus:
             if self.user.mentioned_in(message):
                 await message.channel.send(
-                    "まだ設定がされてないぽん！ `/setup` で設定してほしいぽん！"
+                    "まだ設定がされてないぽん！ `/setup` で設定してほしいぽん！",
+                    silent=True,
                 )
             return
 
@@ -102,13 +106,14 @@ class YagaPon(discord.Bot):
         if guild_id is None:
             await message.channel.send(
                 "ボクに質問できるのは、局に登録されたメンバーだけだぽん！\n"
-                "サーバーの管理者に `/member sync` で登録してもらってねぽん。"
+                "サーバーの管理者に `/member sync` で登録してもらってねぽん。",
+                silent=True,
             )
             return
 
         corpus = self.config.get_corpus(guild_id)
         if not corpus:
-            await message.channel.send("サーバーの設定がまだ完了してないぽん...")
+            await message.channel.send("サーバーの設定がまだ完了してないぽん...", silent=True)
             return
 
         await self._handle_question(message, corpus, guild_id)
@@ -144,9 +149,10 @@ class YagaPon(discord.Bot):
             return
 
         members_info = self._build_members_info(guild_id) if guild_id else ""
+        glossary_text = self.config.get_glossary_text(guild_id) if guild_id else ""
 
         async with message.channel.typing():
-            answer = await self.corpus.query(query, corpus, guild_id=guild_id, members_info=members_info)
+            answer = await self.corpus.query(query, corpus, guild_id=guild_id, members_info=members_info, glossary_text=glossary_text)
             await self.send_split_message(message.channel, answer)
 
             # VCにいればTTSも
@@ -174,7 +180,7 @@ class YagaPon(discord.Bot):
                 if in_code_block:
                     to_send += "\n```"
 
-                await destination.send(to_send)
+                await destination.send(to_send, silent=True)
 
                 if in_code_block:
                     lang = f" {current_lang}" if current_lang else ""
@@ -185,7 +191,7 @@ class YagaPon(discord.Bot):
                 current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
 
         if current_chunk:
-            await destination.send(current_chunk)
+            await destination.send(current_chunk, silent=True)
 
     async def close(self):
         log.info("Shutting down, flushing buffers...")

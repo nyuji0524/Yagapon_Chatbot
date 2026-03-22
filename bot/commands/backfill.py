@@ -35,7 +35,7 @@ def register(bot):
 
         corpus = bot.config.get_corpus(ctx.guild_id)
         if not corpus:
-            await ctx.followup.send("先に `/setup` をしてほしいぽん！")
+            await ctx.followup.send("先に `/setup` をしてほしいぽん！", silent=True)
             return
 
         after = None
@@ -56,6 +56,7 @@ def register(bot):
         status_msg = await ctx.followup.send(
             f"📚 {len(channels)}チャンネルの{label}を取り込むぽん！しばらく待ってねぽん...",
             wait=True,
+            silent=True,
         )
 
         total = 0

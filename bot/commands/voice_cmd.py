@@ -1,10 +1,10 @@
 """
 /join listen|meeting|chat - VCに参加
-/leave - VCから退出 (議事録生成 → Discord + Google Drive)
+/leave - VCから退出 (議事録生成 → Google Docs + Discord要約)
 pycord版
 """
 
-import io
+import os
 import discord
 
 from bot.voice import VoiceMode, join_voice, leave_voice, get_session
@@ -41,7 +41,7 @@ def register(bot):
             VoiceMode.CHAT: "おしゃべりモード 💬\nいっぱい喋るぽん！",
         }
 
-        await ctx.followup.send(f"🔊 {vc.name} に参加したぽん！\n{mode_desc[voice_mode]}")
+        await ctx.followup.send(f"🔊 {vc.name} に参加したぽん！\n{mode_desc[voice_mode]}", silent=True)
 
         if voice_mode == VoiceMode.CHAT:
             await session.speak("こんにちはぽん！おしゃべりやがぽんだぽん！何でも話しかけてねぽん！")
@@ -56,32 +56,62 @@ def register(bot):
         has_audio = bool(session and session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING))
 
         if has_audio:
-            await ctx.followup.send("🎙️ 音声を文字起こし中だぽん...少し待ってねぽん ⏳")
+            await ctx.followup.send("🎙️ 音声を文字起こし中だぽん...少し待ってねぽん ⏳", silent=True)
 
         minutes = await leave_voice(ctx.guild_id)
 
         if not minutes:
-            await ctx.followup.send("退出したぽん！👋")
+            await ctx.followup.send("退出したぽん！👋", silent=True)
             return
 
-        # Discord に送信
-        embed = discord.Embed(
-            title="📝 議事録",
-            description=minutes[:4096],
-            color=discord.Color.blue(),
-        )
-
-        file = discord.File(
-            io.BytesIO(minutes.encode("utf-8")),
-            filename=f"議事録_{channel_name}.md",
-        )
-        await ctx.followup.send(embed=embed, file=file)
-
-        # Google Drive にアップロード
+        # まずGoogle Docsに全文保存
         from bot.gdrive import upload_minutes
         drive_url = await upload_minutes(
             bot.config, ctx.guild_id, minutes, channel_name
         )
 
+        # Geminiで要約を生成
+        summary = await _summarize_minutes(minutes)
+
+        # Discordには要約 + Google Docsリンクを送信
+        embed = discord.Embed(
+            title=f"📝 議事録 - {channel_name}",
+            description=summary[:4096],
+            color=discord.Color.blue(),
+        )
+
         if drive_url:
-            await ctx.followup.send(f"📁 Google Driveにも保存したぽん！\n{drive_url}")
+            embed.add_field(name="📄 全文", value=f"[Google Docsで見る]({drive_url})", inline=False)
+        else:
+            # Drive保存失敗時はファイル添付でフォールバック
+            embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
+
+        if drive_url:
+            await ctx.followup.send(embed=embed, silent=True)
+        else:
+            import io
+            file = discord.File(
+                io.BytesIO(minutes.encode("utf-8")),
+                filename=f"議事録_{channel_name}.md",
+            )
+            await ctx.followup.send(embed=embed, file=file, silent=True)
+
+
+async def _summarize_minutes(minutes: str) -> str:
+    """議事録を要約"""
+    from google import genai
+    try:
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=(
+                "以下の議事録を3〜5行で簡潔に要約してください。\n"
+                "要約には: 参加者、主な議題、決定事項を含めてください。\n"
+                "語尾は「ぽん」をつけてください。\n\n"
+                f"{minutes}"
+            ),
+        )
+        return response.text or "要約を生成できなかったぽん..."
+    except Exception:
+        # 要約失敗時は冒頭を切り出し
+        return minutes[:500] + ("\n\n..." if len(minutes) > 500 else "")

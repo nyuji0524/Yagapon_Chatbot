@@ -72,9 +72,10 @@ class BureauSelect(Select):
                 f"✅ 「**{bureau}**」として登録したぽん！コーパスも作成済みだぽん。\n"
                 f"次はこのサーバーで学習してほしくないチャンネルを選ぶぽん！",
                 view=Step2IgnoreView(interaction.guild),
+                silent=True,
             )
         except Exception as e:
-            await interaction.followup.send(f"❌ エラーだぽん...: {e}")
+            await interaction.followup.send(f"❌ エラーだぽん...: {e}", silent=True)
 
 
 class Step1BureauView(View):
@@ -133,12 +134,14 @@ class Step2IgnoreView(View):
                 f"✅ 除外チャンネル追加: {ignored}\n"
                 f"まだチャンネルがあるぽん！次のページも確認してねぽん。",
                 view=Step2IgnoreView(self.guild, self.page + 1),
+                silent=True,
             )
         else:
             await interaction.followup.send(
                 f"✅ 除外チャンネル追加: {ignored}\n"
                 f"次はGitHub連携の設定だぽん！",
                 view=Step3GithubView(interaction.guild),
+                silent=True,
             )
 
     @discord.ui.button(label="次のページ", style=discord.ButtonStyle.primary, emoji="➡️", row=1)
@@ -155,6 +158,7 @@ class Step2IgnoreView(View):
         await interaction.response.send_message(
             "除外チャンネルの設定完了だぽん！\n次はGitHub連携だぽん！",
             view=Step3GithubView(interaction.guild),
+            silent=True,
         )
 
     @discord.ui.button(label="スキップ (除外なし)", style=discord.ButtonStyle.secondary, row=1)
@@ -162,6 +166,7 @@ class Step2IgnoreView(View):
         await interaction.response.send_message(
             "除外チャンネルなしだぽん！\n次はGitHub連携だぽん！",
             view=Step3GithubView(interaction.guild),
+            silent=True,
         )
 
 
@@ -211,6 +216,7 @@ class GithubChannelSelect(Select):
             f"mainブランチへのpushでコードレビューが動くぽん！\n\n"
             f"次はリアクションの設定だぽん！",
             view=Step4ReactionsView(),
+            silent=True,
         )
 
 
@@ -225,6 +231,7 @@ class Step3GithubView(View):
         await interaction.response.send_message(
             "GitHub連携はスキップだぽん！\n次はリアクション設定だぽん！",
             view=Step4ReactionsView(),
+            silent=True,
         )
 
 
@@ -239,7 +246,8 @@ class Step4ReactionsView(View):
         await interaction.response.send_message(
             "リアクションに使う絵文字を設定するぽん！\n"
             "下のメッセージにそれぞれ使いたい絵文字でリアクションしてねぽん！\n"
-            "（サーバー独自の絵文字もOKだぽん）"
+            "（サーバー独自の絵文字もOKだぽん）",
+            silent=True,
         )
         collector = ReactionEmojiCollector(interaction)
         await collector.start()
@@ -251,6 +259,7 @@ class Step4ReactionsView(View):
         await interaction.response.send_message(
             "リアクションは無効にしたぽん！\n次はメンバー登録だぽん！",
             view=Step5MemberView(),
+            silent=True,
         )
 
 
@@ -273,7 +282,7 @@ class ReactionEmojiCollector:
 
     async def start(self):
         for key, prompt in self.EMOTIONS:
-            msg = await self.channel.send(prompt)
+            msg = await self.channel.send(prompt, silent=True)
 
             def check(reaction, user):
                 return user == self.user and reaction.message.id == msg.id
@@ -301,6 +310,7 @@ class ReactionEmojiCollector:
             f"笑える: {self.emojis['funny']}\n\n"
             f"次はメンバー登録だぽん！",
             view=Step5MemberView(),
+            silent=True,
         )
 
 
@@ -320,6 +330,7 @@ class Step5MemberView(View):
             await interaction.response.send_message(
                 "ロールがないぽん...先にロールを作ってねぽん。",
                 view=Step6DriveView(),
+                silent=True,
             )
             return
 
@@ -360,6 +371,7 @@ class Step5MemberView(View):
             "メンバー登録はあとで `/member roles` → `/member sync` でもできるぽん！\n"
             "次はGoogle Drive連携だぽん！",
             view=Step6DriveView(),
+            silent=True,
         )
 
 
@@ -380,6 +392,7 @@ class Step6DriveView(View):
             "議事録やレポートはDiscord上にのみ投稿するぽん。\n\n"
             "最後に、過去ログの取り込みだぽん！",
             view=Step7BackfillView(),
+            silent=True,
         )
 
 
@@ -401,6 +414,7 @@ class DriveUrlModal(discord.ui.Modal):
             f"議事録やレポートをこのフォルダに保存するぽん！\n\n"
             f"最後に、過去ログの取り込みだぽん！",
             view=Step7BackfillView(),
+            silent=True,
         )
 
 
@@ -411,12 +425,13 @@ async def _run_backfill(interaction: discord.Interaction, days: int | None):
     bot = interaction.client
     corpus = bot.config.get_corpus(interaction.guild_id)
     if not corpus:
-        await interaction.followup.send("コーパスが見つからないぽん...")
+        await interaction.followup.send("コーパスが見つからないぽん...", silent=True)
         return
 
     label = "全期間" if days is None else f"過去{days}日分"
     status_msg = await interaction.followup.send(
-        f"📚 {label}の過去ログ取り込みを処理中だぽん...", wait=True
+        f"📚 {label}の過去ログ取り込みを処理中だぽん...", wait=True,
+        silent=True,
     )
 
     from datetime import datetime, timedelta, timezone
@@ -495,7 +510,8 @@ class Step7BackfillView(View):
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "🎉 セットアップ完了だぽん！\n"
-            "過去ログは後から `/backfill` で取り込めるぽん！"
+            "過去ログは後から `/backfill` で取り込めるぽん！",
+            silent=True,
         )
 
 
@@ -524,4 +540,5 @@ def register(bot):
         await ctx.respond(
             "セットアップを始めるぽん！まずは局を選んでねぽん！",
             view=Step1BureauView(used_bureaus),
+            silent=True,
         )

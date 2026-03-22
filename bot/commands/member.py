@@ -49,7 +49,8 @@ def register(bot):
         if not role_mapping:
             await ctx.followup.send(
                 "⚠️ ロールの分類がまだ設定されてないぽん！\n"
-                "`/member roles` で役職・担当・学年のロールを設定してねぽん。"
+                "`/member roles` で役職・担当・学年のロールを設定してねぽん。",
+                silent=True,
             )
             return
 
@@ -68,7 +69,8 @@ def register(bot):
         await bot.config.set_members(guild.id, members)
         await ctx.followup.send(
             f"✅ **{len(human_members)}人** をロールから登録/更新したぽん！\n"
-            f"`/member register` で呼び名を変更できるぽん。"
+            f"`/member register` で呼び名を変更できるぽん。",
+            silent=True,
         )
 
     @group.command(name="roles", description="役職・担当・学年のロールを分類するぽん！")
@@ -88,26 +90,34 @@ def register(bot):
             ephemeral=True,
         )
 
-    @group.command(name="register", description="自分の呼び名を登録するぽん！")
+    @group.command(name="register", description="呼び名を登録するぽん！")
     @discord.option("nickname", description="呼ばれたい名前")
-    async def member_register(ctx: discord.ApplicationContext, nickname: str):
+    @discord.option("user", description="他のメンバーに設定する場合（省略で自分）", type=discord.Member, required=False, default=None)
+    async def member_register(ctx: discord.ApplicationContext, nickname: str, user: discord.Member = None):
         guild_id = ctx.guild_id
-        uid = str(ctx.author.id)
+        target = user or ctx.author
+        uid = str(target.id)
         members = bot.config.get_members(guild_id)
 
         if uid not in members:
             # 未登録なら基本情報で追加
             role_mapping = bot.config.get_role_mapping(guild_id)
-            info = _classify_member_roles(ctx.author, role_mapping)
+            info = _classify_member_roles(target, role_mapping)
             members[uid] = info
 
         members[uid]["nickname"] = nickname
         await bot.config.set_members(guild_id, members)
 
-        await ctx.respond(
-            f"✅ 呼び名を「**{nickname}**」に設定したぽん！",
-            ephemeral=True,
-        )
+        if user and user.id != ctx.author.id:
+            await ctx.respond(
+                f"✅ **{target.display_name}** の呼び名を「**{nickname}**」に設定したぽん！",
+                ephemeral=True,
+            )
+        else:
+            await ctx.respond(
+                f"✅ 呼び名を「**{nickname}**」に設定したぽん！",
+                ephemeral=True,
+            )
 
     @group.command(name="list", description="登録メンバー一覧を表示するぽん！")
     async def member_list(ctx: discord.ApplicationContext):
@@ -115,7 +125,8 @@ def register(bot):
         if not members:
             await ctx.respond(
                 "まだメンバーが登録されてないぽん。\n"
-                "管理者が `/member roles` → `/member sync` してねぽん！"
+                "管理者が `/member roles` → `/member sync` してねぽん！",
+                silent=True,
             )
             return
 
@@ -134,7 +145,7 @@ def register(bot):
                 inline=False,
             )
 
-        await ctx.respond(embed=embed)
+        await ctx.respond(embed=embed, silent=True)
 
 
 class RoleMappingView(discord.ui.View):

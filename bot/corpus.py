@@ -247,7 +247,7 @@ class CorpusManager:
     # ------ RAG query ------
 
     async def query(self, question: str, corpus_store_name: str,
-                    guild_id: int = 0, members_info: str = "") -> str:
+                    guild_id: int = 0, members_info: str = "", glossary_text: str = "") -> str:
         if guild_id and not self._check_rate_limit(guild_id):
             return (
                 f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n"
@@ -257,6 +257,8 @@ class CorpusManager:
             system = SYSTEM_INSTRUCTION
             if members_info:
                 system += f"\n\n【メンバー情報】\n{members_info}"
+            if glossary_text:
+                system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
 
             response = await self._client.aio.models.generate_content(
                 model="gemini-2.5-flash",

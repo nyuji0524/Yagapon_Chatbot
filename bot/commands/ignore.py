@@ -11,7 +11,8 @@ def register(bot):
         added = await bot.config.add_ignore_channel(ctx.guild_id, ctx.channel_id)
         if added:
             await ctx.respond(
-                f"了解だぽん！<#{ctx.channel_id}> の会話はもう学習しないぽん。"
+                f"了解だぽん！<#{ctx.channel_id}> の会話はもう学習しないぽん。",
+                silent=True,
             )
         else:
             await ctx.respond(

@@ -13,7 +13,8 @@ def register(bot):
 
         if not bureau:
             await ctx.respond(
-                "🔴 まだ設定されていないぽん。`/setup` を実行してほしいぽん。"
+                "🔴 まだ設定されていないぽん。`/setup` を実行してほしいぽん。",
+                silent=True,
             )
             return
 
@@ -44,4 +45,4 @@ def register(bot):
             ignore_str = ", ".join(f"<#{cid}>" for cid in ignored[:10])
             embed.add_field(name="学習除外", value=ignore_str, inline=False)
 
-        await ctx.respond(embed=embed)
+        await ctx.respond(embed=embed, silent=True)

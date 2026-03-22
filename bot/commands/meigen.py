@@ -14,7 +14,7 @@ def register(bot):
 
         corpus = bot.config.get_corpus(ctx.guild_id)
         if not corpus:
-            await ctx.followup.send("先に `/setup` をしてほしいぽん！")
+            await ctx.followup.send("先に `/setup` をしてほしいぽん！", silent=True)
             return
 
         if user:
@@ -46,4 +46,4 @@ def register(bot):
         if user:
             embed.set_footer(text=f"{user.display_name}の名言")
 
-        await ctx.followup.send(embed=embed)
+        await ctx.followup.send(embed=embed, silent=True)

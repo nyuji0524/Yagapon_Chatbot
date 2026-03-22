@@ -292,13 +292,20 @@ class VoiceSession:
                 ),
             )
 
+            # 語録があれば文字起こしに活用
+            glossary_hint = ""
+            if self.bot and hasattr(self.bot, 'config'):
+                glossary_text = self.bot.config.get_glossary_text(self.guild_id)
+                if glossary_text:
+                    glossary_hint = f"\n\n以下は組織特有の用語です。音声に出てきた場合は正しく表記してください:\n{glossary_text}"
+
             response = await client.aio.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[
                     types.Part.from_uri(file_uri=uploaded.uri, mime_type="audio/wav"),
                     f"この音声を日本語で文字起こししてください。話者は「{speaker_name}」です。\n"
                     "発言内容をそのまま書き起こしてください。無音部分は省略してください。\n"
-                    "無音のみの場合は空文字を返してください。"
+                    f"無音のみの場合は空文字を返してください。{glossary_hint}"
                 ],
             )
 

@@ -10,3 +10,4 @@ data/
 .venv/
 venv/
 service_account.json
+voiceprints/

@@ -160,6 +160,32 @@ class ConfigManager:
         self._guild(guild_id)["drive_folder_url"] = url
         await self._save()
 
+    # ------ glossary ------
+
+    def get_glossary(self, guild_id: int) -> dict:
+        return self._guild(guild_id).get("glossary", {})
+
+    def get_glossary_text(self, guild_id: int) -> str:
+        """語録をプロンプト用のテキストに変換"""
+        glossary = self.get_glossary(guild_id)
+        if not glossary:
+            return ""
+        lines = []
+        for term, entry in glossary.items():
+            parts = [term]
+            reading = entry.get("reading", "")
+            aliases = entry.get("aliases", [])
+            if reading:
+                parts.append(f"読み:{reading}")
+            if aliases:
+                parts.append(f"別名:{', '.join(aliases)}")
+            lines.append(f"- {' / '.join(parts)}: {entry['definition']}")
+        return "\n".join(lines)
+
+    async def set_glossary(self, guild_id: int, glossary: dict):
+        self._guild(guild_id)["glossary"] = glossary
+        await self._save()
+
     # ------ sheets ------
 
     def get_sheets_url(self, guild_id: int) -> Optional[str]:

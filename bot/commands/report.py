@@ -25,18 +25,18 @@ def register(bot):
             io.BytesIO(report.encode("utf-8")),
             filename="週次レポート.md",
         )
-        await ctx.followup.send(embed=embed, file=file)
+        await ctx.followup.send(embed=embed, file=file, silent=True)
 
         # Google Driveにも保存
         from bot.gdrive import upload_report
         drive_url = await upload_report(bot.config, ctx.guild_id, report, "週次レポート")
         if drive_url:
-            await ctx.followup.send(f"📁 Google Driveにも保存したぽん！\n{drive_url}")
+            await ctx.followup.send(f"📁 Google Driveにも保存したぽん！\n{drive_url}", silent=True)
 
     @group.command(name="monthly", description="月間報告書を生成するぽん！")
     async def report_monthly(ctx: discord.ApplicationContext):
         await ctx.defer()
-        await ctx.followup.send("月間報告書を生成中だぽん... (少し時間がかかるぽん) ⏳")
+        await ctx.followup.send("月間報告書を生成中だぽん... (少し時間がかかるぽん) ⏳", silent=True)
 
         from bot.reports import generate_monthly_report
         report = await generate_monthly_report(bot, ctx.guild_id)
@@ -50,10 +50,10 @@ def register(bot):
             io.BytesIO(report.encode("utf-8")),
             filename="月間報告書.md",
         )
-        await ctx.followup.send(embed=embed, file=file)
+        await ctx.followup.send(embed=embed, file=file, silent=True)
 
         # Google Driveにも保存
         from bot.gdrive import upload_report
         drive_url = await upload_report(bot.config, ctx.guild_id, report, "月間報告書")
         if drive_url:
-            await ctx.followup.send(f"📁 Google Driveにも保存したぽん！\n{drive_url}")
+            await ctx.followup.send(f"📁 Google Driveにも保存したぽん！\n{drive_url}", silent=True)
