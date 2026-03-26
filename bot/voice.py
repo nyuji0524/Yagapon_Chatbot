@@ -15,6 +15,9 @@ log = logging.getLogger("yagapon.voice")
 
 # リアルタイム処理の間隔（秒）
 REALTIME_INTERVAL = 15
+# 音声データのメモリ上限（バイト）- 超えたら古いデータを破棄
+MAX_AUDIO_BYTES_PER_USER = 10 * 1024 * 1024  # 10MB（約1分半のWAV）
+MAX_TOTAL_AUDIO_BYTES = 50 * 1024 * 1024  # 50MB合計
 
 
 class VoiceMode(Enum):
@@ -305,10 +308,12 @@ class VoiceSession:
         return None
 
     def _read_from_sink(self, sink):
-        """sinkからオーディオデータを読み取る"""
+        """sinkからオーディオデータを読み取る（メモリ上限付き）"""
         try:
             audio_data = getattr(sink, 'audio_data', {})
             log.info(f"Sink has {len(audio_data)} user(s) audio data")
+            total = sum(len(v) for v in self.full_audio.values())
+
             for user_id, audio in audio_data.items():
                 if hasattr(audio, 'file'):
                     audio.file.seek(0)
@@ -318,11 +323,24 @@ class VoiceSession:
                 else:
                     audio_bytes = bytes(audio)
 
+                # メモリ上限チェック
+                if total + len(audio_bytes) > MAX_TOTAL_AUDIO_BYTES:
+                    log.warning(f"Total audio limit reached ({total} bytes), truncating")
+                    # 古いデータの先頭を切り詰め
+                    audio_bytes = audio_bytes[-(MAX_AUDIO_BYTES_PER_USER):]
+
                 log.info(f"User {user_id}: {len(audio_bytes)} bytes of audio")
                 if user_id not in self.full_audio:
                     self.full_audio[user_id] = bytearray()
                 self.full_audio[user_id].extend(audio_bytes)
-            log.info(f"Total audio: {sum(len(v) for v in self.full_audio.values())} bytes from {len(self.full_audio)} users")
+
+                # ユーザーごとの上限
+                if len(self.full_audio[user_id]) > MAX_AUDIO_BYTES_PER_USER:
+                    self.full_audio[user_id] = self.full_audio[user_id][-MAX_AUDIO_BYTES_PER_USER:]
+
+                total = sum(len(v) for v in self.full_audio.values())
+
+            log.info(f"Total audio: {total} bytes from {len(self.full_audio)} users")
         except Exception as e:
             log.error(f"Sink read error: {e}")
 
