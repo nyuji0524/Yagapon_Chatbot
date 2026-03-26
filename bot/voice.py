@@ -14,7 +14,8 @@ from google.genai import types
 log = logging.getLogger("yagapon.voice")
 
 # リアルタイム処理の間隔（秒）
-REALTIME_INTERVAL = 15
+REALTIME_INTERVAL_CHAT = 8      # chatモード: 短い間隔で応答
+REALTIME_INTERVAL_MEETING = 20  # meetingモード: 会議の邪魔にならないよう長め
 # 音声データのメモリ上限（バイト）- 超えたら古いデータを破棄
 MAX_AUDIO_BYTES_PER_USER = 10 * 1024 * 1024  # 10MB（約1分半のWAV）
 MAX_TOTAL_AUDIO_BYTES = 50 * 1024 * 1024  # 50MB合計
@@ -97,16 +98,16 @@ class VoiceSession:
 
     async def _realtime_loop(self):
         """定期的に音声を取得 → 文字起こし → 応答"""
-        log.info(f"Realtime loop started (interval={REALTIME_INTERVAL}s)")
-        await asyncio.sleep(REALTIME_INTERVAL)  # 最初の間隔を待つ
+        interval = REALTIME_INTERVAL_CHAT if self.mode == VoiceMode.CHAT else REALTIME_INTERVAL_MEETING
+        log.info(f"Realtime loop started (mode={self.mode.value}, interval={interval}s)")
+        await asyncio.sleep(interval)  # 最初の間隔を待つ
 
         while self.is_active:
             try:
-                log.info("Processing realtime chunk...")
                 await self._process_realtime_chunk()
             except Exception as e:
                 log.error(f"Realtime processing error: {e}")
-            await asyncio.sleep(REALTIME_INTERVAL)
+            await asyncio.sleep(interval)
 
     async def _process_realtime_chunk(self):
         """録音中のsinkから直接データを読み取り → 文字起こし → 応答判定"""
