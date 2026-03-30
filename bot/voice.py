@@ -14,8 +14,9 @@ from google.genai import types
 log = logging.getLogger("yagapon.voice")
 
 # リアルタイム処理の間隔（秒）
-REALTIME_INTERVAL_CHAT = 8      # chatモード: 短い間隔で応答
-REALTIME_INTERVAL_MEETING = 20  # meetingモード: 会議の邪魔にならないよう長め
+REALTIME_INTERVAL_CHAT = 5      # chatモード: 短い間隔で即応答
+REALTIME_INTERVAL_MEETING = 15  # meetingモード: 会議の邪魔にならないよう長め
+REALTIME_INTERVAL_LISTEN = 30   # listenモード: 文字起こし蓄積用
 # 音声データのメモリ上限（バイト）- 超えたら古いデータを破棄
 MAX_AUDIO_BYTES_PER_USER = 10 * 1024 * 1024  # 10MB（約1分半のWAV）
 MAX_TOTAL_AUDIO_BYTES = 50 * 1024 * 1024  # 50MB合計
@@ -64,9 +65,8 @@ class VoiceSession:
             except Exception as e:
                 log.error(f"Failed to start recording: {e}")
 
-            # meeting/chatモードならリアルタイム処理ループ開始
-            if self.mode in (VoiceMode.MEETING, VoiceMode.CHAT):
-                self._realtime_task = asyncio.create_task(self._realtime_loop())
+            # 全モードでリアルタイム文字起こしループ開始（listenも段階的蓄積）
+            self._realtime_task = asyncio.create_task(self._realtime_loop())
         else:
             log.error("Voice client not connected after join")
 
@@ -98,7 +98,12 @@ class VoiceSession:
 
     async def _realtime_loop(self):
         """定期的に音声を取得 → 文字起こし → 応答"""
-        interval = REALTIME_INTERVAL_CHAT if self.mode == VoiceMode.CHAT else REALTIME_INTERVAL_MEETING
+        if self.mode == VoiceMode.CHAT:
+            interval = REALTIME_INTERVAL_CHAT
+        elif self.mode == VoiceMode.MEETING:
+            interval = REALTIME_INTERVAL_MEETING
+        else:
+            interval = REALTIME_INTERVAL_LISTEN
         log.info(f"Realtime loop started (mode={self.mode.value}, interval={interval}s)")
         await asyncio.sleep(interval)  # 最初の間隔を待つ
 
@@ -157,6 +162,10 @@ class VoiceSession:
                 log.info(f"Transcribed: [{name}]: {text[:50]}...")
 
         if not chunk_texts:
+            return
+
+        # listenモードは文字起こし蓄積のみ（応答しない）
+        if self.mode == VoiceMode.LISTEN:
             return
 
         # 応答が必要か判定 → 応答生成
@@ -407,34 +416,56 @@ class VoiceSession:
             return ""
 
     async def _generate_minutes(self) -> str:
-        """全体の音声文字起こし + テキストから議事録を生成"""
-        # リアルタイム処理で既に文字起こし済みならtranscriptを使う
-        if self.transcript:
-            all_content = self.transcript
-        else:
-            # 未処理の音声を文字起こし
-            all_content = []
+        """蓄積済みの文字起こしから議事録を生成（長時間でも対応可能）"""
+        # リアルタイムループで段階的に蓄積されたtranscriptを使用
+        all_content = list(self.transcript) if self.transcript else []
+
+        # transcriptが空なら未処理の音声をまとめて文字起こし（フォールバック）
+        if not all_content and self.full_audio:
             for user_id, audio_bytes in self.full_audio.items():
                 if len(audio_bytes) < 1000:
                     continue
                 member = self.channel.guild.get_member(user_id)
                 name = member.display_name if member else f"User {user_id}"
-                text = await self._transcribe_audio(bytes(audio_bytes), name)
-                if text:
-                    all_content.append(f"【{name}】\n{text}")
+                # 長時間の場合はチャンクに分割して文字起こし
+                chunk_size = 5 * 1024 * 1024  # 5MBずつ
+                for i in range(0, len(audio_bytes), chunk_size):
+                    chunk = bytes(audio_bytes[i:i + chunk_size])
+                    text = await self._transcribe_audio(chunk, name)
+                    if text:
+                        all_content.append(f"[{name}]: {text}")
 
         if not all_content:
             return "会議の内容が記録されていないぽん..."
 
         transcript_text = "\n".join(all_content)
 
+        # 語録を含める
+        glossary_text = ""
+        if self.bot and hasattr(self.bot, 'config'):
+            glossary_text = self.bot.config.get_glossary_text(self.guild_id)
+
+        glossary_hint = ""
+        if glossary_text:
+            glossary_hint = f"\n\n【用語辞書】（正しい表記に修正して使用してください）\n{glossary_text}"
+
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
         response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=(
                 "以下の会議の記録から、構造化された議事録を作成してください。\n"
-                "形式: 日時、参加者、議題、議論内容、決定事項、アクションアイテム\n\n"
-                f"{transcript_text}"
+                "形式:\n"
+                "## 議事録\n"
+                "- **日時**: \n"
+                "- **参加者**: \n"
+                "### 議題\n"
+                "### 議論内容\n"
+                "### 決定事項\n"
+                "### アクションアイテム\n"
+                "### 名言・印象的な発言\n\n"
+                "話者名は記録通りに使用してください。"
+                f"{glossary_hint}\n\n"
+                f"=== 会議記録 ===\n{transcript_text}"
             ),
         )
         return response.text
