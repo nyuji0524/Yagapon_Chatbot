@@ -128,6 +128,23 @@ class YagaPon(discord.Bot):
                 )
             return
 
+        # VCセッション中のテキストチャットを参考資料として収集
+        from bot.voice import get_session
+        vc_session = get_session(guild_id)
+        if vc_session and vc_session.is_active:
+            # VCのテキストチャンネル or botがいるVCと同じチャンネル
+            vc_text_ch = getattr(vc_session.channel, 'id', None)
+            msg_ch_id = message.channel.id
+            # VCチャンネルのテキストチャット、またはボイスチャンネル名と一致するテキストチャンネル
+            is_vc_text = (
+                msg_ch_id == vc_text_ch
+                or getattr(message.channel, 'name', '') == getattr(vc_session.channel, 'name', '')
+                or (hasattr(message.channel, 'category') and hasattr(vc_session.channel, 'category')
+                    and message.channel.category == vc_session.channel.category)
+            )
+            if is_vc_text and (message.content or message.attachments):
+                await vc_session.add_reference_from_message(message)
+
         # メンション → RAG回答
         if self.user.mentioned_in(message):
             await self._handle_question(message, corpus, guild_id)

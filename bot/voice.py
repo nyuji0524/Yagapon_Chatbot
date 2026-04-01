@@ -44,6 +44,37 @@ class VoiceSession:
         self._realtime_task: asyncio.Task | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
         self._last_audio_len: dict[int, int] = {}  # user_id -> 前回処理済みの音声バイト数
+        self._reference_docs: list[str] = []  # VCテキストチャットに投稿された参考資料
+
+    async def add_reference(self, content: str, source: str = "テキスト"):
+        """VCテキストチャットに投稿された資料を参考資料として追加"""
+        self._reference_docs.append(f"[{source}]\n{content}")
+        log.info(f"Reference doc added: {source} ({len(content)} chars)")
+
+    async def add_reference_from_message(self, message: discord.Message):
+        """Discordメッセージから参考資料を収集（テキスト+添付ファイル）"""
+        # テキスト本文
+        if message.content and not message.content.startswith("/"):
+            self._reference_docs.append(
+                f"[{message.author.display_name}の投稿]\n{message.content}"
+            )
+            log.info(f"Reference added from text: {len(message.content)} chars")
+
+        # 添付ファイル（テキスト系のみ読み取り）
+        for attachment in message.attachments:
+            if attachment.size > 1_000_000:  # 1MB超はスキップ
+                continue
+            ext = os.path.splitext(attachment.filename)[1].lower()
+            if ext in (".txt", ".md", ".csv", ".json", ".py", ".js", ".html"):
+                try:
+                    data = await attachment.read()
+                    text = data.decode("utf-8", errors="replace")
+                    self._reference_docs.append(
+                        f"[添付ファイル: {attachment.filename}]\n{text}"
+                    )
+                    log.info(f"Reference added from file: {attachment.filename} ({len(text)} chars)")
+                except Exception as e:
+                    log.warning(f"Failed to read attachment {attachment.filename}: {e}")
 
     async def start(self):
         self.voice_client = await self.channel.connect()
@@ -218,6 +249,16 @@ class VoiceSession:
                 "- 重要な情報を補足できるときは発言する\n"
                 "- それ以外は「SKIP」とだけ返す\n"
                 "- 返答は簡潔に。語尾に「ぽん」をつける\n\n"
+            )
+
+        # 参考資料（最優先で参照）
+        if self._reference_docs:
+            ref_text = "\n---\n".join(self._reference_docs)
+            prompt += (
+                "【★参考資料（最優先）】\n"
+                "以下の資料が提供されています。質問にはまずこの資料の内容を元に回答してください。\n"
+                "資料にない情報はナレッジベースを検索してください。\n\n"
+                f"{ref_text}\n\n"
             )
 
         if members_info:
