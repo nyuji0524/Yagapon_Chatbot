@@ -283,7 +283,7 @@ class VoiceSession:
 
         try:
             # chatモードは高速モデル、meetingモードは通常モデル
-            model = "gemini-2.0-flash" if self.mode == VoiceMode.CHAT else "gemini-2.5-flash"
+            model = "gemini-2.5-flash"
 
             # 参考資料がある場合はRAGなしで十分（資料がプロンプトに含まれている）
             corpus = self.bot.config.get_corpus(self.guild_id)

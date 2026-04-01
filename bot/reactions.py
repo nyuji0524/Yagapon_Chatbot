@@ -99,7 +99,7 @@ async def _flush_reactions(bot):
     try:
         client = _get_client()
         response = await client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
 
