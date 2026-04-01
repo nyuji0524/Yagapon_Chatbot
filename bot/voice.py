@@ -53,12 +53,15 @@ class VoiceSession:
 
     async def add_reference_from_message(self, message: discord.Message):
         """Discordメッセージから参考資料を収集（テキスト+添付ファイル）"""
+        added = False
+
         # テキスト本文
         if message.content and not message.content.startswith("/"):
             self._reference_docs.append(
                 f"[{message.author.display_name}の投稿]\n{message.content}"
             )
             log.info(f"Reference added from text: {len(message.content)} chars")
+            added = True
 
         # 添付ファイル（テキスト系のみ読み取り）
         for attachment in message.attachments:
@@ -73,8 +76,16 @@ class VoiceSession:
                         f"[添付ファイル: {attachment.filename}]\n{text}"
                     )
                     log.info(f"Reference added from file: {attachment.filename} ({len(text)} chars)")
+                    added = True
                 except Exception as e:
                     log.warning(f"Failed to read attachment {attachment.filename}: {e}")
+
+        # 読み取り完了を通知
+        if added:
+            try:
+                await message.add_reaction("📖")
+            except Exception:
+                pass
 
     async def start(self):
         self.voice_client = await self.channel.connect()
@@ -234,11 +245,12 @@ class VoiceSession:
                 "ボイスチャンネルで友達とおしゃべりしています。\n\n"
                 "【行動ルール】\n"
                 "- 誰かが話したら必ず返事をする。「SKIP」は絶対に使わない\n"
-                "- 質問されたら、ナレッジベースを検索して具体的に回答する\n"
+                "- 質問されたら、参考資料やナレッジベースを元に具体的に回答する\n"
                 "- 雑談には楽しくノリよく返す。相槌・感想・質問返しなど自然に\n"
                 "- 返答は短く自然に（1-3文）。語尾に「ぽん」をつける\n"
-                "- 質問への回答はしっかり答えつつも簡潔に\n"
-                "- 明るく元気なキャラクターで、会話を盛り上げる\n\n"
+                "- 明るく元気なキャラクターで、会話を盛り上げる\n"
+                "- 絶対に文字起こしの内容をそのまま繰り返さない。自分の言葉で返答する\n"
+                "- 相手の発言を要約したりオウム返しするのではなく、内容に対するリアクションや回答を返す\n\n"
             )
         else:  # MEETING
             prompt = (
@@ -270,11 +282,14 @@ class VoiceSession:
         prompt += f"=== 今の発言 ===\n{current}"
 
         try:
-            # chat/meetingどちらもRAG検索を使う
+            # chatモードは高速モデル、meetingモードは通常モデル
+            model = "gemini-2.0-flash-lite" if self.mode == VoiceMode.CHAT else "gemini-2.5-flash"
+
+            # 参考資料がある場合はRAGなしで十分（資料がプロンプトに含まれている）
             corpus = self.bot.config.get_corpus(self.guild_id)
-            if corpus:
+            if corpus and not self._reference_docs:
                 response = await client.aio.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model=model,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         tools=[
@@ -288,7 +303,7 @@ class VoiceSession:
                 )
             else:
                 response = await client.aio.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model=model,
                     contents=prompt,
                 )
 
