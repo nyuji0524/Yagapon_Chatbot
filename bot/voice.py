@@ -282,7 +282,9 @@ class VoiceSession:
         prompt += f"=== 今の発言 ===\n{current}"
 
         try:
-            # chatモードは高速モデル、meetingモードは通常モデル
+            import time
+            t0 = time.monotonic()
+
             model = "gemini-2.5-flash"
 
             # 参考資料がある場合はRAGなしで十分（資料がプロンプトに含まれている）
@@ -307,7 +309,9 @@ class VoiceSession:
                     contents=prompt,
                 )
 
+            t1 = time.monotonic()
             text = (response.text or "").strip()
+            log.info(f"Response generated in {t1-t0:.1f}s: {text[:60]}...")
             # chatモードではSKIPしない（必ず返事する）
             if self.mode == VoiceMode.CHAT:
                 if not text or text.upper() == "SKIP":
@@ -533,13 +537,17 @@ class VoiceSession:
 
         from bot.tts import VOICE, PITCH, RATE
         try:
+            import time
             import edge_tts
 
+            t0 = time.monotonic()
             communicate = edge_tts.Communicate(text[:500], VOICE, pitch=PITCH, rate=RATE)
             tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
             tmp_path = tmp.name
             tmp.close()
             await communicate.save(tmp_path)
+            t1 = time.monotonic()
+            log.info(f"TTS generated in {t1-t0:.1f}s")
 
             if self.voice_client.is_playing():
                 self.voice_client.stop()
