@@ -286,27 +286,12 @@ class VoiceSession:
         )
 
         try:
-            # 音声ファイルをアップロード
-            loop = asyncio.get_event_loop()
-            audio_parts = []
-
+            # 音声をインラインバイトで直接渡す（アップロード不要で高速）
+            contents = []
             for user_id, (name, audio_bytes) in audio_chunks.items():
                 if not audio_bytes[:4] == b'RIFF':
                     audio_bytes = self._pcm_to_wav(audio_bytes)
-
-                uploaded = await loop.run_in_executor(
-                    None,
-                    lambda ab=audio_bytes, n=name: client.files.upload(
-                        file=io.BytesIO(ab),
-                        config={"mime_type": "audio/wav", "display_name": f"vc-{n}"},
-                    ),
-                )
-                audio_parts.append((uploaded, name))
-
-            # 音声+プロンプトを一括でGeminiに送信
-            contents = []
-            for uploaded, name in audio_parts:
-                contents.append(types.Part.from_uri(file_uri=uploaded.uri, mime_type="audio/wav"))
+                contents.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"))
             contents.append(prompt)
 
             response = await client.aio.models.generate_content(
@@ -317,13 +302,6 @@ class VoiceSession:
             t1 = time.monotonic()
             raw = (response.text or "").strip()
             log.info(f"Audio response generated in {t1-t0:.1f}s: {raw[:80]}...")
-
-            # アップロードしたファイルを削除（バックグラウンド）
-            for uploaded, _ in audio_parts:
-                try:
-                    await loop.run_in_executor(None, lambda u=uploaded: client.files.delete(name=u.name))
-                except Exception:
-                    pass
 
             # パース: TRANSCRIPT: ... RESPONSE: ...
             transcript_text = ""
