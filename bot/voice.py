@@ -182,42 +182,189 @@ class VoiceSession:
         if not current_audio:
             return
 
-        # 前回からの差分だけ文字起こし
-        chunk_texts = []
+        # 差分の音声チャンクを収集
+        audio_chunks = {}  # user_id -> (name, new_audio_bytes)
         for user_id, audio_bytes in current_audio.items():
             prev_len = self._last_audio_len.get(user_id, 0)
             if len(audio_bytes) <= prev_len + 1000:
                 continue  # 新しい音声がほぼない
-
             self._last_audio_len[user_id] = len(audio_bytes)
-
-            # 差分の音声を文字起こし
             new_audio = audio_bytes[prev_len:]
             member = self.channel.guild.get_member(user_id)
             name = member.display_name if member else f"User {user_id}"
+            audio_chunks[user_id] = (name, new_audio)
 
-            log.info(f"Transcribing {len(new_audio)} bytes from {name}")
-            text = await self._transcribe_audio(new_audio, name)
-            if text and text.strip():
-                chunk_texts.append({"speaker": name, "text": text})
-                self.transcript.append(f"[{name}]: {text}")
-                log.info(f"Transcribed: [{name}]: {text[:50]}...")
-
-        if not chunk_texts:
+        if not audio_chunks:
             return
 
-        # listenモードは文字起こし蓄積のみ（応答しない）
+        # listenモード: 文字起こしのみ（従来方式）
         if self.mode == VoiceMode.LISTEN:
+            for user_id, (name, new_audio) in audio_chunks.items():
+                log.info(f"Transcribing {len(new_audio)} bytes from {name}")
+                text = await self._transcribe_audio(new_audio, name)
+                if text and text.strip():
+                    self.transcript.append(f"[{name}]: {text}")
+                    log.info(f"Transcribed: [{name}]: {text[:50]}...")
             return
 
-        # 応答が必要か判定 → 応答生成
-        response = await self._generate_realtime_response(chunk_texts)
-        if response:
-            await self.speak(response)
-            self._conversation_history.append({"role": "assistant", "text": response})
+        # chat/meetingモード: 音声を直接Geminiに渡して応答生成（文字起こし不要）
+        result = await self._generate_response_from_audio(audio_chunks)
+        if result:
+            transcript_text, response = result
+            # 議事録用に文字起こしを蓄積
+            if transcript_text:
+                self.transcript.append(transcript_text)
+            if response:
+                await self.speak(response)
+                self._conversation_history.append({"role": "assistant", "text": response})
+
+    async def _generate_response_from_audio(self, audio_chunks: dict) -> tuple[str, str] | None:
+        """音声を直接Geminiに渡して、文字起こし+応答を1回のAPI呼び出しで生成"""
+        import time
+        t0 = time.monotonic()
+
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+
+        # 会話履歴
+        history = ""
+        if self._conversation_history:
+            recent = self._conversation_history[-10:]
+            history = "\n".join(
+                f"[{'やがぽん' if h['role'] == 'assistant' else h.get('speaker', '?')}]: {h['text']}"
+                for h in recent
+            )
+
+        # メンバー情報と語録
+        members_info = self.bot._build_members_info(self.guild_id) if hasattr(self.bot, '_build_members_info') else ""
+        glossary_text = self.bot.config.get_glossary_text(self.guild_id)
+
+        # 話者情報
+        speakers = ", ".join(name for name, _ in audio_chunks.values())
+
+        if self.mode == VoiceMode.CHAT:
+            role_prompt = (
+                "あなたは慶應義塾大学 矢上祭実行委員会のマスコット「やがぽん」です。\n"
+                "ボイスチャンネルで友達とおしゃべりしています。\n\n"
+                "【行動ルール】\n"
+                "- 誰かが話したら必ず返事をする\n"
+                "- 質問されたら参考資料やナレッジベースを元に具体的に回答する\n"
+                "- 雑談には楽しくノリよく返す\n"
+                "- 返答は短く自然に（1-3文）。語尾に「ぽん」をつける\n"
+                "- 明るく元気なキャラクターで会話を盛り上げる\n"
+                "- 相手の発言をオウム返しせず、内容に対するリアクションや回答を返す\n\n"
+            )
+        else:
+            role_prompt = (
+                "あなたは会議に参加している「やがぽん」です。\n\n"
+                "【行動ルール】\n"
+                "- 名前（やがぽん）を呼ばれたら必ず返答する\n"
+                "- 質問されたら回答する。重要な補足ができるときは発言する\n"
+                "- それ以外は応答を空にする\n"
+                "- 返答は簡潔に。語尾に「ぽん」をつける\n\n"
+            )
+
+        # 参考資料
+        ref_section = ""
+        if self._reference_docs:
+            ref_text = "\n---\n".join(self._reference_docs)
+            ref_section = (
+                "【★参考資料（最優先）】\n"
+                "質問にはまずこの資料の内容を元に回答してください。\n\n"
+                f"{ref_text}\n\n"
+            )
+
+        prompt = (
+            f"{role_prompt}"
+            f"{ref_section}"
+            f"{'【メンバー情報】' + chr(10) + members_info + chr(10)*2 if members_info else ''}"
+            f"{'【用語辞書】' + chr(10) + glossary_text + chr(10)*2 if glossary_text else ''}"
+            f"{'=== これまでの会話 ===' + chr(10) + history + chr(10)*2 if history else ''}"
+            f"添付の音声は {speakers} の発言です。\n\n"
+            "【出力形式】以下の形式で出力してください。\n"
+            "TRANSCRIPT: （音声の文字起こし。話者名を含めて）\n"
+            "RESPONSE: （あなたの返答。不要なら空）"
+        )
+
+        try:
+            # 音声ファイルをアップロード
+            loop = asyncio.get_event_loop()
+            audio_parts = []
+
+            for user_id, (name, audio_bytes) in audio_chunks.items():
+                if not audio_bytes[:4] == b'RIFF':
+                    audio_bytes = self._pcm_to_wav(audio_bytes)
+
+                uploaded = await loop.run_in_executor(
+                    None,
+                    lambda ab=audio_bytes, n=name: client.files.upload(
+                        file=io.BytesIO(ab),
+                        config={"mime_type": "audio/wav", "display_name": f"vc-{n}"},
+                    ),
+                )
+                audio_parts.append((uploaded, name))
+
+            # 音声+プロンプトを一括でGeminiに送信
+            contents = []
+            for uploaded, name in audio_parts:
+                contents.append(types.Part.from_uri(file_uri=uploaded.uri, mime_type="audio/wav"))
+            contents.append(prompt)
+
+            response = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents,
+            )
+
+            t1 = time.monotonic()
+            raw = (response.text or "").strip()
+            log.info(f"Audio response generated in {t1-t0:.1f}s: {raw[:80]}...")
+
+            # アップロードしたファイルを削除（バックグラウンド）
+            for uploaded, _ in audio_parts:
+                try:
+                    await loop.run_in_executor(None, lambda u=uploaded: client.files.delete(name=u.name))
+                except Exception:
+                    pass
+
+            # パース: TRANSCRIPT: ... RESPONSE: ...
+            transcript_text = ""
+            response_text = ""
+
+            if "TRANSCRIPT:" in raw and "RESPONSE:" in raw:
+                parts = raw.split("RESPONSE:")
+                transcript_part = parts[0]
+                response_text = parts[1].strip() if len(parts) > 1 else ""
+                transcript_text = transcript_part.replace("TRANSCRIPT:", "").strip()
+            else:
+                # パース失敗時はすべてを応答として扱う
+                response_text = raw
+
+            # 会話履歴に追加
+            if transcript_text:
+                self._conversation_history.append({"role": "user", "speaker": speakers, "text": transcript_text})
+
+            # chatモードではSKIPしない
+            if self.mode == VoiceMode.CHAT:
+                if not response_text or response_text.upper() == "SKIP":
+                    import random
+                    fallbacks = [
+                        "うんうん、なるほどぽん！", "へぇ〜、そうなんだぽん！",
+                        "おもしろいぽん！", "わかるわかるぽん〜！",
+                        "それいいねぽん！", "すごいぽん！",
+                        "たしかに〜ぽん！", "えー！まじぽん？",
+                    ]
+                    response_text = random.choice(fallbacks)
+            else:
+                if not response_text or response_text.upper() == "SKIP":
+                    return (transcript_text, "") if transcript_text else None
+
+            return (transcript_text, response_text)
+
+        except Exception as e:
+            log.error(f"Audio response error: {e}")
+            return None
 
     async def _generate_realtime_response(self, chunk_texts: list[dict]) -> str | None:
-        """文字起こし結果から応答が必要か判定し、必要なら応答を生成"""
+        """文字起こし結果から応答が必要か判定し、必要なら応答を生成（フォールバック用）"""
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
 
         # 会話履歴を含めたコンテキスト
