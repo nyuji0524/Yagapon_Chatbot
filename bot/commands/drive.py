@@ -1,7 +1,6 @@
 """Google Drive連携設定コマンド"""
 
 import discord
-from discord import app_commands
 
 from bot.gdrive import upload_to_drive
 

@@ -17,9 +17,9 @@ log = logging.getLogger("yagapon.voice")
 REALTIME_INTERVAL_CHAT = 5      # chatモード: 短い間隔で即応答
 REALTIME_INTERVAL_MEETING = 15  # meetingモード: 会議の邪魔にならないよう長め
 REALTIME_INTERVAL_LISTEN = 30   # listenモード: 文字起こし蓄積用
-# 音声データのメモリ上限（バイト）- 超えたら古いデータを破棄
-MAX_AUDIO_BYTES_PER_USER = 10 * 1024 * 1024  # 10MB（約1分半のWAV）
-MAX_TOTAL_AUDIO_BYTES = 50 * 1024 * 1024  # 50MB合計
+# 音声データのメモリ上限（バイト）- e2-micro(1GB)対策
+MAX_AUDIO_BYTES_PER_USER = 3 * 1024 * 1024  # 3MB per user
+MAX_TOTAL_AUDIO_BYTES = 10 * 1024 * 1024  # 10MB合計
 
 
 class VoiceMode(Enum):
