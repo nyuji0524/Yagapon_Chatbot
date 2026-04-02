@@ -23,7 +23,7 @@ class YagaPon(discord.Bot):
         self.corpus = CorpusManager()
 
         # コマンド登録
-        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd, voiceprint, glossary, minutes
+        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd, voiceprint, glossary, minutes, drive
         setup.register(self)
         status.register(self)
         ignore.register(self)
@@ -37,6 +37,7 @@ class YagaPon(discord.Bot):
         voiceprint.register(self)
         glossary.register(self)
         minutes.register(self)
+        drive.register(self)
 
     async def on_ready(self):
         self.corpus.start_flush_loop()
