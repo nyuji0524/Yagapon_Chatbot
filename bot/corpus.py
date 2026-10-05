@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from google import genai
 from google.genai import types
 
+from bot.ai_models import generation_config, log_usage, rag_model
+
 log = logging.getLogger("yagapon.corpus")
 
 # バッチ設定
@@ -19,7 +21,7 @@ FLUSH_TIME_SECONDS = 7200      # 2時間でflush
 FLUSH_CHECK_INTERVAL = 120     # 2分ごとにチェック
 
 # レート制限
-DAILY_QUERY_LIMIT = 400  # 1ギルドあたり1日の質問上限
+DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
 
 SYSTEM_INSTRUCTION = (
     "あなたは慶應義塾大学 矢上祭実行委員会の専属AI「おしゃべりやがぽん」だぽん。\n"
@@ -295,10 +297,14 @@ class CorpusManager:
             if glossary_text:
                 system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
 
+            model = rag_model()
             response = await self._client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model,
                 contents=question,
-                config=types.GenerateContentConfig(
+                config=generation_config(
+                    model,
+                    thinking_level="low",
+                    max_output_tokens=1024,
                     system_instruction=system,
                     tools=[
                         types.Tool(
@@ -309,6 +315,7 @@ class CorpusManager:
                     ],
                 ),
             )
+            log_usage(log, "rag_query", model, response)
             return response.text or "回答を生成できなかったぽん..."
         except Exception as e:
             log.error(f"RAG query error: {e}")

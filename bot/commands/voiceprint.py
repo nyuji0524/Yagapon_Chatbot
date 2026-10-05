@@ -13,6 +13,7 @@ import discord
 from google import genai
 from google.genai import types
 
+from bot.ai_models import audio_analysis_model, generation_config, log_usage
 from bot.authorization import can_manage_member
 
 log = logging.getLogger("yagapon.voiceprint")
@@ -35,8 +36,9 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
             ),
         )
 
+        model = audio_analysis_model()
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model,
             contents=[
                 types.Part.from_uri(file_uri=uploaded.uri, mime_type="audio/wav"),
                 "この音声ファイルを分析して、以下のJSON形式で回答してください。\n"
@@ -48,7 +50,9 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
                 "  例: 「落ち着いたダンディーな声だぽん！」「明るくてハキハキした素敵な声だぽん！」「優しくて聞き心地の良い声だぽん！」\n"
                 "JSONのみ返してください。"
             ],
+            config=generation_config(model, thinking_level="low", max_output_tokens=256),
         )
+        log_usage(log, "voice_sample_validation", model, response)
 
         import json
         text = response.text.strip()

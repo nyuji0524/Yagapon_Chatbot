@@ -11,6 +11,8 @@ import discord
 from fastapi import APIRouter, HTTPException, Request
 from google import genai
 
+from bot.ai_models import generation_config, log_usage, review_model
+
 log = logging.getLogger("yagapon.github")
 
 router = APIRouter()
@@ -239,10 +241,13 @@ async def _process_review(bot, guild_id: int, data: dict):
 
         try:
             client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+            model = review_model()
             response = await client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model,
                 contents=prompt,
+                config=generation_config(model, thinking_level="medium", max_output_tokens=4096),
             )
+            log_usage(log, "push_review", model, response)
             review = response.text
         except Exception as e:
             log.error(f"Gemini review error: {e}")

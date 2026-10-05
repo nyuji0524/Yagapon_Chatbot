@@ -18,10 +18,10 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - **TTS読み上げ**: edge-tts（ja-JP-NanamiNeural）でVCに音声出力
 - **議事録自動生成**: `/leave`時にGeminiで構造化議事録を作成 → Google Docsに保存
 
-### 声紋登録
+### 音声サンプル登録（互換機能）
 - `/voiceprint register` でVCで10秒間録音、Geminiで音声検証
-- 対面会議の録音時に話者識別に活用
-- メンバー情報と紐づけて管理
+- 既存データとの互換性のため管理コマンドを維持
+- 議事録の話者識別には使用せず、Transcribeの話者ラベルを人が確認
 
 ### コードレビュー（移行中）
 - 現行はpush WebhookをトリガーにGeminiがコードレビュー
@@ -135,6 +135,13 @@ Yagapon_Chatbot/
 
 ```
 GOOGLE_API_KEY=your_gemini_api_key
+YAGAPON_RAG_MODEL=gemini-3.8-flash
+YAGAPON_RESPONSE_MODEL=gemini-3.8-flash
+YAGAPON_FAST_MODEL=gemini-3.1-flash-lite
+YAGAPON_TRANSCRIBE_MODEL=gemini-3.5-transcribe
+YAGAPON_AUDIO_MODEL=gemini-3.8-flash
+YAGAPON_REVIEW_MODEL=gemini-3.8-flash
+YAGAPON_DAILY_QUERY_LIMIT=400
 DISCORD_TOKEN=your_discord_bot_token
 GITHUB_WEBHOOK_SECRET=your_webhook_secret
 YAGAPON_API_TOKEN=generate_a_long_random_token
@@ -144,6 +151,11 @@ GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/xxx/exec
 YAGAPON_CONFIG_PATH=/data/server_config.json
 YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 ```
+
+RAGと回答生成はGemini 3.8 Flash、音声認識はGemini 3.5 Transcribe、
+短い要約やリアクション判定はFlash-Liteを既定値にする。モデル名は環境変数で
+切り戻せる。TTSは引き続きedge-ttsを使う。料金前提と予算ガードは
+[`docs/ai-model-budget.md`](docs/ai-model-budget.md)を参照。
 
 `YAGAPON_API_TOKEN` は `/status`、`/ask`、`/backfill` APIのBearer認証に使う。`GITHUB_WEBHOOK_SECRET` と別の値を設定する。
 

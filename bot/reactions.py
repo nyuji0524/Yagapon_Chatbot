@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from google import genai
 
+from bot.ai_models import fast_model, generation_config, log_usage
+
 log = logging.getLogger("yagapon.reactions")
 
 BATCH_SIZE = 5
@@ -96,10 +98,13 @@ async def _flush_reactions(bot):
 
     try:
         client = _get_client()
+        model = fast_model()
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model,
             contents=prompt,
+            config=generation_config(model, thinking_level="low", max_output_tokens=128),
         )
+        log_usage(log, "reaction_batch", model, response)
 
         # JSONパース
         import json
