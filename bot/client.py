@@ -169,7 +169,10 @@ class YagaPon(discord.Bot):
         # 学習 (ignore/短文/コマンドは除外)
         if self.config.is_ignored(guild_id, message.channel.id):
             return
-        if len(message.content) < 4 or message.content.startswith("/"):
+        learning_content = self.corpus._message_content(message)
+        if not learning_content or learning_content.startswith("/"):
+            return
+        if len(learning_content) < 4 and not message.attachments:
             return
 
         self.corpus.add_message(
@@ -177,9 +180,11 @@ class YagaPon(discord.Bot):
             channel_id=message.channel.id,
             channel_name=str(message.channel),
             author=message.author.display_name,
-            content=message.content,
+            content=learning_content,
             timestamp=message.created_at,
             corpus_store_name=corpus,
+            message_id=message.id,
+            source_url=getattr(message, "jump_url", ""),
         )
 
         # スマートリアクション (別モジュールで処理)

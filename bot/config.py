@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -88,6 +89,27 @@ class ConfigManager:
         g = self._guild(guild_id)
         g["bureau"] = bureau
         g["corpus_store_name"] = corpus_store_name
+        await self._save()
+
+    # ------ backfill cursors ------
+
+    def get_backfill_cursor(self, guild_id: int, channel_id: int) -> dict | None:
+        """最後に正常完了した履歴取り込み位置を返す。"""
+        cursor = self._guild(guild_id).get("backfill_cursors", {}).get(str(channel_id))
+        return dict(cursor) if cursor else None
+
+    async def set_backfill_cursor(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        message_at: datetime,
+    ):
+        cursors = self._guild(guild_id).setdefault("backfill_cursors", {})
+        cursors[str(channel_id)] = {
+            "message_id": str(message_id),
+            "message_at": message_at.isoformat(),
+        }
         await self._save()
 
     # ------ ignore channels ------

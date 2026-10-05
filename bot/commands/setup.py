@@ -450,28 +450,53 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
     ]
 
     total = 0
-    for i, ch in enumerate(channels, 1):
-        try:
-            async def progress(c, _ch=ch, _i=i):
+    documents = 0
+    failures = []
+    if not wizard.bot.corpus.start_backfill(wizard.guild.id):
+        await wizard.update("別の履歴取り込みが実行中だぽん。完了後に `/backfill` を実行してねぽん。", View())
+        return
+    try:
+        for i, ch in enumerate(channels, 1):
+            try:
+                async def progress(c, _ch=ch, _i=i):
+                    await wizard.update(
+                        f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件 | 合計: {total:,}件",
+                        View(),
+                    )
+
+                result = await wizard.bot.corpus.backfill_channel(
+                    ch,
+                    corpus,
+                    after=after,
+                    progress_callback=progress,
+                    replace_existing=True,
+                )
+                total += result.messages_indexed
+                documents += result.documents_uploaded
+                if result.latest_message_id and result.latest_message_at:
+                    await wizard.bot.config.set_backfill_cursor(
+                        wizard.guild.id,
+                        ch.id,
+                        result.latest_message_id,
+                        result.latest_message_at,
+                    )
                 await wizard.update(
-                    f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件 | 合計: {total:,}件",
+                    f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: "
+                    f"{result.messages_indexed:,}件 / {result.documents_uploaded:,}文書 | 合計: {total:,}件",
                     View(),
                 )
-
-            count = await wizard.bot.corpus.backfill_channel(ch, corpus, after=after, progress_callback=progress)
-            total += count
-            await wizard.update(
-                f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: {count:,}件完了 | 合計: {total:,}件",
-                View(),
-            )
-        except Exception as e:
-            log.warning(f"Backfill error #{ch.name}: {e}")
+            except Exception as e:
+                failures.append(ch.name)
+                log.exception("Backfill error #%s: %s", ch.name, e)
+    finally:
+        wizard.bot.corpus.finish_backfill(wizard.guild.id)
 
     wizard.step = 7
+    failure_text = f"⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}\n" if failures else ""
     await wizard.update(
         f"🎉 **セットアップ完了だぽん！**\n"
-        f"合計 **{total:,}件** のメッセージを学習したぽん！\n"
-        f"何でも聞いてねぽん！",
+        f"合計 **{total:,}件 / {documents:,}文書** を索引したぽん！\n"
+        f"{failure_text}何でも聞いてねぽん！",
         View(),
     )
 

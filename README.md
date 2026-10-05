@@ -61,7 +61,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/setup` | 初期設定ウィザード（1メッセージ完結型） |
 | `/reset` | 設定リセット（管理者のみ） |
 | `/status` | 現在の設定状況を表示 |
-| `/backfill [days] [channel]` | 過去ログを取り込み |
+| `/backfill [mode] [days] [channel]` | 差分更新（推奨）または指定期間を安全に再構築 |
 | `/ignore` | 現在のチャンネルを学習対象から除外 |
 | `/join <mode>` | VCに参加（listen/meeting/chat） |
 | `/leave` | VCから退出（議事録生成） |
@@ -197,6 +197,7 @@ pytest -q
 Pull Requestと`main`へのpushでは、GitHub Actionsがlint、単体テスト、Dockerイメージのビルドを確認する。
 
 Google共有ドライブからKnowledge用draftを作る手順は[Drive同期設計](docs/google-drive-knowledge-sync.md)を参照。
+File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質とbackfill運用](docs/file-search-operations.md)を参照。
 
 ## マルチギルド対応
 
