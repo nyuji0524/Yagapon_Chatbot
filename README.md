@@ -184,6 +184,8 @@ pytest -q
 
 Pull Requestと`main`へのpushでは、GitHub Actionsがlint、単体テスト、Dockerイメージのビルドを確認する。
 
+Google共有ドライブからKnowledge用draftを作る手順は[Drive同期設計](docs/google-drive-knowledge-sync.md)を参照。
+
 ## マルチギルド対応
 
 複数の局（サーバー）で同時利用可能。各サーバーごとに独立したコーパス・設定・メンバー管理。

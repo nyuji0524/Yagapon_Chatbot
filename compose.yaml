@@ -21,3 +21,19 @@ services:
       options:
         max-size: 10m
         max-file: "5"
+
+  knowledge-sync:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    profiles: [tools]
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      YAGAPON_DRIVE_SYNC_STATE: /data/drive-sync-state.json
+      YAGAPON_KNOWLEDGE_OUTPUT: /data/knowledge-drafts
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    command: ["python", "-m", "knowledge_sync"]
+    healthcheck:
+      disable: true

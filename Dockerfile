@@ -19,6 +19,7 @@ RUN pip install --requirement requirements.txt
 
 COPY api ./api
 COPY bot ./bot
+COPY knowledge_sync ./knowledge_sync
 COPY main.py ./
 
 RUN useradd --create-home --uid 10001 yagapon \
