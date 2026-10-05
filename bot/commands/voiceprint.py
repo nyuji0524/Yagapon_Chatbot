@@ -17,7 +17,7 @@ from bot.authorization import can_manage_member
 
 log = logging.getLogger("yagapon.voiceprint")
 
-VOICEPRINT_DIR = "voiceprints"
+VOICEPRINT_DIR = os.environ.get("YAGAPON_VOICEPRINT_DIR", "voiceprints")
 RECORD_DURATION = 10  # 秒
 
 

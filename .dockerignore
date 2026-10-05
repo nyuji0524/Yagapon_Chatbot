@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.venv
+venv
+__pycache__
+*.py[cod]
+*.log
+*.mp3
+*.wav
+*.tmp
+data
+server_config.json
+service_account.json
+voiceprints
+tests

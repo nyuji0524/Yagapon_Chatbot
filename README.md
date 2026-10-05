@@ -23,8 +23,9 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - 対面会議の録音時に話者識別に活用
 - メンバー情報と紐づけて管理
 
-### コードレビュー（GitHub Webhook）
-- pushをトリガーにGeminiがコードレビュー
+### コードレビュー（移行中）
+- 現行はpush WebhookをトリガーにGeminiがコードレビュー
+- 今後はPull Request用の再利用可能なGitHub Actions workflowへ移行
 - コード差分 + リポジトリ全体のコンテキストを参照
 - 重大度別の指摘事項（Critical / Major / Minor / Trivial）
 - Discordチャンネルに自動投稿
@@ -85,6 +86,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 ```
 Yagapon_Chatbot/
 ├── main.py              # エントリポイント（Bot + FastAPI同時起動）
+├── Dockerfile           # Python・ffmpeg・音声受信依存を固定
+├── compose.yaml         # 常駐・再起動・永続データ・ログ設定
 ├── requirements.txt
 ├── .env                 # 環境変数（非公開）
 ├── bot/
@@ -118,11 +121,11 @@ Yagapon_Chatbot/
 ## 技術スタック
 
 - **Discord**: py-cord 2.7+ (DAVE voice receive patch適用)
-- **AI**: Google Gemini 2.5 Flash（RAG, 文字起こし, レビュー, リアクション判定）
+- **AI**: Google Gemini（用途別モデルへの移行中）
 - **TTS**: edge-tts（ja-JP-NanamiNeural）
 - **API**: FastAPI + uvicorn（同一asyncioループ）
 - **Drive**: Google Apps Script経由
-- **インフラ**: GCE e2-micro（永久無料枠）
+- **インフラ**: Docker Compose + GCE
 
 ## セットアップ
 
@@ -134,35 +137,52 @@ Yagapon_Chatbot/
 GOOGLE_API_KEY=your_gemini_api_key
 DISCORD_TOKEN=your_discord_bot_token
 GITHUB_WEBHOOK_SECRET=your_webhook_secret
+YAGAPON_API_TOKEN=generate_a_long_random_token
 API_HOST=http://your-server-ip:8000
 API_PORT=8000
 GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/xxx/exec
+YAGAPON_CONFIG_PATH=/data/server_config.json
+YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 ```
 
-### 2. 依存関係インストール
+`YAGAPON_API_TOKEN` は `/status`、`/ask`、`/backfill` APIのBearer認証に使う。`GITHUB_WEBHOOK_SECRET` と別の値を設定する。
+
+### 2. Dockerで起動
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+mkdir -p data
+docker compose up --build
 ```
 
-**音声録音を使う場合**（DAVE対応パッチ）：
-```bash
-pip install "git+https://github.com/Pycord-Development/pycord@refs/pull/3159/head#egg=py-cord[voice]"
-sudo apt install ffmpeg libopus0
-```
+コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。
 
-### 3. 起動
+バックグラウンド起動：
 
 ```bash
-nohup python main.py > bot.log 2>&1 &
+docker compose up -d
+docker compose logs -f yagapon
 ```
 
-### 4. Discord設定
+GCEではsystemdからComposeを管理し、再起動後も自動復旧させる。詳しくは[デプロイ手順](deploy/README.md)を参照。
+
+### 3. Discord設定
 
 1. Discordサーバーで `/setup` を実行
 2. ウィザードに従って設定を進める
+
+## 開発・テスト
+
+Python 3.12を使用する。
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
+
+Pull Requestと`main`へのpushでは、GitHub Actionsがlint、単体テスト、Dockerイメージのビルドを確認する。
 
 ## マルチギルド対応
 

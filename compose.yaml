@@ -1,0 +1,23 @@
+services:
+  yagapon:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      API_PORT: "8000"
+      YAGAPON_CONFIG_PATH: /data/server_config.json
+      YAGAPON_VOICEPRINT_DIR: /data/voiceprints
+    ports:
+      - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    stop_grace_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"

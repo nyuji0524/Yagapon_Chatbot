@@ -6,7 +6,12 @@ import os
 from pathlib import Path
 from typing import Optional
 
-CONFIG_PATH = Path(__file__).parent.parent / "server_config.json"
+CONFIG_PATH = Path(
+    os.environ.get(
+        "YAGAPON_CONFIG_PATH",
+        Path(__file__).parent.parent / "server_config.json",
+    )
+)
 
 
 class ConfigManager:
