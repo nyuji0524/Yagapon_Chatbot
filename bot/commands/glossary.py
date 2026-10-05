@@ -7,6 +7,8 @@
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 
 def register(bot):
     group = bot.create_group("glossary", "語録辞書だぽん！")
@@ -17,6 +19,8 @@ def register(bot):
     @discord.option("reading", description="ひらがな読み（例: やがさぽ）", required=False, default="")
     @discord.option("aliases", description="別名（カンマ区切り。例: やがサポート,YagaSupport）", required=False, default="")
     async def glossary_add(ctx: discord.ApplicationContext, term: str, definition: str, reading: str = "", aliases: str = ""):
+        if not await require_guild_admin(ctx):
+            return
         guild_id = ctx.guild_id
         glossary = bot.config.get_glossary(guild_id)
 
@@ -62,6 +66,8 @@ def register(bot):
     @group.command(name="delete", description="語録から用語を削除するぽん")
     @discord.option("term", description="削除する用語")
     async def glossary_delete(ctx: discord.ApplicationContext, term: str):
+        if not await require_guild_admin(ctx):
+            return
         glossary = bot.config.get_glossary(ctx.guild_id)
         if term in glossary:
             del glossary[term]
@@ -72,6 +78,8 @@ def register(bot):
 
     @group.command(name="bulk", description="語録を一括登録するぽん！")
     async def glossary_bulk(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         await ctx.send_modal(BulkGlossaryModal(bot))
 
 

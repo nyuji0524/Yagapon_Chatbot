@@ -7,11 +7,14 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 log = logging.getLogger("yagapon.backfill")
 
 
 def register(bot):
     @bot.slash_command(name="backfill", description="過去ログを取り込むぽん！")
+    @discord.default_permissions(administrator=True)
     @discord.option(
         "days", description="何日分遡るか (省略で全量)",
         choices=[
@@ -31,6 +34,8 @@ def register(bot):
         days: int = 0,
         channel: discord.TextChannel = None,
     ):
+        if not await require_guild_admin(ctx):
+            return
         await ctx.defer()
 
         corpus = bot.config.get_corpus(ctx.guild_id)

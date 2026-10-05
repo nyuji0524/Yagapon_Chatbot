@@ -1,7 +1,8 @@
 """設定管理 - サーバーごとの設定 + メンバー情報を server_config.json で管理"""
 
-import json
 import asyncio
+import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -36,26 +37,31 @@ class ConfigManager:
     }
     """
 
-    def __init__(self):
+    def __init__(self, config_path: Path = CONFIG_PATH):
         self._lock = asyncio.Lock()
         self._config: dict = {}
+        self._config_path = config_path
         self._load()
 
     # ------ persistence ------
 
     def _load(self):
-        if CONFIG_PATH.exists():
+        if self._config_path.exists():
             try:
-                self._config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._config = {}
+                self._config = json.loads(self._config_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                # 壊れた設定を空設定として上書きすると復旧不能になるため起動を止める。
+                raise RuntimeError(f"Failed to load config: {self._config_path}") from exc
 
     async def _save(self):
         async with self._lock:
-            CONFIG_PATH.write_text(
+            self._config_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
+            temporary_path.write_text(
                 json.dumps(self._config, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            os.replace(temporary_path, self._config_path)
 
     # ------ guild helpers ------
 

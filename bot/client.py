@@ -23,7 +23,22 @@ class YagaPon(discord.Bot):
         self.corpus = CorpusManager()
 
         # コマンド登録
-        from bot.commands import setup, status, ignore, backfill, member, meigen, voice_cmd, report, reset, corpus_cmd, voiceprint, glossary, minutes, drive
+        from bot.commands import (
+            backfill,
+            corpus_cmd,
+            drive,
+            glossary,
+            ignore,
+            meigen,
+            member,
+            minutes,
+            report,
+            reset,
+            setup,
+            status,
+            voice_cmd,
+            voiceprint,
+        )
         setup.register(self)
         status.register(self)
         ignore.register(self)
@@ -92,8 +107,8 @@ class YagaPon(discord.Bot):
                             break
 
                 if notify_ch:
-                    from bot.gdrive import upload_minutes
                     from bot.commands.voice_cmd import _summarize_minutes
+                    from bot.gdrive import upload_minutes
 
                     drive_url = await upload_minutes(self.config, member.guild.id, minutes, session.channel.name)
                     summary = await _summarize_minutes(minutes)

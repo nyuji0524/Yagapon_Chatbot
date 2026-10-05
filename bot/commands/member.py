@@ -7,6 +7,8 @@
 
 import discord
 
+from bot.authorization import can_manage_member, require_guild_admin
+
 
 def _classify_member_roles(member: discord.Member, role_mapping: dict) -> dict:
     """メンバーのロールをカテゴリ別に分類"""
@@ -40,8 +42,10 @@ def register(bot):
     group = bot.create_group("member", "メンバー管理だぽん！")
 
     @group.command(name="sync", description="サーバーメンバーをロールから自動登録するぽん！")
-    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    @discord.default_permissions(administrator=True)
     async def member_sync(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         await ctx.defer()
         guild = ctx.guild
         role_mapping = bot.config.get_role_mapping(guild.id)
@@ -74,8 +78,10 @@ def register(bot):
         )
 
     @group.command(name="roles", description="役職・担当・学年のロールを分類するぽん！")
-    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    @discord.default_permissions(administrator=True)
     async def member_roles(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         guild = ctx.guild
         roles = [r for r in guild.roles if r.name != "@everyone"]
         if not roles:
@@ -96,6 +102,9 @@ def register(bot):
     async def member_register(ctx: discord.ApplicationContext, nickname: str, user: discord.Member = None):
         guild_id = ctx.guild_id
         target = user or ctx.author
+        if not can_manage_member(ctx, target):
+            await ctx.respond("他のメンバーの呼び名は管理者のみ変更できるぽん。", ephemeral=True)
+            return
         uid = str(target.id)
         members = bot.config.get_members(guild_id)
 
@@ -187,8 +196,8 @@ class RoleMappingView(discord.ui.View):
                 summary.append(f"**{label}**: {', '.join(names)}")
 
         await interaction.response.edit_message(
-            content=f"✅ ロール分類を保存したぽん！\n" + "\n".join(summary) +
-            f"\n\n`/member sync` でメンバーを自動登録できるぽん！",
+            content="✅ ロール分類を保存したぽん！\n" + "\n".join(summary) +
+            "\n\n`/member sync` でメンバーを自動登録できるぽん！",
             view=None,
         )
 

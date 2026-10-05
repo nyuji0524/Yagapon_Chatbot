@@ -2,13 +2,17 @@
 
 import discord
 
+from bot.authorization import require_guild_admin
 from bot.gdrive import upload_to_drive
 
 
 def register(bot):
     @bot.slash_command(name="drive_set", description="Google DriveフォルダURLを設定")
+    @discord.default_permissions(administrator=True)
     @discord.option("folder_url", description="Google DriveフォルダのURL")
     async def drive_set(ctx: discord.ApplicationContext, folder_url: str):
+        if not await require_guild_admin(ctx):
+            return
         if not ctx.guild:
             await ctx.respond("サーバーで実行してほしいぽん！", ephemeral=True)
             return
@@ -21,14 +25,17 @@ def register(bot):
             )
             return
 
-        bot.config.set_drive_folder(ctx.guild.id, folder_url)
+        await bot.config.set_drive_folder(ctx.guild.id, folder_url)
         await ctx.respond(
             f"✅ Google Driveフォルダを設定したぽん！\n📁 {folder_url}",
             ephemeral=True,
         )
 
     @bot.slash_command(name="drive_test", description="Google Drive連携のテスト")
+    @discord.default_permissions(administrator=True)
     async def drive_test(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         if not ctx.guild:
             await ctx.respond("サーバーで実行してほしいぽん！", ephemeral=True)
             return
@@ -65,7 +72,10 @@ def register(bot):
             )
 
     @bot.slash_command(name="drive_status", description="Google Drive連携の状態を確認")
+    @discord.default_permissions(administrator=True)
     async def drive_status(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         if not ctx.guild:
             await ctx.respond("サーバーで実行してほしいぽん！", ephemeral=True)
             return

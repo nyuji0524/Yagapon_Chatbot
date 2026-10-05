@@ -1,11 +1,12 @@
 """コーパス管理 - バッチ学習バッファ、flush、RAGクエリ、コーパスCRUD"""
 
 import asyncio
+import contextlib
 import io
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from google import genai
 from google.genai import types
@@ -60,7 +61,9 @@ class MessageBuffer:
     channel_name: str
     guild_id: int
     channel_id: int
-    first_message_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    corpus_store_name: str
+    first_message_at: datetime
+    last_message_at: datetime
     messages: list[str] = field(default_factory=list)
     authors: dict[str, int] = field(default_factory=dict)
 
@@ -84,6 +87,9 @@ class CorpusManager:
     async def shutdown(self):
         if self._flush_task:
             self._flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._flush_task
+            self._flush_task = None
         await self.flush_all()
 
     async def _flush_loop(self):
@@ -164,9 +170,15 @@ class CorpusManager:
                 channel_name=channel_name,
                 guild_id=guild_id,
                 channel_id=channel_id,
+                corpus_store_name=corpus_store_name,
+                first_message_at=timestamp,
+                last_message_at=timestamp,
             )
 
         buf = self._buffers[key]
+        # セットアップ変更後は、以後のメッセージを現在のストアへ保存する。
+        buf.corpus_store_name = corpus_store_name
+        buf.last_message_at = max(buf.last_message_at, timestamp)
         ts = timestamp.strftime("%H:%M")
         buf.messages.append(f"[{ts}] [{author}]: {content}")
         buf.authors[author] = buf.authors.get(author, 0) + 1
@@ -175,18 +187,39 @@ class CorpusManager:
         if len(buf.messages) >= FLUSH_MESSAGE_THRESHOLD:
             asyncio.create_task(self._flush_buffer(key, corpus_store_name))
 
-    async def _flush_buffer(self, key: tuple[int, int], corpus_store_name: str | None = None):
+    async def _flush_buffer(self, key: tuple[int, int], corpus_store_name: str | None = None) -> bool:
         buf = self._buffers.pop(key, None)
         if not buf or not buf.messages:
-            return
+            return True
 
         start = buf.first_message_at.strftime("%Y-%m-%d %H:%M")
-        end = datetime.now(timezone.utc).strftime("%H:%M")
+        end = buf.last_message_at.strftime("%Y-%m-%d %H:%M")
         display_name = f"#{buf.channel_name} | {start}-{end}"
         text = self._build_document_text(buf.channel_name, f"{start}-{end}", buf.messages, buf.authors)
+        store_name = corpus_store_name or buf.corpus_store_name
 
-        if corpus_store_name:
-            await self._upload_document(corpus_store_name, display_name, text)
+        if not store_name:
+            log.error("Corpus store is missing for buffered messages: guild=%s channel=%s", *key)
+            self._restore_buffer(key, buf)
+            return False
+
+        if not await self._upload_document(store_name, display_name, text):
+            self._restore_buffer(key, buf)
+            return False
+        return True
+
+    def _restore_buffer(self, key: tuple[int, int], failed: MessageBuffer):
+        """Upload失敗時に、flush中に到着した新規メッセージと結合して戻す。"""
+        current = self._buffers.get(key)
+        if current is None:
+            self._buffers[key] = failed
+            return
+
+        current.messages = failed.messages + current.messages
+        for author, count in failed.authors.items():
+            current.authors[author] = current.authors.get(author, 0) + count
+        current.first_message_at = min(failed.first_message_at, current.first_message_at)
+        current.last_message_at = max(failed.last_message_at, current.last_message_at)
 
     async def flush_all(self, corpus_store_name_lookup=None):
         """全バッファをflush。corpus_store_name_lookup: guild_id -> store_name"""
@@ -202,7 +235,7 @@ class CorpusManager:
 
     # ------ upload ------
 
-    async def _upload_document(self, store_name: str, display_name: str, text: str):
+    async def _upload_document(self, store_name: str, display_name: str, text: str) -> bool:
         async with self._upload_semaphore:
             try:
                 loop = asyncio.get_event_loop()
@@ -220,8 +253,10 @@ class CorpusManager:
                     ),
                 )
                 log.info(f"Uploaded: {display_name} -> {store_name}")
+                return True
             except Exception as e:
                 log.error(f"Upload error ({display_name}): {e}")
+                return False
 
     # ------ rate limit ------
 

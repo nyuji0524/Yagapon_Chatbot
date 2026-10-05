@@ -660,9 +660,10 @@ class VoiceSession:
         if not self.voice_client or not self.voice_client.is_connected():
             return
 
-        from bot.tts import VOICE, PITCH, RATE
+        from bot.tts import PITCH, RATE, VOICE
         try:
             import time
+
             import edge_tts
 
             t0 = time.monotonic()

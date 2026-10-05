@@ -2,11 +2,15 @@
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 
 def register(bot):
     @bot.slash_command(name="reset", description="このサーバーの設定をリセットするぽん")
     @discord.default_permissions(administrator=True)
     async def reset_cmd(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         guild_id = ctx.guild_id
         bureau = bot.config.get_bureau(guild_id)
 
@@ -57,7 +61,7 @@ class ConfirmResetView(discord.ui.View):
     @discord.ui.button(label="設定+コーパス削除", style=discord.ButtonStyle.danger)
     async def config_and_corpus(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content=f"設定とコーパスを削除中だぽん... ⏳", view=None
+            content="設定とコーパスを削除中だぽん... ⏳", view=None
         )
 
         # コーパス削除

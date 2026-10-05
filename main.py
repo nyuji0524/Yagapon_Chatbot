@@ -18,8 +18,8 @@ log = logging.getLogger("yagapon")
 
 
 async def main():
-    from bot.client import create_bot
     from api.server import create_app
+    from bot.client import create_bot
 
     bot = create_bot()
     app = create_app(bot)

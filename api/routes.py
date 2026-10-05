@@ -3,15 +3,17 @@
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from api.security import require_api_token
 
 router = APIRouter()
 
 
 class AskRequest(BaseModel):
     guild_id: int
-    query: str
+    query: str = Field(min_length=1, max_length=4000)
 
 
 class AskResponse(BaseModel):
@@ -30,7 +32,7 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
-@router.get("/status")
+@router.get("/status", dependencies=[Depends(require_api_token)])
 async def status(request: Request):
     bot = request.app.state.bot
     return {
@@ -40,14 +42,20 @@ async def status(request: Request):
     }
 
 
-@router.post("/ask", response_model=AskResponse)
+@router.post("/ask", response_model=AskResponse, dependencies=[Depends(require_api_token)])
 async def ask(request: Request, body: AskRequest):
     bot = request.app.state.bot
     corpus = bot.config.get_corpus(body.guild_id)
     if not corpus:
         raise HTTPException(404, "Guild not configured")
 
-    answer = await bot.corpus.query(body.query, corpus)
+    answer = await bot.corpus.query(
+        body.query,
+        corpus,
+        guild_id=body.guild_id,
+        members_info=bot._build_members_info(body.guild_id),
+        glossary_text=bot.config.get_glossary_text(body.guild_id),
+    )
     return AskResponse(
         query=body.query,
         response=answer,
@@ -55,7 +63,7 @@ async def ask(request: Request, body: AskRequest):
     )
 
 
-@router.post("/backfill")
+@router.post("/backfill", dependencies=[Depends(require_api_token)])
 async def backfill(request: Request, body: BackfillRequest):
     bot = request.app.state.bot
     corpus = bot.config.get_corpus(body.guild_id)

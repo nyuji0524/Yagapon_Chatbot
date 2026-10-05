@@ -4,10 +4,15 @@
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 
 def register(bot):
     @bot.slash_command(name="ignore", description="このチャンネルの学習を停止するぽん！")
+    @discord.default_permissions(administrator=True)
     async def ignore_cmd(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         added = await bot.config.add_ignore_channel(ctx.guild_id, ctx.channel_id)
         if added:
             await ctx.respond(

@@ -10,7 +10,6 @@ import aiohttp
 import discord
 from fastapi import APIRouter, HTTPException, Request
 from google import genai
-from google.genai import types
 
 log = logging.getLogger("yagapon.github")
 
@@ -165,7 +164,10 @@ async def github_webhook(guild_id: int, request: Request):
     # 署名検証
     payload = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
-    if secret and not _verify_signature(payload, signature, secret):
+    if not secret:
+        log.error("GitHub webhook rejected because GITHUB_WEBHOOK_SECRET is not configured")
+        raise HTTPException(503, "GitHub webhook is not configured")
+    if not _verify_signature(payload, signature, secret):
         raise HTTPException(403, "Invalid signature")
 
     event = request.headers.get("X-GitHub-Event", "")

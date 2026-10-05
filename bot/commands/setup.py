@@ -5,10 +5,13 @@
 
 import logging
 import os
+
 import discord
+from discord.ui import Button, Select, View
+
+from bot.authorization import require_guild_admin
 
 log = logging.getLogger("yagapon.setup")
-from discord.ui import Select, View, Button
 
 BUREAUS = [
     ("IT局", "🩵"), ("総務局", "🩶"), ("装飾局", "💛"), ("ステージ局", "❤️"),
@@ -185,13 +188,11 @@ class Step3View(View):
 
         api_host = os.environ.get("API_HOST", "https://your-server")
         webhook_url = f"{api_host}/webhook/github/{self.wizard.guild.id}"
-        secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-
         await interaction.followup.send(
             f"📌 **GitHub Webhook設定情報**\n```\n"
             f"Payload URL: {webhook_url}\n"
             f"Content type: application/json\n"
-            f"Secret: {secret}\n"
+            f"Secret: サーバー管理者がSecret Managerから設定\n"
             f"Events: Just the push event\n```",
             ephemeral=True,
         )
@@ -479,21 +480,16 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
 
 def register(bot):
     @bot.slash_command(name="setup", description="初期設定をするぽん！")
+    @discord.default_permissions(administrator=True)
     async def setup_cmd(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         existing = bot.config.get_bureau(ctx.guild_id)
         if existing:
             await ctx.respond(
                 f"このサーバーは既に **{existing}** として設定済みだぽん！\n"
                 f"`/reset` でリセットしてねぽん。",
                 ephemeral=True,
-            )
-            return
-
-        # 2回目以降のsetup（reset後）は管理者のみ
-        setup_count = bot.config._guild(ctx.guild_id).get("setup_count", 0)
-        if setup_count > 0 and not ctx.author.guild_permissions.administrator:
-            await ctx.respond(
-                "再セットアップは管理者のみ実行できるぽん！", ephemeral=True
             )
             return
 
@@ -505,7 +501,7 @@ def register(bot):
         # 固定メッセージを作成
         msg = await ctx.respond(
             "**🔧 おしゃべりやがぽん セットアップ**\n準備中...",
-            silent=True,
+            ephemeral=True,
         )
         # InteractionResponseのメッセージを取得
         if hasattr(msg, 'original_response'):

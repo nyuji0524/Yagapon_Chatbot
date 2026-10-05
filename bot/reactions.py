@@ -1,13 +1,11 @@
 """スマートリアクション - 感情ベース、低感度"""
 
-import asyncio
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from google import genai
-from google.genai import types
 
 log = logging.getLogger("yagapon.reactions")
 
