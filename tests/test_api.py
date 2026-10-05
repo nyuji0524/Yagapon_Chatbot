@@ -9,6 +9,9 @@ from bot.corpus import BackfillResult
 
 
 class FakeConfig:
+    def __init__(self):
+        self.glossary = {}
+
     def get_corpus(self, guild_id):
         return "fileSearchStores/test" if guild_id == 1 else None
 
@@ -23,6 +26,12 @@ class FakeConfig:
 
     async def set_backfill_cursor(self, guild_id, channel_id, message_id, message_at):
         return None
+
+    def get_glossary(self, guild_id):
+        return self.glossary
+
+    async def set_glossary(self, guild_id, glossary):
+        self.glossary = glossary
 
 
 def make_client():
@@ -127,3 +136,37 @@ def test_backfill_exposes_job_progress(monkeypatch):
     assert status.json()["messages_indexed"] == 2
     assert status.json()["documents_uploaded"] == 1
     bot.corpus.finish_backfill.assert_called_once_with(1)
+
+
+def test_catalog_candidate_can_be_approved_for_glossary(monkeypatch, tmp_path):
+    from knowledge_catalog.store import CatalogStore
+
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+    client.app.state.catalog = CatalogStore(tmp_path / "catalog.json")
+    headers = {"Authorization": "Bearer secret"}
+
+    created = client.post(
+        "/admin/catalog",
+        headers=headers,
+        json={
+            "guild_id": 1,
+            "kind": "term",
+            "label": "やがサポ",
+            "description": "矢上祭の運営用アプリ",
+            "aliases": ["Yaga Support"],
+        },
+    )
+    assert created.status_code == 201
+
+    entry = created.json()
+    approved = client.patch(
+        f"/admin/catalog/{entry['id']}?guild_id=1",
+        headers=headers,
+        json={"expected_revision": 1, "status": "approved"},
+    )
+
+    assert approved.status_code == 200
+    assert bot.config.glossary["やがサポ"]["definition"] == "矢上祭の運営用アプリ"
+    listed = client.get("/admin/catalog?guild_id=1&status=approved", headers=headers)
+    assert listed.json()["total"] == 1

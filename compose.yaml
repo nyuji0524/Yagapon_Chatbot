@@ -10,6 +10,7 @@ services:
     environment:
       API_PORT: "8000"
       YAGAPON_CONFIG_PATH: /data/server_config.json
+      YAGAPON_CATALOG_PATH: /data/knowledge-catalog.json
       YAGAPON_VOICEPRINT_DIR: /data/voiceprints
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"

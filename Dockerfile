@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     API_PORT=8000 \
     YAGAPON_CONFIG_PATH=/data/server_config.json \
+    YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json \
     YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 
 RUN apt-get update \
@@ -20,6 +21,7 @@ RUN pip install --requirement requirements.txt
 COPY api ./api
 COPY bot ./bot
 COPY knowledge_sync ./knowledge_sync
+COPY knowledge_catalog ./knowledge_catalog
 COPY main.py ./
 
 RUN useradd --create-home --uid 10001 yagapon \

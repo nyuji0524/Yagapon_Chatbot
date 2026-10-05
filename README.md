@@ -149,6 +149,9 @@ API_HOST=http://your-server-ip:8000
 API_PORT=8000
 GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/xxx/exec
 YAGAPON_CONFIG_PATH=/data/server_config.json
+YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json
+YAGAPON_CATALOG_MODEL=gemini-3.1-flash-lite
+YAGAPON_CATALOG_PASSES=2
 YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 ```
 
@@ -198,6 +201,8 @@ Pull Requestと`main`へのpushでは、GitHub Actionsがlint、単体テスト�
 
 Google共有ドライブからKnowledge用draftを作る手順は[Drive同期設計](docs/google-drive-knowledge-sync.md)を参照。
 File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質とbackfill運用](docs/file-search-operations.md)を参照。
+既存文書から用語・人名候補を一括生成し、管理画面から確認・編集するための仕様は
+[用語・人名カタログ](docs/knowledge-catalog.md)を参照。
 
 ## マルチギルド対応
 
