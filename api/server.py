@@ -13,11 +13,11 @@ def create_app(bot) -> FastAPI:
     app.state.catalog = CatalogStore()
 
     from api.catalog_routes import router as catalog_router
-    from api.github_webhook import router as gh_router
+    from api.rag_admin import router as rag_admin_router
     from api.routes import router
 
     app.include_router(router)
-    app.include_router(gh_router)
     app.include_router(catalog_router)
+    app.include_router(rag_admin_router)
 
     return app

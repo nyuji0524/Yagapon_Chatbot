@@ -3,10 +3,10 @@
 import io
 from dataclasses import dataclass
 
-import google.auth
-from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+
+from bot.google_credentials import load_google_credentials
 
 READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 EXPORT_TYPES = {
@@ -31,15 +31,33 @@ class DriveDocument:
 class DriveReader:
     def __init__(self, credentials_path: str | None, drive_id: str, folder_id: str | None = None):
         if credentials_path:
-            credentials = service_account.Credentials.from_service_account_file(
-                credentials_path,
-                scopes=[READONLY_SCOPE],
+            credentials, self.credential_source = load_google_credentials(
+                [READONLY_SCOPE], credentials_path
             )
         else:
-            credentials, _ = google.auth.default(scopes=[READONLY_SCOPE])
+            credentials, self.credential_source = load_google_credentials([READONLY_SCOPE])
         self._service = build("drive", "v3", credentials=credentials, cache_discovery=False)
         self.drive_id = drive_id
         self.folder_id = folder_id
+
+    def check_access(self) -> dict:
+        """Fail fast with a small read before starting an expensive full sync."""
+        drive = self._service.drives().get(
+            driveId=self.drive_id,
+            fields="id,name",
+        ).execute(num_retries=3)
+        folder = None
+        if self.folder_id:
+            folder = self._service.files().get(
+                fileId=self.folder_id,
+                fields="id,name,mimeType,trashed",
+                supportsAllDrives=True,
+            ).execute(num_retries=3)
+        return {
+            "credential_source": self.credential_source,
+            "drive": drive,
+            "folder": folder,
+        }
 
     def get_start_page_token(self) -> str:
         response = self._service.changes().getStartPageToken(driveId=self.drive_id).execute()

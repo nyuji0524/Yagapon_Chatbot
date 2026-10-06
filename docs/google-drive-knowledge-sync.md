@@ -5,12 +5,19 @@
 ## 前提
 
 - 個人のMy Driveではなく、用途ごとの共有ドライブを使う。
-- サービスアカウントへ対象共有ドライブの閲覧権限だけを付与する。
-- GCEではDrive読取専用のサービスアカウントをVMへ付与する。ローカル実行時だけ、必要に応じて`GOOGLE_SERVICE_ACCOUNT_JSON`をSecret Manager等からファイルとして供給する。
+- GCEではVMに付与したサービスアカウントのApplication Default Credentials（ADC）を使う。
+- 同期用サービスアカウントへ対象共有ドライブの閲覧権限だけを付与する。
+- ローカル実行では`gcloud auth application-default login`、またはコンテナ内にmountしたサービスアカウントJSONのパスを`GOOGLE_SERVICE_ACCOUNT_JSON`へ指定する。ホスト上だけに存在するパスは指定しない。
 - 他局は共有ドライブと同期状態を分離する。
 - `GOOGLE_DRIVE_FOLDER_ID`を指定した場合、現状はそのフォルダの直下だけを対象とする。
 
 ## 初回
+
+まず、AI要約や状態更新を行わず認証・共有ドライブ・対象フォルダへのアクセスだけを確認する。
+
+```bash
+docker compose --profile tools run --rm knowledge-sync --check
+```
 
 通常起動では現在のchange tokenだけを保存し、既存文書を勝手に全投入しない。既存文書も取り込む場合だけ、範囲を確認して`--full`を実行する。
 
@@ -38,6 +45,16 @@ Driveのpage tokenとファイルのSHA-256を保存し、変更されたファ�
 - text/plain、Markdown、CSV、JSON
 
 PDF、画像、動画などは現段階では自動要約せずスキップする。OCRやPDF解析は、閲覧範囲と費用を確認した後に別処理として追加する。
+
+## 議事録・レポートの書き込み
+
+BotからのGoogle Docs作成はApps Scriptを経由せず、同じADCからDrive APIとDocs APIへ
+直接接続する。GCEのサービスアカウントに保存先フォルダの投稿者以上の権限を付与し、
+Drive APIとDocs APIを有効にする。`/drive_status`は実ファイルを作らず認証元、フォルダ、
+追加権限を確認し、`/drive_test`だけがテスト文書を作る。
+
+個人のMy Driveではサービスアカウントの所有権・容量制約に当たりやすいため、委員会の
+共有ドライブ内フォルダを保存先にする。
 
 ## PR自動化をまだ有効にしない理由
 

@@ -4,7 +4,6 @@
 """
 
 import logging
-import os
 
 import discord
 from discord.ui import Button, Select, View
@@ -28,12 +27,12 @@ class SetupWizard:
         self.message = message  # 編集対象の固定メッセージ
         self.step = 0
         self.completed = {
-            "bureau": False, "ignore": False, "github": False,
+            "bureau": False, "ignore": False,
             "reactions": False, "members": False, "drive": False, "backfill": False,
         }
 
     def _progress_bar(self) -> str:
-        steps = ["局選択", "除外CH", "GitHub", "リアクション", "メンバー", "Drive", "過去ログ"]
+        steps = ["局選択", "除外CH", "リアクション", "メンバー", "Drive", "過去ログ"]
         parts = []
         for i, name in enumerate(steps):
             if i < self.step:
@@ -150,59 +149,6 @@ class Step2View(View):
     async def done(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
         self.wizard.step = 2
-        await show_step3(self.wizard)
-
-
-# ====== Step 3: GitHub連携 ======
-
-async def show_step3(wizard: SetupWizard):
-    channels = [
-        ch for ch in wizard.guild.text_channels
-        if ch.permissions_for(wizard.guild.me).send_messages
-    ]
-    view = Step3View(wizard, channels)
-    await wizard.update("GitHub通知を送るチャンネルを選んでねぽん。", view)
-
-
-class Step3View(View):
-    def __init__(self, wizard: SetupWizard, channels: list):
-        super().__init__(timeout=600)
-        self.wizard = wizard
-
-        options = [
-            discord.SelectOption(
-                label=f"#{ch.name}", value=str(ch.id),
-                description=ch.category.name if ch.category else "",
-            )
-            for ch in channels[:25]
-        ]
-        if options:
-            select = Select(placeholder="GitHub通知チャンネル", min_values=1, max_values=1, options=options)
-            select.callback = self._select
-            self.add_item(select)
-
-    async def _select(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        ch_id = int(interaction.data["values"][0])
-        await self.wizard.bot.config.set_github_channel(self.wizard.guild.id, ch_id)
-
-        api_host = os.environ.get("API_HOST", "https://your-server")
-        webhook_url = f"{api_host}/webhook/github/{self.wizard.guild.id}"
-        await interaction.followup.send(
-            f"📌 **GitHub Webhook設定情報**\n```\n"
-            f"Payload URL: {webhook_url}\n"
-            f"Content type: application/json\n"
-            f"Secret: サーバー管理者がSecret Managerから設定\n"
-            f"Events: Just the push event\n```",
-            ephemeral=True,
-        )
-        self.wizard.step = 3
-        await show_step4(self.wizard)
-
-    @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary, row=1)
-    async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        self.wizard.step = 3
         await show_step4(self.wizard)
 
 
@@ -237,7 +183,7 @@ class Step4View(View):
     async def disable(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
         await self.wizard.bot.config.set_reactions(self.wizard.guild.id, False, "💡", "😲", "😂")
-        self.wizard.step = 4
+        self.wizard.step = 3
         await show_step5(self.wizard)
 
 
@@ -275,7 +221,7 @@ class ReactionCollector:
             self.wizard.guild.id, True,
             self.emojis["interesting"], self.emojis["surprised"], self.emojis["funny"],
         )
-        self.wizard.step = 4
+        self.wizard.step = 3
         await show_step5(self.wizard)
 
 
@@ -301,7 +247,7 @@ class Step5View(View):
         roles = [r for r in guild.roles if r.name != "@everyone"]
         if not roles:
             await interaction.response.send_message("ロールがないぽん...", ephemeral=True)
-            self.wizard.step = 5
+            self.wizard.step = 4
             await show_step6(self.wizard)
             return
 
@@ -319,7 +265,7 @@ class Step5View(View):
                 await interaction_.response.send_message(
                     f"✅ **{len(members)}人** 登録したぽん！", ephemeral=True
                 )
-                self.wizard.step = 5
+                self.wizard.step = 4
                 await show_step6(self.wizard)
 
         view = SetupRoleMappingView(self.wizard.bot, guild, roles)
@@ -330,7 +276,7 @@ class Step5View(View):
     @discord.ui.button(label="あとで", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
-        self.wizard.step = 5
+        self.wizard.step = 4
         await show_step6(self.wizard)
 
 
@@ -356,7 +302,7 @@ class Step6View(View):
     @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
-        self.wizard.step = 6
+        self.wizard.step = 5
         await show_step7(self.wizard)
 
 
@@ -374,7 +320,7 @@ class DriveModal(discord.ui.Modal):
         url = self.children[0].value.strip()
         await self.wizard.bot.config.set_drive_folder(self.wizard.guild.id, url)
         await interaction.response.send_message("✅ Drive連携設定したぽん！", ephemeral=True)
-        self.wizard.step = 6
+        self.wizard.step = 5
         await show_step7(self.wizard)
 
 
@@ -422,7 +368,7 @@ class Step7View(View):
     @discord.ui.button(label="あとで", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
-        self.wizard.step = 7
+        self.wizard.step = 6
         await self.wizard.update(
             "🎉 **セットアップ完了だぽん！**\n"
             "過去ログは `/backfill` で取り込めるぽん。\n"
@@ -491,7 +437,7 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
     finally:
         wizard.bot.corpus.finish_backfill(wizard.guild.id)
 
-    wizard.step = 7
+    wizard.step = 6
     failure_text = f"⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}\n" if failures else ""
     await wizard.update(
         f"🎉 **セットアップ完了だぽん！**\n"

@@ -3,7 +3,9 @@
 import argparse
 import hashlib
 import json
+import logging
 import os
+import time
 from pathlib import Path
 
 from knowledge_sync.draft import (
@@ -13,6 +15,8 @@ from knowledge_sync.draft import (
     structure_source,
 )
 from knowledge_sync.drive import DriveReader
+
+log = logging.getLogger("yagapon.knowledge_sync")
 
 
 def load_state(path: Path) -> dict:
@@ -28,12 +32,7 @@ def save_state(path: Path, state: dict):
     os.replace(temporary, path)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--full", action="store_true", help="Import all direct children on the first run")
-    parser.add_argument("--dry-run", action="store_true", help="Report changes without drafts or state updates")
-    args = parser.parse_args()
-
+def sync_once(args) -> dict:
     state_path = Path(os.environ.get("YAGAPON_DRIVE_SYNC_STATE", "/data/drive-sync-state.json"))
     output_dir = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTPUT", "/data/knowledge-drafts"))
     reader = DriveReader(
@@ -43,6 +42,9 @@ def main():
     )
     state = load_state(state_path)
 
+    if args.check:
+        return {"connection": reader.check_access()}
+
     if args.full:
         documents = reader.list_all()
         new_page_token = reader.get_start_page_token()
@@ -51,8 +53,7 @@ def main():
     else:
         state["page_token"] = reader.get_start_page_token()
         save_state(state_path, state)
-        print("Initialized Drive change token. Use --full for an initial import.")
-        return
+        return {"initialized": True, "generated": 0, "skipped": 0, "removed": 0}
 
     output_dir.mkdir(parents=True, exist_ok=True)
     generated = 0
@@ -92,11 +93,34 @@ def main():
             }
 
     if args.dry_run:
-        print(json.dumps({"would_generate": changed, "skipped": skipped, "removed": removed}, ensure_ascii=False))
-        return
+        return {"would_generate": changed, "skipped": skipped, "removed": removed}
     state["page_token"] = new_page_token
     save_state(state_path, state)
-    print(json.dumps({"generated": generated, "skipped": skipped, "removed": removed}, ensure_ascii=False))
+    return {"generated": generated, "skipped": skipped, "removed": removed}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true", help="Import all direct children on the first run")
+    parser.add_argument("--dry-run", action="store_true", help="Report changes without drafts or state updates")
+    parser.add_argument("--watch-interval", type=int, default=0, help="Repeat differential sync at this interval")
+    parser.add_argument("--check", action="store_true", help="Verify credentials and Drive access only")
+    args = parser.parse_args()
+    if args.watch_interval and args.watch_interval < 60:
+        parser.error("--watch-interval must be at least 60 seconds")
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    while True:
+        try:
+            print(json.dumps(sync_once(args), ensure_ascii=False), flush=True)
+        except Exception:
+            if not args.watch_interval:
+                raise
+            log.exception("Drive differential sync failed; retrying on the next interval")
+        if not args.watch_interval:
+            return
+        args.full = False
+        time.sleep(args.watch_interval)
 
 
 if __name__ == "__main__":

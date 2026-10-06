@@ -23,7 +23,6 @@ class ConfigManager:
             "bureau": "IT局",
             "corpus_store_name": "fileSearchStores/xxx",
             "ignore_channels": [channel_id, ...],
-            "github_webhook_channel": channel_id or null,
             "reactions": {
                 "enabled": true,
                 "interesting": "💡",
@@ -125,15 +124,6 @@ class ConfigManager:
         channels.append(channel_id)
         await self._save()
         return True
-
-    # ------ github ------
-
-    def get_github_channel(self, guild_id: int) -> Optional[int]:
-        return self._guild(guild_id).get("github_webhook_channel")
-
-    async def set_github_channel(self, guild_id: int, channel_id: int):
-        self._guild(guild_id)["github_webhook_channel"] = channel_id
-        await self._save()
 
     # ------ reactions ------
 

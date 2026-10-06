@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     API_PORT=8000 \
     YAGAPON_CONFIG_PATH=/data/server_config.json \
     YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json \
+    YAGAPON_RAG_DB_PATH=/data/rag.sqlite3 \
     YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 
 RUN apt-get update \
@@ -22,6 +23,8 @@ COPY api ./api
 COPY bot ./bot
 COPY knowledge_sync ./knowledge_sync
 COPY knowledge_catalog ./knowledge_catalog
+COPY knowledge_index ./knowledge_index
+COPY rag_eval ./rag_eval
 COPY main.py ./
 
 RUN useradd --create-home --uid 10001 yagapon \

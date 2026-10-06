@@ -7,6 +7,7 @@ import io
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -15,6 +16,8 @@ from google import genai
 from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, rag_model
+from bot.festival import festival_from_query, festival_metadata_filter, festival_number
+from bot.rag_store import LexicalHit, RagStore
 
 log = logging.getLogger("yagapon.corpus")
 
@@ -34,6 +37,11 @@ JST = ZoneInfo("Asia/Tokyo")
 
 # レート制限
 DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
+
+
+def festival_filter_enabled() -> bool:
+    """Gate metadata filters until legacy File Search documents are rebuilt."""
+    return os.environ.get("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "false").lower() == "true"
 
 
 def calculate_incremental_after(cursor: dict | None, now: datetime | None = None) -> datetime:
@@ -139,10 +147,20 @@ class BackfillResult:
         return self.messages_indexed == 0 or self.documents_uploaded > 0
 
 
+@dataclass(frozen=True)
+class RagAnswer:
+    text: str
+    query_id: str | None = None
+    citations: tuple[str, ...] = ()
+    festival: int | None = None
+    no_answer: bool = False
+
+
 class CorpusManager:
     def __init__(self):
         api_key = os.environ.get("GOOGLE_API_KEY", "")
         self._client = genai.Client(api_key=api_key)
+        self.rag_store = RagStore()
         self._buffers: dict[tuple[int, int], MessageBuffer] = {}
         self._upload_semaphore = asyncio.Semaphore(5)
         self._flush_task: asyncio.Task | None = None
@@ -287,6 +305,10 @@ class CorpusManager:
         )
         metadata = [
             {"key": "source", "string_value": "discord_live"},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "festival", "numeric_value": float(festival_number(start_at))},
             {"key": "schema", "string_value": DOCUMENT_SCHEMA_VERSION},
             {"key": "guild_id", "string_value": str(buf.guild_id)},
             {"key": "channel_id", "string_value": str(buf.channel_id)},
@@ -391,6 +413,10 @@ class CorpusManager:
                 document_name = getattr(response, "document_name", None)
                 if not document_name:
                     raise RuntimeError("Indexing completed without a document name")
+                try:
+                    self.rag_store.upsert_document(document_name, text, metadata)
+                except Exception as exc:
+                    log.warning("Local exact-match mirror update failed: %s", exc)
                 log.info(f"Uploaded: {display_name} -> {store_name}")
                 return document_name
             except Exception as e:
@@ -413,6 +439,10 @@ class CorpusManager:
                 deleted += 1
             except Exception as exc:
                 log.warning("Failed to delete document %s: %s", name, exc)
+        try:
+            self.rag_store.delete_remote_documents(document_names)
+        except Exception as exc:
+            log.warning("Local exact-match mirror deletion failed: %s", exc)
         return deleted
 
     # ------ rate limit ------
@@ -439,20 +469,63 @@ class CorpusManager:
     # ------ RAG query ------
 
     async def query(self, question: str, corpus_store_name: str,
-                    guild_id: int = 0, members_info: str = "", glossary_text: str = "") -> str:
+                    guild_id: int = 0, members_info: str = "", glossary_text: str = "",
+                    glossary: dict | None = None) -> str:
+        result = await self.query_with_trace(
+            question,
+            corpus_store_name,
+            guild_id=guild_id,
+            members_info=members_info,
+            glossary_text=glossary_text,
+            glossary=glossary,
+        )
+        return result.text
+
+    async def query_with_trace(
+        self,
+        question: str,
+        corpus_store_name: str,
+        *,
+        guild_id: int = 0,
+        actor_id: int | None = None,
+        channel_id: int | None = None,
+        members_info: str = "",
+        glossary_text: str = "",
+        glossary: dict | None = None,
+    ) -> RagAnswer:
         if guild_id and not self._check_rate_limit(guild_id):
-            return (
+            return RagAnswer(text=(
                 f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n"
                 "明日またたくさん聞いてねぽん！🙏"
-            )
+            ), no_answer=True)
+        started = time.monotonic()
+        festival = festival_from_query(question)
+        metadata_filter = festival_metadata_filter(festival) if festival_filter_enabled() else None
+        terms = self.rag_store.query_terms(question, glossary)
+        lexical_hits = self.rag_store.search_exact(
+            guild_id, terms, festival=festival, limit=4
+        ) if guild_id else []
         try:
             system = SYSTEM_INSTRUCTION
+            if festival is not None:
+                system += f"\n\n【対象年度】{festival}thの記録だけを根拠に回答するぽん。"
             if members_info:
                 system += f"\n\n【メンバー情報】\n{members_info}"
             if glossary_text:
                 system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
+            if lexical_hits:
+                system += (
+                    "\n\n【完全一致検索の候補】意味検索とは別に取得した原文候補だぽん。"
+                    "質問との関係を確認し、関係がないものは使わないぽん。\n"
+                    + self._lexical_context(lexical_hits)
+                )
 
             model = rag_model()
+            search = types.FileSearch(
+                file_search_store_names=[corpus_store_name],
+                top_k=12,
+                metadata_filter=metadata_filter,
+            )
             response = await self._client.aio.models.generate_content(
                 model=model,
                 contents=question,
@@ -463,10 +536,7 @@ class CorpusManager:
                     system_instruction=system,
                     tools=[
                         types.Tool(
-                            file_search=types.FileSearch(
-                                file_search_store_names=[corpus_store_name],
-                                top_k=12,
-                            )
+                            file_search=search
                         )
                     ],
                 ),
@@ -474,12 +544,56 @@ class CorpusManager:
             log_usage(log, "rag_query", model, response)
             answer = response.text or "回答を生成できなかったぽん..."
             sources = self._response_sources(response)
+            sources.extend(self._lexical_sources(lexical_hits, sources))
+            no_answer = not sources
+            if no_answer:
+                answer = (
+                    "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
+                    "年度や用語を変えて質問するか、資料を追加してほしいぽん。"
+                )
             if sources:
                 answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
-            return answer
+            query_id = self.rag_store.record_query(
+                guild_id=guild_id,
+                actor_id=actor_id,
+                channel_id=channel_id,
+                question=question,
+                answer=answer,
+                festival=festival,
+                metadata_filter=metadata_filter,
+                citations=sources,
+                lexical_keys=[hit.document_key for hit in lexical_hits],
+                latency_ms=round((time.monotonic() - started) * 1000),
+                no_answer=no_answer,
+            ) if guild_id else None
+            return RagAnswer(
+                text=answer,
+                query_id=query_id,
+                citations=tuple(sources),
+                festival=festival,
+                no_answer=no_answer,
+            )
         except Exception as e:
             log.error(f"RAG query error: {e}")
-            return f"エラーが出ちゃったぽん...: {e}"
+            return RagAnswer(text=f"エラーが出ちゃったぽん...: {e}", festival=festival, no_answer=True)
+
+    @staticmethod
+    def _lexical_context(hits: list[LexicalHit]) -> str:
+        return "\n\n".join(
+            f"[exact:{hit.document_key} #{hit.channel_name} "
+            f"{f'{hit.festival}th' if hit.festival is not None else '年度不明'}]\n{hit.excerpt}"
+            for hit in hits
+        )
+
+    @staticmethod
+    def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
+        rendered = []
+        for hit in hits:
+            label = f"完全一致: #{hit.channel_name or '記録'}"
+            value = f"[{label}]({hit.source_url})" if hit.source_url else label
+            if value not in existing and value not in rendered:
+                rendered.append(value)
+        return rendered
 
     @classmethod
     def _response_sources(cls, response, limit: int = 5) -> list[str]:
@@ -498,11 +612,20 @@ class CorpusManager:
             metadata = cls._metadata_map(context)
             channel = metadata.get("channel_name")
             start = str(metadata.get("start_at") or "")[:10]
+            festival = metadata.get("festival")
+            status = metadata.get("status")
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)
             label = f"#{channel}" if channel else (title or "Discord会話記録")
             if start:
                 label += f"（{start}）"
+            details = []
+            if festival is not None:
+                details.append(f"{int(float(festival))}th")
+            if status and status != "approved":
+                details.append(str(status))
+            if details:
+                label += f" [{' / '.join(details)}]"
             rendered = f"[{label}]({url})" if url else label
             if rendered not in seen:
                 seen.add(rendered)
@@ -649,6 +772,10 @@ class CorpusManager:
             )
             metadata = [
                 {"key": "source", "string_value": "discord"},
+                {"key": "source_type", "string_value": "discord_conversation"},
+                {"key": "status", "string_value": "raw"},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "festival", "numeric_value": float(festival_number(start_at))},
                 {"key": "schema", "string_value": DOCUMENT_SCHEMA_VERSION},
                 {"key": "guild_id", "string_value": str(guild_id)},
                 {"key": "channel_id", "string_value": str(channel_id)},

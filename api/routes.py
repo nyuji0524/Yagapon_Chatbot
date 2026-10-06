@@ -24,6 +24,10 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     query: str
     response: str
+    query_id: str | None = None
+    sources: list[str] = Field(default_factory=list)
+    festival: int | None = None
+    no_answer: bool = False
     timestamp: str
 
 
@@ -56,16 +60,21 @@ async def ask(request: Request, body: AskRequest):
     if not corpus:
         raise HTTPException(404, "Guild not configured")
 
-    answer = await bot.corpus.query(
+    result = await bot.corpus.query_with_trace(
         body.query,
         corpus,
         guild_id=body.guild_id,
         members_info=bot._build_members_info(body.guild_id),
         glossary_text=bot.config.get_glossary_text(body.guild_id),
+        glossary=bot.config.get_glossary(body.guild_id),
     )
     return AskResponse(
         query=body.query,
-        response=answer,
+        response=result.text,
+        query_id=result.query_id,
+        sources=list(result.citations),
+        festival=result.festival,
+        no_answer=result.no_answer,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 

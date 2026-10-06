@@ -31,10 +31,6 @@ def audio_analysis_model() -> str:
     return os.environ.get("YAGAPON_AUDIO_MODEL", "gemini-3.8-flash")
 
 
-def review_model() -> str:
-    return os.environ.get("YAGAPON_REVIEW_MODEL", "gemini-3.8-flash")
-
-
 def generation_config(model: str, *, thinking_level: str | None = "low", **kwargs):
     """Gemini 3系ではthinking量を明示し、予期しない課金増を防ぐ。"""
     if thinking_level and model.startswith("gemini-3"):

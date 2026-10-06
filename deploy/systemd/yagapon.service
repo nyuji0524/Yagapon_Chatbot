@@ -7,11 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/yagapon
-Environment=YAGAPON_ENV_FILE=/etc/yagapon/yagapon.env
-Environment=YAGAPON_DATA_PATH=/var/lib/yagapon
-Environment=YAGAPON_BIND_ADDRESS=0.0.0.0
-Environment=YAGAPON_HOST_PORT=8000
-ExecStart=/usr/bin/docker compose up --remove-orphans
+EnvironmentFile=/etc/yagapon/deploy.env
+ExecStart=/usr/bin/docker compose up --no-build --remove-orphans
 ExecStop=/usr/bin/docker compose down
 Restart=always
 RestartSec=10

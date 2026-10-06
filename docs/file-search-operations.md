@@ -9,6 +9,8 @@ File Searchのcustom metadataには次を保存する。
 
 - `source` / `schema`: 取り込み元と文書仕様
 - `guild_id` / `channel_id` / `channel_name` / `category`: 所属
+- `festival`: 10月1日から翌年9月30日までの矢上祭年度（27thは2025-10〜2026-09）
+- `source_type` / `status` / `authority`: 取り込み元、確認状態、根拠の信頼区分
 - `start_at` / `end_at` / `start_epoch` / `end_epoch`: 対象期間
 - `message_count`: 発言数
 - `document_key`: メッセージ範囲から生成した安定キー
@@ -56,3 +58,6 @@ IT Divisionに紐づく可能性があるストアが2つ存在した。稼働�
 3. 代表質問セットで、正答・根拠・最新性・「情報なし」の判定を評価する。
 4. 全期間の再構築を実行し、失敗チャンネルが0であることを確認する。
 5. 一定期間後に未参照の旧ストアを削除する。削除前にストア名と件数を記録する。
+
+年度別検索、ローカル完全一致検索、利用者評価、管理画面を含む移行順序は
+[RAG品質・年度・評価の運用](rag-quality-operations.md)を参照する。

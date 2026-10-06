@@ -12,5 +12,6 @@ __pycache__
 data
 server_config.json
 service_account.json
+gha-creds-*.json
 voiceprints
 tests

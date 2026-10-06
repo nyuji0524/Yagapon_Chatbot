@@ -10,6 +10,12 @@ from bot.voice import VoiceMode
 
 log = logging.getLogger("yagapon.client")
 
+RAG_FEEDBACK_PROMPT = (
+    "回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り"
+    "（対応した絵文字でリアクション）"
+)
+RAG_FEEDBACK_RATINGS = {"✅": "positive", "⚠️": "partial", "❌": "negative"}
+
 
 class YagaPon(discord.Bot):
     def __init__(self):
@@ -93,12 +99,9 @@ class YagaPon(discord.Bot):
             minutes = await leave_voice(member.guild.id)
 
             if minutes and has_minutes:
-                # 通知先の優先順位: GitHub通知チャンネル → システムチャンネル → 最初のテキストチャンネル
+                # 通知先の優先順位: システムチャンネル → 最初の送信可能チャンネル
                 notify_ch = None
-                github_ch_id = self.config.get_github_channel(member.guild.id)
-                if github_ch_id:
-                    notify_ch = member.guild.get_channel(github_ch_id)
-                if not notify_ch and member.guild.system_channel:
+                if member.guild.system_channel:
                     notify_ch = member.guild.system_channel
                 if not notify_ch:
                     for ch in member.guild.text_channels:
@@ -194,6 +197,40 @@ class YagaPon(discord.Bot):
         except Exception:
             pass
 
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """Persist explicit quality feedback attached to a RAG answer."""
+        if self.user and payload.user_id == self.user.id:
+            return
+        emoji = str(payload.emoji)
+        rating = RAG_FEEDBACK_RATINGS.get(emoji)
+        if rating is None:
+            return
+        try:
+            recorded = self.corpus.rag_store.record_feedback(
+                payload.message_id,
+                payload.user_id,
+                emoji,
+                rating,
+            )
+            if recorded:
+                log.info("RAG feedback recorded: message=%s rating=%s", payload.message_id, rating)
+        except Exception as exc:
+            log.warning("Failed to record RAG feedback: %s", exc)
+
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        """Keep quality metrics consistent when a user retracts a reaction."""
+        emoji = str(payload.emoji)
+        if emoji not in RAG_FEEDBACK_RATINGS:
+            return
+        try:
+            self.corpus.rag_store.remove_feedback(
+                payload.message_id,
+                payload.user_id,
+                emoji,
+            )
+        except Exception as exc:
+            log.warning("Failed to remove RAG feedback: %s", exc)
+
     async def _handle_dm(self, message: discord.Message):
         """DM: 登録済みメンバーのみ回答"""
         guild_id = self.config.find_guild_for_user(message.author.id)
@@ -246,18 +283,36 @@ class YagaPon(discord.Bot):
         glossary_text = self.config.get_glossary_text(guild_id) if guild_id else ""
 
         async with message.channel.typing():
-            answer = await self.corpus.query(query, corpus, guild_id=guild_id, members_info=members_info, glossary_text=glossary_text)
-            await self.send_split_message(message.channel, answer)
+            result = await self.corpus.query_with_trace(
+                query,
+                corpus,
+                guild_id=guild_id,
+                actor_id=message.author.id,
+                channel_id=message.channel.id,
+                members_info=members_info,
+                glossary_text=glossary_text,
+                glossary=self.config.get_glossary(guild_id),
+            )
+            discord_answer = f"{result.text}\n\n{RAG_FEEDBACK_PROMPT}"
+            sent_messages = await self.send_split_message(message.channel, discord_answer)
+            if result.query_id and sent_messages:
+                self.corpus.rag_store.bind_response_message(
+                    result.query_id,
+                    guild_id,
+                    message.channel.id,
+                    sent_messages[-1].id,
+                )
 
             # VCにいればTTSも
             try:
                 from bot.tts import speak_in_vc
-                await speak_in_vc(self, message, answer)
+                await speak_in_vc(self, message, result.text)
             except Exception:
                 pass
 
     async def send_split_message(self, destination, text: str):
         """コードブロックを考慮して2000文字制限で分割送信"""
+        sent_messages = []
         lines = text.split("\n")
         current_chunk = ""
         in_code_block = False
@@ -274,7 +329,7 @@ class YagaPon(discord.Bot):
                 if in_code_block:
                     to_send += "\n```"
 
-                await destination.send(to_send, silent=True)
+                sent_messages.append(await destination.send(to_send, silent=True))
 
                 if in_code_block:
                     lang = f" {current_lang}" if current_lang else ""
@@ -285,7 +340,8 @@ class YagaPon(discord.Bot):
                 current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
 
         if current_chunk:
-            await destination.send(current_chunk, silent=True)
+            sent_messages.append(await destination.send(current_chunk, silent=True))
+        return sent_messages
 
     async def close(self):
         log.info("Shutting down, flushing buffers...")

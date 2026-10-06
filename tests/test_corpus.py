@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from bot.corpus import DOCUMENT_MAX_MESSAGES, CorpusManager, calculate_incremental_after
+from bot.rag_store import RagStore
 
 
 @pytest.fixture
@@ -107,6 +108,9 @@ def test_knowledge_document_has_traceable_metadata(corpus_manager):
     assert metadata["schema"] == "discord-v2"
     assert metadata["source_url"].endswith("/1")
     assert metadata["message_count"] == 2.0
+    assert metadata["festival"] == 28.0
+    assert metadata["status"] == "raw"
+    assert metadata["authority"] == "conversation"
     assert "2026-10-05 09:00" in documents[0].text
 
 
@@ -219,3 +223,62 @@ async def test_upload_waits_for_indexing_completion(corpus_manager):
 
     assert result == "documents/indexed"
     corpus_manager._client.operations.get.assert_called_once_with(pending)
+
+
+@pytest.mark.asyncio
+async def test_query_filters_explicit_festival_and_records_trace(
+    corpus_manager, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "true")
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    context = SimpleNamespace(
+        title="整理券記録",
+        uri=None,
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "整理券"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "status", "string_value": "raw"},
+        ],
+    )
+    response = SimpleNamespace(
+        text="27thの回答",
+        usage_metadata=None,
+        candidates=[SimpleNamespace(
+            grounding_metadata=SimpleNamespace(
+                grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+            )
+        )],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券について",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
+    assert config.tools[0].file_search.metadata_filter == "festival = 27"
+    assert result.festival == 27
+    assert result.query_id
+    assert "27thの回答" in result.text
+
+
+@pytest.mark.asyncio
+async def test_festival_filter_stays_off_during_legacy_migration(
+    corpus_manager, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "false")
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    response = SimpleNamespace(text="回答", usage_metadata=None, candidates=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
+
+    result = await corpus_manager.query_with_trace(
+        "27thについて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
+    assert config.tools[0].file_search.metadata_filter is None
+    assert result.festival == 27

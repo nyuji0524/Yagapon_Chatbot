@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.testclient import TestClient
 
 from api.server import create_app
-from bot.corpus import BackfillResult
+from bot.corpus import BackfillResult, RagAnswer
 
 
 class FakeConfig:
@@ -48,6 +48,16 @@ def make_client():
     )
     corpus = SimpleNamespace(
         query=AsyncMock(return_value="回答"),
+        query_with_trace=AsyncMock(return_value=RagAnswer(
+            text="回答",
+            query_id="query-1",
+            citations=("source",),
+            festival=28,
+        )),
+        rag_store=SimpleNamespace(
+            summary=Mock(return_value={"queries": 0}),
+            recent_queries=Mock(return_value=[]),
+        ),
         start_backfill=Mock(return_value=True),
         finish_backfill=Mock(),
         backfill_channel=AsyncMock(return_value=BackfillResult(
@@ -93,26 +103,16 @@ def test_ask_requires_token_and_passes_guild_context(monkeypatch):
     )
 
     assert response.status_code == 200
-    bot.corpus.query.assert_awaited_once_with(
+    bot.corpus.query_with_trace.assert_awaited_once_with(
         "質問",
         "fileSearchStores/test",
         guild_id=1,
         members_info="メンバー情報",
         glossary_text="用語集",
+        glossary={},
     )
-
-
-def test_github_webhook_fails_closed_without_secret(monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
-    client, _ = make_client()
-
-    response = client.post(
-        "/webhook/github/1",
-        headers={"X-GitHub-Event": "push"},
-        content=b"{}",
-    )
-
-    assert response.status_code == 503
+    assert response.json()["query_id"] == "query-1"
+    assert response.json()["sources"] == ["source"]
 
 
 def test_backfill_exposes_job_progress(monkeypatch):
@@ -170,3 +170,28 @@ def test_catalog_candidate_can_be_approved_for_glossary(monkeypatch, tmp_path):
     assert bot.config.glossary["やがサポ"]["definition"] == "矢上祭の運営用アプリ"
     listed = client.get("/admin/catalog?guild_id=1&status=approved", headers=headers)
     assert listed.json()["total"] == 1
+
+
+def test_rag_quality_dashboard_api_requires_token(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+
+    assert client.get("/admin/rag/summary?guild_id=1").status_code == 401
+    response = client.get(
+        "/admin/rag/summary?guild_id=1",
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"queries": 0}
+    bot.corpus.rag_store.summary.assert_called_once_with(1)
+
+
+def test_rag_dashboard_html_contains_no_embedded_token():
+    client, _ = make_client()
+
+    response = client.get("/admin/rag-ui")
+
+    assert response.status_code == 200
+    assert "API token（保存しません）" in response.text
+    assert "localStorage" not in response.text

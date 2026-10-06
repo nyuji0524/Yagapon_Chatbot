@@ -1,6 +1,7 @@
 # Pull Request AIレビュー
 
 関連リポジトリのPull Request作成・更新時に、再利用可能なGitHub Actions workflowからGeminiを呼び出してレビューする。
+Botの常駐API、push Webhook、Discord通知は使わない。レビューと通知先はPull Request内に限定する。
 
 ## 安全上の境界
 
@@ -17,6 +18,8 @@
 2. `deploy/github/ai-review-caller.yml.example`を対象リポジトリの`.github/workflows/ai-review.yml`へコピーする。
 3. 初回は参考チェックとして運用し、Required Checkにはしない。
 4. 誤検知、見逃し、費用、時間を評価してから対象リポジトリを増やす。
+
+Yagapon_Chatbot自身は`.github/workflows/ai-review-self.yml`から同じ再利用workflowを呼ぶ。
 
 本番運用では`@main`ではなく、レビュー済みのrelease tagまたはcommit SHAへ固定する。Private forkからのPRはGitHubの既定保護により書き込みトークンとSecretを受け取れないため、レビューは投稿されない。
 
