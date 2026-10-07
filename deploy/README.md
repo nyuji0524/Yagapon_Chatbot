@@ -49,6 +49,10 @@ sudo systemctl status yagapon
 4. 新イメージをpullし、systemdサービスを再起動
 5. `/health`を最大60秒確認し、失敗時は直前のcompose・イメージ設定へ戻す
 
+Artifact Registryではcommit SHAをイメージタグに使い、同じcommitの再実行時は既存イメージを
+再利用する。リポジトリには`deploy/artifact-cleanup-policy.json`を適用し、直近10世代を残しつつ
+30日を超えた古いイメージを削除する。cleanup対象にするため、タグのimmutabilityは無効にする。
+
 GitHubのRepository Variablesへ次を設定する。`production` Environmentはデプロイ履歴と
 必要に応じた保護ルールに使うが、完全自動化する場合は承認待ちルールを付けない。
 

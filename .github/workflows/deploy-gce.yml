@@ -65,8 +65,12 @@ jobs:
           set -eu
           registry="${IMAGE_REPOSITORY%%/*}"
           gcloud auth configure-docker "$registry" --quiet
-          docker build --tag "$IMAGE_SHA" .
-          docker push "$IMAGE_SHA"
+          if gcloud artifacts docker images describe "$IMAGE_SHA" >/dev/null 2>&1; then
+            echo "Reusing existing image: $IMAGE_SHA"
+          else
+            docker build --tag "$IMAGE_SHA" .
+            docker push "$IMAGE_SHA"
+          fi
 
       - name: Copy deployment files
         run: |
