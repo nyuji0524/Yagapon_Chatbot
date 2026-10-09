@@ -49,8 +49,8 @@ sudo systemctl status yagapon
 1. CIと同一commitからDockerイメージを作成し、Artifact Registryへcommit SHAタグでpush
 2. GitHub OIDCからWorkload Identity Federationで短期認証
 3. IAP + OS LoginでVMへcomposeと更新スクリプトを転送
-4. 新イメージをpullし、systemdサービスを再起動
-5. `/health`を最大60秒確認し、失敗時は直前のcompose・イメージ設定へ戻す
+4. Docker Compose用systemd unitを配置して、新イメージをpull・再起動
+5. コンテナID、実行イメージ、systemd、`/health`を最大60秒確認し、失敗時は旧unitを含む直前の構成へ戻す
 
 Artifact Registryではcommit SHAをイメージタグに使い、同じcommitの再実行時は既存イメージを
 再利用する。リポジトリには`deploy/artifact-cleanup-policy.json`を適用し、直近10世代を残しつつ

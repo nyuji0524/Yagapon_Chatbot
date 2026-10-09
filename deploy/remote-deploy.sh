@@ -6,13 +6,15 @@ app_dir=/opt/yagapon
 deploy_env=/etc/yagapon/deploy.env
 compose_source=/tmp/compose.yaml
 compose_target="$app_dir/compose.yaml"
+unit_source=/tmp/yagapon.service
+unit_target=/etc/systemd/system/yagapon.service
 backup_dir=/var/backups/yagapon/"$(date -u +%Y%m%dT%H%M%SZ)"
 
 if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]; then
   echo "Refusing invalid Artifact Registry image reference" >&2
   exit 2
 fi
-if [[ ! -f "$compose_source" || ! -f /tmp/remote-deploy.sh ]]; then
+if [[ ! -f "$compose_source" || ! -f /tmp/remote-deploy.sh || ! -f "$unit_source" ]]; then
   echo "Deployment files were not copied to /tmp" >&2
   exit 2
 fi
@@ -27,11 +29,17 @@ flock -n 9 || { echo "Another deployment is running" >&2; exit 3; }
 
 [[ -f "$compose_target" ]] && cp -a "$compose_target" "$backup_dir/compose.yaml"
 [[ -f "$deploy_env" ]] && cp -a "$deploy_env" "$backup_dir/deploy.env"
+[[ -f "$unit_target" ]] && cp -a "$unit_target" "$backup_dir/yagapon.service"
 
 rollback() {
   echo "Deployment failed; restoring the previous Compose configuration" >&2
+  set +e
+  systemctl stop yagapon
+  docker compose --project-directory "$app_dir" --env-file "$deploy_env" down
   [[ -f "$backup_dir/compose.yaml" ]] && cp -a "$backup_dir/compose.yaml" "$compose_target"
   [[ -f "$backup_dir/deploy.env" ]] && cp -a "$backup_dir/deploy.env" "$deploy_env"
+  [[ -f "$backup_dir/yagapon.service" ]] && cp -a "$backup_dir/yagapon.service" "$unit_target"
+  systemctl daemon-reload
   systemctl restart yagapon || true
 }
 trap rollback ERR
@@ -51,6 +59,8 @@ printf 'YAGAPON_IMAGE=%s\n' "$image" >> "$deploy_tmp"
 chmod 0640 "$deploy_tmp"
 mv "$deploy_tmp" "$deploy_env"
 install -m 0644 "$compose_source" "$compose_target"
+install -m 0644 "$unit_source" "$unit_target"
+systemctl daemon-reload
 
 registry=${image%%/*}
 gcloud auth configure-docker "$registry" --quiet
@@ -90,10 +100,20 @@ systemctl restart yagapon
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
 host_port=${host_port:-8000}
 for _ in $(seq 1 30); do
-  if curl --fail --silent --show-error "http://127.0.0.1:${host_port}/health" >/dev/null; then
+  container_id=$(docker compose \
+    --project-directory "$app_dir" \
+    --env-file "$deploy_env" \
+    ps --status running --quiet yagapon)
+  running_image=
+  if [[ -n "$container_id" ]]; then
+    running_image=$(docker inspect --format '{{.Config.Image}}' "$container_id")
+  fi
+  if [[ "$running_image" == "$image" ]] \
+    && systemctl is-active --quiet yagapon \
+    && curl --fail --silent --show-error "http://127.0.0.1:${host_port}/health" >/dev/null; then
     trap - ERR
     docker image prune --force --filter 'until=168h' >/dev/null
-    echo "Deployment healthy: $image"
+    echo "Deployment healthy: $image (container: $container_id)"
     exit 0
   fi
   sleep 2
