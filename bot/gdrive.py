@@ -1,88 +1,117 @@
-"""Google Drive連携 - Google Apps Script経由でGoogleドキュメントを作成"""
+"""Google Drive integration using Drive and Docs APIs directly."""
 
+import asyncio
 import logging
-import os
 import re
 from datetime import datetime, timezone
 
-import aiohttp
+from googleapiclient.discovery import build
+
+from bot.google_credentials import load_google_credentials
 
 log = logging.getLogger("yagapon.gdrive")
 
-# Google Apps ScriptのデプロイURL
-APPS_SCRIPT_URL = os.environ.get("GOOGLE_APPS_SCRIPT_URL", "")
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+DOCS_SCOPE = "https://www.googleapis.com/auth/documents"
+GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 
 
 def _extract_folder_id(url: str) -> str | None:
-    """Google DriveフォルダURLからIDを抽出"""
+    """Extract a Drive folder ID from a configured URL."""
     match = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
     return match.group(1) if match else None
 
 
-async def upload_to_drive(
-    folder_url: str,
-    filename: str,
-    content: str,
-) -> str | None:
-    """Google Apps Script経由でGoogleドキュメントを作成"""
-    if not APPS_SCRIPT_URL:
-        log.warning("GOOGLE_APPS_SCRIPT_URL not set, skipping Drive upload")
-        return None
+class DriveWriter:
+    def __init__(self):
+        credentials, self.credential_source = load_google_credentials(
+            [DRIVE_FILE_SCOPE, DOCS_SCOPE]
+        )
+        self.drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        self.docs = build("docs", "v1", credentials=credentials, cache_discovery=False)
 
+    def check_folder(self, folder_id: str) -> dict:
+        folder = self.drive.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,trashed,capabilities(canAddChildren)",
+            supportsAllDrives=True,
+        ).execute(num_retries=3)
+        return {
+            "credential_source": self.credential_source,
+            "folder": folder,
+            "can_add_children": bool(folder.get("capabilities", {}).get("canAddChildren")),
+        }
+
+    def create_document(self, folder_id: str, filename: str, content: str) -> str:
+        created = self.drive.files().create(
+            body={
+                "name": filename,
+                "mimeType": GOOGLE_DOC_MIME_TYPE,
+                "parents": [folder_id],
+            },
+            fields="id,webViewLink",
+            supportsAllDrives=True,
+        ).execute(num_retries=3)
+        document_id = created["id"]
+        try:
+            self.docs.documents().batchUpdate(
+                documentId=document_id,
+                body={
+                    "requests": [
+                        {"insertText": {"location": {"index": 1}, "text": content}}
+                    ]
+                },
+            ).execute(num_retries=3)
+        except Exception:
+            try:
+                self.drive.files().delete(
+                    fileId=document_id,
+                    supportsAllDrives=True,
+                ).execute(num_retries=3)
+            except Exception:
+                log.exception("Failed to remove an empty Google Doc after content insertion failed")
+            raise
+        return created.get("webViewLink") or f"https://docs.google.com/document/d/{document_id}/edit"
+
+
+async def diagnose_drive(folder_url: str) -> dict:
     folder_id = _extract_folder_id(folder_url)
     if not folder_id:
-        log.error(f"Invalid folder URL: {folder_url}")
+        raise ValueError("Invalid Google Drive folder URL")
+    writer = DriveWriter()
+    return await asyncio.to_thread(writer.check_folder, folder_id)
+
+
+async def upload_to_drive(folder_url: str, filename: str, content: str) -> str | None:
+    """Create a Google Doc with ADC/service-account credentials."""
+    folder_id = _extract_folder_id(folder_url)
+    if not folder_id:
+        log.error("Invalid Google Drive folder URL: %s", folder_url)
         return None
-
-    payload = {
-        "folderId": folder_id,
-        "fileName": filename,
-        "content": content,
-    }
-
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                APPS_SCRIPT_URL,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    if "error" in data:
-                        log.error(f"Apps Script error: {data['error']}")
-                        return None
-                    url = data.get("url")
-                    log.info(f"Uploaded to Drive: {filename} -> {url}")
-                    return url
-                else:
-                    text = await resp.text()
-                    log.error(f"Apps Script HTTP {resp.status}: {text}")
-                    return None
-    except Exception as e:
-        log.error(f"Drive upload error: {e}")
+        writer = DriveWriter()
+        return await asyncio.to_thread(
+            writer.create_document,
+            folder_id,
+            filename,
+            content,
+        )
+    except Exception:
+        log.exception("Direct Google Drive upload failed")
         return None
 
 
 async def upload_minutes(config, guild_id: int, minutes: str, channel_name: str) -> str | None:
-    """議事録をGoogleドキュメントとしてDriveに作成。URLを返す。"""
     folder_url = config.get_drive_folder(guild_id)
     if not folder_url:
         return None
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
-    filename = f"議事録_{channel_name}_{now}"
-
-    return await upload_to_drive(folder_url, filename, minutes)
+    return await upload_to_drive(folder_url, f"議事録_{channel_name}_{now}", minutes)
 
 
 async def upload_report(config, guild_id: int, report: str, report_type: str) -> str | None:
-    """レポートをGoogleドキュメントとしてDriveに作成。URLを返す。"""
     folder_url = config.get_drive_folder(guild_id)
     if not folder_url:
         return None
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    filename = f"{report_type}_{now}"
-
-    return await upload_to_drive(folder_url, filename, report)
+    return await upload_to_drive(folder_url, f"{report_type}_{now}", report)

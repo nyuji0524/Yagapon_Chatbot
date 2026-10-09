@@ -1,0 +1,82 @@
+services:
+  yagapon:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      API_PORT: "8000"
+      YAGAPON_CONFIG_PATH: /data/server_config.json
+      YAGAPON_CATALOG_PATH: /data/knowledge-catalog.json
+      YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
+      YAGAPON_VOICEPRINT_DIR: /data/voiceprints
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
+    ports:
+      - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    stop_grace_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  knowledge-sync:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    profiles: [tools]
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      YAGAPON_DRIVE_SYNC_STATE: /data/drive-sync-state.json
+      YAGAPON_KNOWLEDGE_OUTPUT: /data/knowledge-drafts
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    command: ["python", "-m", "knowledge_sync"]
+    healthcheck:
+      disable: true
+
+  knowledge-sync-watch:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    profiles: [knowledge]
+    restart: unless-stopped
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      YAGAPON_DRIVE_SYNC_STATE: /data/drive-sync-state.json
+      YAGAPON_KNOWLEDGE_OUTPUT: /data/knowledge-drafts
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    command: ["python", "-m", "knowledge_sync", "--watch-interval", "900"]
+    healthcheck:
+      disable: true
+
+  knowledge-index-watch:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    profiles: [knowledge]
+    restart: unless-stopped
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      YAGAPON_CONFIG_PATH: /data/server_config.json
+      YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
+      YAGAPON_KNOWLEDGE_ROOT: /knowledge
+      YAGAPON_KNOWLEDGE_INDEX_STATE: /data/knowledge-index-state.json
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+      - ${YAGAPON_KNOWLEDGE_REPO_PATH:-../YagamiFes-IT-Knowledge}:/knowledge:ro
+    command: ["python", "-m", "knowledge_index", "--watch-interval", "900"]
+    healthcheck:
+      disable: true

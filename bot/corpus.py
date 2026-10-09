@@ -1,14 +1,23 @@
 """コーパス管理 - バッチ学習バッファ、flush、RAGクエリ、コーパスCRUD"""
 
 import asyncio
+import contextlib
+import hashlib
 import io
 import logging
 import os
+import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import types
+
+from bot.ai_models import generation_config, log_usage, rag_model
+from bot.festival import festival_from_query, festival_metadata_filter, festival_number
+from bot.rag_store import LexicalHit, RagStore
 
 log = logging.getLogger("yagapon.corpus")
 
@@ -16,9 +25,41 @@ log = logging.getLogger("yagapon.corpus")
 FLUSH_MESSAGE_THRESHOLD = 100  # メッセージ数でflush
 FLUSH_TIME_SECONDS = 7200      # 2時間でflush
 FLUSH_CHECK_INTERVAL = 120     # 2分ごとにチェック
+DOCUMENT_SCHEMA_VERSION = "discord-v2"
+DOCUMENT_MAX_MESSAGES = 80
+DOCUMENT_MAX_CHARS = 16_000
+DOCUMENT_MIN_MESSAGES = 8
+DOCUMENT_SESSION_GAP = timedelta(hours=6)
+DOCUMENT_MAX_MERGE_GAP = timedelta(hours=24)
+UPLOAD_POLL_SECONDS = 2
+UPLOAD_TIMEOUT_SECONDS = 180
+JST = ZoneInfo("Asia/Tokyo")
 
 # レート制限
-DAILY_QUERY_LIMIT = 400  # 1ギルドあたり1日の質問上限
+DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
+
+
+def festival_filter_enabled() -> bool:
+    """Gate metadata filters until legacy File Search documents are rebuilt."""
+    return os.environ.get("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "false").lower() == "true"
+
+
+def calculate_incremental_after(cursor: dict | None, now: datetime | None = None) -> datetime:
+    """日単位の安定した再構築境界を返す。カーソル日は前日から重ねる。"""
+    current = now or datetime.now(timezone.utc)
+    cursor_at = None
+    if cursor and cursor.get("message_at"):
+        try:
+            cursor_at = datetime.fromisoformat(cursor["message_at"])
+        except (TypeError, ValueError):
+            pass
+    base = cursor_at or (current - timedelta(days=30))
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    local = base.astimezone(JST).replace(hour=0, minute=0, second=0, microsecond=0)
+    if cursor_at is not None:
+        local -= timedelta(days=1)
+    return local.astimezone(timezone.utc)
 
 SYSTEM_INSTRUCTION = (
     "あなたは慶應義塾大学 矢上祭実行委員会の専属AI「おしゃべりやがぽん」だぽん。\n"
@@ -51,7 +92,9 @@ SYSTEM_INSTRUCTION = (
     "- 人物について聞かれたら、その人自身の発言に加え、他者がその人について言及した内容も探すぽん。\n"
     "- ドキュメントの「参加者」「チャンネル」ヘッダーも参考にして幅広く検索するぽん。\n"
     "- 会話の文脈（前後の発言の流れ）を考慮して、発言の意図を正しく読み取るぽん。\n"
-    "- 検索結果から得た情報を統合し、全体像を把握してから回答するぽん。"
+    "- 検索結果から得た情報を統合し、全体像を把握してから回答するぽん。\n"
+    "- 現在の状態を聞かれた場合は、日付が新しい根拠を優先し、古い記録と矛盾する場合は更新時期も説明するぽん。\n"
+    "- 出典にない日付・担当者・決定事項を補完してはいけないぽん。"
 )
 
 
@@ -60,18 +103,68 @@ class MessageBuffer:
     channel_name: str
     guild_id: int
     channel_id: int
-    first_message_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    corpus_store_name: str
+    first_message_at: datetime
+    last_message_at: datetime
     messages: list[str] = field(default_factory=list)
     authors: dict[str, int] = field(default_factory=dict)
+    first_message_id: int | None = None
+    last_message_id: int | None = None
+    source_url: str = ""
+
+
+@dataclass(frozen=True)
+class KnowledgeMessage:
+    message_id: int
+    timestamp: datetime
+    author: str
+    content: str
+    jump_url: str = ""
+
+
+@dataclass
+class KnowledgeDocument:
+    display_name: str
+    text: str
+    metadata: list[dict]
+    message_count: int
+    start_at: datetime
+    end_at: datetime
+
+
+@dataclass
+class BackfillResult:
+    messages_seen: int = 0
+    messages_indexed: int = 0
+    messages_skipped: int = 0
+    documents_uploaded: int = 0
+    documents_replaced: int = 0
+    latest_message_id: int | None = None
+    latest_message_at: datetime | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.messages_indexed == 0 or self.documents_uploaded > 0
+
+
+@dataclass(frozen=True)
+class RagAnswer:
+    text: str
+    query_id: str | None = None
+    citations: tuple[str, ...] = ()
+    festival: int | None = None
+    no_answer: bool = False
 
 
 class CorpusManager:
     def __init__(self):
         api_key = os.environ.get("GOOGLE_API_KEY", "")
         self._client = genai.Client(api_key=api_key)
+        self.rag_store = RagStore()
         self._buffers: dict[tuple[int, int], MessageBuffer] = {}
         self._upload_semaphore = asyncio.Semaphore(5)
         self._flush_task: asyncio.Task | None = None
+        self._active_backfills: set[int] = set()
         # レート制限: {guild_id: {"date": "2026-03-16", "count": 42}}
         self._query_counts: dict[int, dict] = {}
 
@@ -84,6 +177,9 @@ class CorpusManager:
     async def shutdown(self):
         if self._flush_task:
             self._flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._flush_task
+            self._flush_task = None
         await self.flush_all()
 
     async def _flush_loop(self):
@@ -156,7 +252,8 @@ class CorpusManager:
 
     def add_message(self, guild_id: int, channel_id: int, channel_name: str,
                     author: str, content: str, timestamp: datetime,
-                    corpus_store_name: str):
+                    corpus_store_name: str, message_id: int | None = None,
+                    source_url: str = ""):
         """メッセージをバッファに追加。閾値超えたらflushをスケジュール。"""
         key = (guild_id, channel_id)
         if key not in self._buffers:
@@ -164,29 +261,94 @@ class CorpusManager:
                 channel_name=channel_name,
                 guild_id=guild_id,
                 channel_id=channel_id,
+                corpus_store_name=corpus_store_name,
+                first_message_at=timestamp,
+                last_message_at=timestamp,
+                first_message_id=message_id,
+                last_message_id=message_id,
+                source_url=source_url,
             )
 
         buf = self._buffers[key]
-        ts = timestamp.strftime("%H:%M")
+        # セットアップ変更後は、以後のメッセージを現在のストアへ保存する。
+        buf.corpus_store_name = corpus_store_name
+        buf.last_message_at = max(buf.last_message_at, timestamp)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        ts = timestamp.astimezone(JST).strftime("%Y-%m-%d %H:%M")
         buf.messages.append(f"[{ts}] [{author}]: {content}")
         buf.authors[author] = buf.authors.get(author, 0) + 1
+        if message_id is not None:
+            buf.first_message_id = buf.first_message_id or message_id
+            buf.last_message_id = message_id
+        buf.source_url = buf.source_url or source_url
 
         # メッセージ数閾値
         if len(buf.messages) >= FLUSH_MESSAGE_THRESHOLD:
             asyncio.create_task(self._flush_buffer(key, corpus_store_name))
 
-    async def _flush_buffer(self, key: tuple[int, int], corpus_store_name: str | None = None):
+    async def _flush_buffer(self, key: tuple[int, int], corpus_store_name: str | None = None) -> bool:
         buf = self._buffers.pop(key, None)
         if not buf or not buf.messages:
-            return
+            return True
 
-        start = buf.first_message_at.strftime("%Y-%m-%d %H:%M")
-        end = datetime.now(timezone.utc).strftime("%H:%M")
+        start_at = buf.first_message_at.astimezone(JST)
+        end_at = buf.last_message_at.astimezone(JST)
+        start = start_at.strftime("%Y-%m-%d %H:%M")
+        end = end_at.strftime("%Y-%m-%d %H:%M")
         display_name = f"#{buf.channel_name} | {start}-{end}"
         text = self._build_document_text(buf.channel_name, f"{start}-{end}", buf.messages, buf.authors)
+        store_name = corpus_store_name or buf.corpus_store_name
+        key_source = (
+            f"{buf.guild_id}:{buf.channel_id}:{buf.first_message_id or start}:"
+            f"{buf.last_message_id or end}:{DOCUMENT_SCHEMA_VERSION}"
+        )
+        metadata = [
+            {"key": "source", "string_value": "discord_live"},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "festival", "numeric_value": float(festival_number(start_at))},
+            {"key": "schema", "string_value": DOCUMENT_SCHEMA_VERSION},
+            {"key": "guild_id", "string_value": str(buf.guild_id)},
+            {"key": "channel_id", "string_value": str(buf.channel_id)},
+            {"key": "channel_name", "string_value": buf.channel_name[:500]},
+            {"key": "start_at", "string_value": start_at.isoformat()},
+            {"key": "end_at", "string_value": end_at.isoformat()},
+            {"key": "start_epoch", "numeric_value": start_at.timestamp()},
+            {"key": "end_epoch", "numeric_value": end_at.timestamp()},
+            {"key": "message_count", "numeric_value": float(len(buf.messages))},
+            {
+                "key": "document_key",
+                "string_value": hashlib.sha256(key_source.encode()).hexdigest()[:24],
+            },
+            {"key": "source_url", "string_value": buf.source_url[:500]},
+        ]
 
-        if corpus_store_name:
-            await self._upload_document(corpus_store_name, display_name, text)
+        if not store_name:
+            log.error("Corpus store is missing for buffered messages: guild=%s channel=%s", *key)
+            self._restore_buffer(key, buf)
+            return False
+
+        if not await self._upload_document(store_name, display_name, text, metadata):
+            self._restore_buffer(key, buf)
+            return False
+        return True
+
+    def _restore_buffer(self, key: tuple[int, int], failed: MessageBuffer):
+        """Upload失敗時に、flush中に到着した新規メッセージと結合して戻す。"""
+        current = self._buffers.get(key)
+        if current is None:
+            self._buffers[key] = failed
+            return
+
+        current.messages = failed.messages + current.messages
+        for author, count in failed.authors.items():
+            current.authors[author] = current.authors.get(author, 0) + count
+        current.first_message_at = min(failed.first_message_at, current.first_message_at)
+        current.last_message_at = max(failed.last_message_at, current.last_message_at)
+        current.first_message_id = failed.first_message_id or current.first_message_id
+        current.source_url = failed.source_url or current.source_url
 
     async def flush_all(self, corpus_store_name_lookup=None):
         """全バッファをflush。corpus_store_name_lookup: guild_id -> store_name"""
@@ -202,13 +364,20 @@ class CorpusManager:
 
     # ------ upload ------
 
-    async def _upload_document(self, store_name: str, display_name: str, text: str):
+    async def _upload_document(
+        self,
+        store_name: str,
+        display_name: str,
+        text: str,
+        metadata: list[dict] | None = None,
+    ) -> str | None:
+        """文書をアップロードし、索引作成完了まで待つ。成功時は文書名を返す。"""
         async with self._upload_semaphore:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 file_bytes = text.encode("utf-8")
 
-                await loop.run_in_executor(
+                operation = await loop.run_in_executor(
                     None,
                     lambda: self._client.file_search_stores.upload_to_file_search_store(
                         file=io.BytesIO(file_bytes),
@@ -216,12 +385,65 @@ class CorpusManager:
                         config={
                             "display_name": display_name,
                             "mime_type": "text/plain",
+                            "custom_metadata": metadata or [],
+                            "chunking_config": {
+                                "white_space_config": {
+                                    "max_tokens_per_chunk": 500,
+                                    "max_overlap_tokens": 50,
+                                }
+                            },
                         },
                     ),
                 )
+
+                waited = 0
+                while getattr(operation, "done", True) is not True:
+                    if waited >= UPLOAD_TIMEOUT_SECONDS:
+                        raise TimeoutError(f"Indexing timed out after {UPLOAD_TIMEOUT_SECONDS}s")
+                    await asyncio.sleep(UPLOAD_POLL_SECONDS)
+                    waited += UPLOAD_POLL_SECONDS
+                    operation = await loop.run_in_executor(
+                        None,
+                        lambda op=operation: self._client.operations.get(op),
+                    )
+
+                if getattr(operation, "error", None):
+                    raise RuntimeError(f"Indexing failed: {operation.error}")
+                response = getattr(operation, "response", None)
+                document_name = getattr(response, "document_name", None)
+                if not document_name:
+                    raise RuntimeError("Indexing completed without a document name")
+                try:
+                    self.rag_store.upsert_document(document_name, text, metadata)
+                except Exception as exc:
+                    log.warning("Local exact-match mirror update failed: %s", exc)
                 log.info(f"Uploaded: {display_name} -> {store_name}")
+                return document_name
             except Exception as e:
                 log.error(f"Upload error ({display_name}): {e}")
+                return None
+
+    async def _delete_documents(self, document_names: list[str]) -> int:
+        """指定文書をforce削除し、成功件数を返す。"""
+        loop = asyncio.get_running_loop()
+        deleted = 0
+        for name in document_names:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda n=name: self._client.file_search_stores.documents.delete(
+                        name=n,
+                        config={"force": True},
+                    ),
+                )
+                deleted += 1
+            except Exception as exc:
+                log.warning("Failed to delete document %s: %s", name, exc)
+        try:
+            self.rag_store.delete_remote_documents(document_names)
+        except Exception as exc:
+            log.warning("Local exact-match mirror deletion failed: %s", exc)
+        return deleted
 
     # ------ rate limit ------
 
@@ -247,37 +469,170 @@ class CorpusManager:
     # ------ RAG query ------
 
     async def query(self, question: str, corpus_store_name: str,
-                    guild_id: int = 0, members_info: str = "", glossary_text: str = "") -> str:
+                    guild_id: int = 0, members_info: str = "", glossary_text: str = "",
+                    glossary: dict | None = None) -> str:
+        result = await self.query_with_trace(
+            question,
+            corpus_store_name,
+            guild_id=guild_id,
+            members_info=members_info,
+            glossary_text=glossary_text,
+            glossary=glossary,
+        )
+        return result.text
+
+    async def query_with_trace(
+        self,
+        question: str,
+        corpus_store_name: str,
+        *,
+        guild_id: int = 0,
+        actor_id: int | None = None,
+        channel_id: int | None = None,
+        members_info: str = "",
+        glossary_text: str = "",
+        glossary: dict | None = None,
+    ) -> RagAnswer:
         if guild_id and not self._check_rate_limit(guild_id):
-            return (
+            return RagAnswer(text=(
                 f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n"
                 "明日またたくさん聞いてねぽん！🙏"
-            )
+            ), no_answer=True)
+        started = time.monotonic()
+        festival = festival_from_query(question)
+        metadata_filter = festival_metadata_filter(festival) if festival_filter_enabled() else None
+        terms = self.rag_store.query_terms(question, glossary)
+        lexical_hits = self.rag_store.search_exact(
+            guild_id, terms, festival=festival, limit=4
+        ) if guild_id else []
         try:
             system = SYSTEM_INSTRUCTION
+            if festival is not None:
+                system += f"\n\n【対象年度】{festival}thの記録だけを根拠に回答するぽん。"
             if members_info:
                 system += f"\n\n【メンバー情報】\n{members_info}"
             if glossary_text:
                 system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
+            if lexical_hits:
+                system += (
+                    "\n\n【完全一致検索の候補】意味検索とは別に取得した原文候補だぽん。"
+                    "質問との関係を確認し、関係がないものは使わないぽん。\n"
+                    + self._lexical_context(lexical_hits)
+                )
 
+            model = rag_model()
+            search = types.FileSearch(
+                file_search_store_names=[corpus_store_name],
+                top_k=12,
+                metadata_filter=metadata_filter,
+            )
             response = await self._client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model,
                 contents=question,
-                config=types.GenerateContentConfig(
+                config=generation_config(
+                    model,
+                    thinking_level="low",
+                    max_output_tokens=1024,
                     system_instruction=system,
                     tools=[
                         types.Tool(
-                            file_search=types.FileSearch(
-                                file_search_store_names=[corpus_store_name]
-                            )
+                            file_search=search
                         )
                     ],
                 ),
             )
-            return response.text or "回答を生成できなかったぽん..."
+            log_usage(log, "rag_query", model, response)
+            answer = response.text or "回答を生成できなかったぽん..."
+            sources = self._response_sources(response)
+            sources.extend(self._lexical_sources(lexical_hits, sources))
+            no_answer = not sources
+            if no_answer:
+                answer = (
+                    "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
+                    "年度や用語を変えて質問するか、資料を追加してほしいぽん。"
+                )
+            if sources:
+                answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
+            query_id = self.rag_store.record_query(
+                guild_id=guild_id,
+                actor_id=actor_id,
+                channel_id=channel_id,
+                question=question,
+                answer=answer,
+                festival=festival,
+                metadata_filter=metadata_filter,
+                citations=sources,
+                lexical_keys=[hit.document_key for hit in lexical_hits],
+                latency_ms=round((time.monotonic() - started) * 1000),
+                no_answer=no_answer,
+            ) if guild_id else None
+            return RagAnswer(
+                text=answer,
+                query_id=query_id,
+                citations=tuple(sources),
+                festival=festival,
+                no_answer=no_answer,
+            )
         except Exception as e:
             log.error(f"RAG query error: {e}")
-            return f"エラーが出ちゃったぽん...: {e}"
+            return RagAnswer(text=f"エラーが出ちゃったぽん...: {e}", festival=festival, no_answer=True)
+
+    @staticmethod
+    def _lexical_context(hits: list[LexicalHit]) -> str:
+        return "\n\n".join(
+            f"[exact:{hit.document_key} #{hit.channel_name} "
+            f"{f'{hit.festival}th' if hit.festival is not None else '年度不明'}]\n{hit.excerpt}"
+            for hit in hits
+        )
+
+    @staticmethod
+    def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
+        rendered = []
+        for hit in hits:
+            label = f"完全一致: #{hit.channel_name or '記録'}"
+            value = f"[{label}]({hit.source_url})" if hit.source_url else label
+            if value not in existing and value not in rendered:
+                rendered.append(value)
+        return rendered
+
+    @classmethod
+    def _response_sources(cls, response, limit: int = 5) -> list[str]:
+        """File Search grounding metadataをDiscord上で読める参照一覧へ変換する。"""
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            return []
+        grounding = getattr(candidates[0], "grounding_metadata", None)
+        chunks = getattr(grounding, "grounding_chunks", None) or []
+        sources = []
+        seen = set()
+        for chunk in chunks:
+            context = getattr(chunk, "retrieved_context", None)
+            if context is None:
+                continue
+            metadata = cls._metadata_map(context)
+            channel = metadata.get("channel_name")
+            start = str(metadata.get("start_at") or "")[:10]
+            festival = metadata.get("festival")
+            status = metadata.get("status")
+            url = metadata.get("source_url") or getattr(context, "uri", None)
+            title = getattr(context, "title", None)
+            label = f"#{channel}" if channel else (title or "Discord会話記録")
+            if start:
+                label += f"（{start}）"
+            details = []
+            if festival is not None:
+                details.append(f"{int(float(festival))}th")
+            if status and status != "approved":
+                details.append(str(status))
+            if details:
+                label += f" [{' / '.join(details)}]"
+            rendered = f"[{label}]({url})" if url else label
+            if rendered not in seen:
+                seen.add(rendered)
+                sources.append(rendered)
+            if len(sources) >= limit:
+                break
+        return sources
 
     # ------ backfill ------
 
@@ -297,71 +652,257 @@ class CorpusManager:
             + "\n".join(lines)
         )
 
-    async def backfill_channel(self, channel, corpus_store_name: str,
-                               after=None, progress_callback=None) -> int:
-        """チャンネルの履歴を取得してバッチアップロード。after=Noneで全量。件数を返す。"""
-        count = 0
-        # バケット: key -> {"lines": [...], "authors": {name: count}}
-        buckets: dict[str, dict] = {}
+    @staticmethod
+    def _message_content(message) -> str:
+        """検索価値のある本文と添付情報を正規化する。URLはDiscord本文内のものだけ保持。"""
+        content = (getattr(message, "content", "") or "").strip()
+        attachments = []
+        for attachment in getattr(message, "attachments", []) or []:
+            name = getattr(attachment, "filename", "添付ファイル")
+            content_type = getattr(attachment, "content_type", None)
+            attachments.append(f"[添付: {name}{f' ({content_type})' if content_type else ''}]")
+        if attachments:
+            content = "\n".join(part for part in (content, *attachments) if part)
+        return content.replace("\u200b", "").strip()
 
-        async for message in channel.history(limit=None, after=after, oldest_first=True):
-            if message.author.bot or len(message.content) < 4:
-                continue
-            if message.content.startswith("/"):
-                continue
-
-            ts = message.created_at
-            bucket_key = ts.strftime("%Y-%m-%d %H:00")
-            author_name = message.author.display_name
-            line = f"[{ts.strftime('%H:%M')}] [{author_name}]: {message.content}"
-
-            if bucket_key not in buckets:
-                buckets[bucket_key] = {"lines": [], "authors": {}}
-            buckets[bucket_key]["lines"].append(line)
-            buckets[bucket_key]["authors"][author_name] = buckets[bucket_key]["authors"].get(author_name, 0) + 1
-            count += 1
-
-            if progress_callback and count % 500 == 0:
-                await progress_callback(count)
-
-        # 小さすぎるバケットを隣接バケットと統合（最低10件）
-        merged = self._merge_small_buckets(buckets, min_lines=10)
-
-        # バケットごとにアップロード
-        for bucket_key, data in merged.items():
-            if not data["lines"]:
-                continue
-            display_name = f"#{channel.name} | {bucket_key}"
-            text = self._build_document_text(
-                channel.name, bucket_key, data["lines"], data["authors"]
-            )
-            await self._upload_document(corpus_store_name, display_name, text)
-
-        return count
+    @classmethod
+    def _knowledge_message(cls, message) -> KnowledgeMessage | None:
+        if getattr(getattr(message, "author", None), "bot", False):
+            return None
+        content = cls._message_content(message)
+        if not content or content.startswith("/"):
+            return None
+        if len(content) < 4 and not getattr(message, "attachments", None):
+            return None
+        timestamp = message.created_at
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return KnowledgeMessage(
+            message_id=int(message.id),
+            timestamp=timestamp,
+            author=message.author.display_name,
+            content=content,
+            jump_url=getattr(message, "jump_url", "") or "",
+        )
 
     @staticmethod
-    def _merge_small_buckets(buckets: dict, min_lines: int = 10) -> dict:
-        """小さいバケットを次のバケットに統合してドキュメント品質を上げる"""
-        sorted_keys = sorted(buckets.keys())
-        if not sorted_keys:
-            return {}
+    def _split_knowledge_messages(messages: list[KnowledgeMessage]) -> list[list[KnowledgeMessage]]:
+        """会話セッションと文書サイズを考慮して検索しやすい単位へ分割する。"""
+        if not messages:
+            return []
+        groups: list[list[KnowledgeMessage]] = []
+        current: list[KnowledgeMessage] = []
+        current_chars = 0
+        for message in messages:
+            gap = message.timestamp - current[-1].timestamp if current else timedelta(0)
+            exceeds_size = (
+                len(current) >= DOCUMENT_MAX_MESSAGES
+                or current_chars + len(message.content) > DOCUMENT_MAX_CHARS
+            )
+            closes_session = bool(current) and (
+                message.timestamp.astimezone(JST).date() != current[-1].timestamp.astimezone(JST).date()
+                or
+                gap > DOCUMENT_MAX_MERGE_GAP
+                or (gap > DOCUMENT_SESSION_GAP and len(current) >= DOCUMENT_MIN_MESSAGES)
+            )
+            if current and (exceeds_size or closes_session):
+                groups.append(current)
+                current = []
+                current_chars = 0
+            current.append(message)
+            current_chars += len(message.content)
+        if current:
+            groups.append(current)
 
-        merged = {}
-        current_key = sorted_keys[0]
-        current = {"lines": list(buckets[sorted_keys[0]]["lines"]),
-                    "authors": dict(buckets[sorted_keys[0]]["authors"])}
+        # 最後だけ極端に小さい場合は、上限内で直前の会話へ統合する。
+        if len(groups) >= 2 and len(groups[-1]) < DOCUMENT_MIN_MESSAGES:
+            previous, trailing = groups[-2], groups[-1]
+            combined_chars = sum(len(item.content) for item in previous + trailing)
+            gap = trailing[0].timestamp - previous[-1].timestamp
+            if (
+                len(previous) + len(trailing) <= DOCUMENT_MAX_MESSAGES
+                and combined_chars <= DOCUMENT_MAX_CHARS
+                and gap <= DOCUMENT_MAX_MERGE_GAP
+                and previous[-1].timestamp.astimezone(JST).date()
+                == trailing[0].timestamp.astimezone(JST).date()
+            ):
+                groups[-2] = previous + trailing
+                groups.pop()
+        return groups
 
-        for key in sorted_keys[1:]:
-            if len(current["lines"]) < min_lines:
-                # 小さいので次と統合
-                current["lines"].extend(buckets[key]["lines"])
-                for author, cnt in buckets[key]["authors"].items():
-                    current["authors"][author] = current["authors"].get(author, 0) + cnt
-            else:
-                merged[current_key] = current
-                current_key = key
-                current = {"lines": list(buckets[key]["lines"]),
-                            "authors": dict(buckets[key]["authors"])}
+    @classmethod
+    def _build_knowledge_documents(cls, channel, messages: list[KnowledgeMessage]) -> list[KnowledgeDocument]:
+        guild_id = int(channel.guild.id)
+        channel_id = int(channel.id)
+        channel_name = str(channel.name)
+        category = getattr(getattr(channel, "category", None), "name", "") or ""
+        topic = (getattr(channel, "topic", None) or "").strip()
+        documents = []
+        for group in cls._split_knowledge_messages(messages):
+            start_at = group[0].timestamp.astimezone(JST)
+            end_at = group[-1].timestamp.astimezone(JST)
+            key_source = f"{guild_id}:{channel_id}:{group[0].message_id}:{group[-1].message_id}:{DOCUMENT_SCHEMA_VERSION}"
+            document_key = hashlib.sha256(key_source.encode()).hexdigest()[:24]
+            authors: dict[str, int] = {}
+            lines = []
+            for item in group:
+                authors[item.author] = authors.get(item.author, 0) + 1
+                local = item.timestamp.astimezone(JST)
+                lines.append(f"[{local.strftime('%Y-%m-%d %H:%M')}] [{item.author}]: {item.content}")
+            participants = ", ".join(
+                f"{name}({count}件)"
+                for name, count in sorted(authors.items(), key=lambda value: value[1], reverse=True)
+            )
+            source_url = group[0].jump_url
+            header = [
+                "文書種別: Discord会話記録",
+                f"チャンネル: #{channel_name}",
+                f"カテゴリ: {category or 'なし'}",
+                f"期間: {start_at.isoformat(timespec='minutes')} ～ {end_at.isoformat(timespec='minutes')}",
+                f"参加者: {participants}",
+                f"発言数: {len(group)}",
+                f"ソース: {source_url or 'Discord履歴'}",
+            ]
+            if topic:
+                header.append(f"チャンネル説明: {topic}")
+            text = "\n".join(header) + "\n\n" + "\n".join(lines)
+            display_name = (
+                f"#{channel_name} | {start_at.strftime('%Y-%m-%d %H:%M')}"
+                f"-{end_at.strftime('%Y-%m-%d %H:%M')} | {document_key[:8]}"
+            )
+            metadata = [
+                {"key": "source", "string_value": "discord"},
+                {"key": "source_type", "string_value": "discord_conversation"},
+                {"key": "status", "string_value": "raw"},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "festival", "numeric_value": float(festival_number(start_at))},
+                {"key": "schema", "string_value": DOCUMENT_SCHEMA_VERSION},
+                {"key": "guild_id", "string_value": str(guild_id)},
+                {"key": "channel_id", "string_value": str(channel_id)},
+                {"key": "channel_name", "string_value": channel_name[:500]},
+                {"key": "category", "string_value": category[:500]},
+                {"key": "start_at", "string_value": start_at.isoformat()},
+                {"key": "end_at", "string_value": end_at.isoformat()},
+                {"key": "start_epoch", "numeric_value": start_at.timestamp()},
+                {"key": "end_epoch", "numeric_value": end_at.timestamp()},
+                {"key": "message_count", "numeric_value": float(len(group))},
+                {"key": "document_key", "string_value": document_key},
+                {"key": "source_url", "string_value": source_url[:500]},
+            ]
+            documents.append(KnowledgeDocument(
+                display_name=display_name,
+                text=text,
+                metadata=metadata,
+                message_count=len(group),
+                start_at=start_at,
+                end_at=end_at,
+            ))
+        return documents
 
-        merged[current_key] = current
-        return merged
+    @staticmethod
+    def _metadata_map(document) -> dict[str, object]:
+        result = {}
+        for item in getattr(document, "custom_metadata", None) or []:
+            if isinstance(item, dict):
+                value = item.get("string_value")
+                if value is None:
+                    value = item.get("numeric_value")
+                result[item.get("key", "")] = value
+                continue
+            value = getattr(item, "string_value", None)
+            if value is None:
+                value = getattr(item, "numeric_value", None)
+            result[getattr(item, "key", "")] = value
+        return result
+
+    async def _existing_channel_documents(self, store_name: str, channel, after=None) -> list[str]:
+        """置換対象を事前取得する。metadataなしの旧形式も表示名で対象化する。"""
+        loop = asyncio.get_running_loop()
+        documents = await loop.run_in_executor(
+            None,
+            lambda: list(self._client.file_search_stores.documents.list(
+                parent=store_name,
+                config={"page_size": 20},
+            )),
+        )
+        prefix = f"#{channel.name} | "
+        after_timestamp = after.timestamp() if after else None
+        matches = []
+        for document in documents:
+            metadata = self._metadata_map(document)
+            channel_matches = metadata.get("channel_id") == str(channel.id)
+            legacy_matches = not metadata and (document.display_name or "").startswith(prefix)
+            if not (channel_matches or legacy_matches):
+                continue
+            if after_timestamp is not None:
+                start_epoch = metadata.get("start_epoch")
+                if start_epoch is not None and float(start_epoch) < after_timestamp:
+                    continue
+                if start_epoch is None:
+                    match = re.search(r"\| (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", document.display_name or "")
+                    if match:
+                        document_at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                        if document_at < after:
+                            continue
+            matches.append(document.name)
+        return matches
+
+    async def backfill_channel(
+        self,
+        channel,
+        corpus_store_name: str,
+        after=None,
+        progress_callback=None,
+        replace_existing: bool = True,
+    ) -> BackfillResult:
+        """履歴を再現可能な文書へ変換し、成功後に同範囲の旧文書を置換する。"""
+        result = BackfillResult()
+        existing = []
+        if replace_existing:
+            existing = await self._existing_channel_documents(corpus_store_name, channel, after)
+
+        messages = []
+        async for message in channel.history(limit=None, after=after, oldest_first=True):
+            result.messages_seen += 1
+            knowledge_message = self._knowledge_message(message)
+            if knowledge_message is None:
+                result.messages_skipped += 1
+                continue
+            messages.append(knowledge_message)
+            result.messages_indexed += 1
+            result.latest_message_id = knowledge_message.message_id
+            result.latest_message_at = knowledge_message.timestamp
+            if progress_callback and result.messages_seen % 500 == 0:
+                await progress_callback(result.messages_seen)
+
+        documents = self._build_knowledge_documents(channel, messages)
+        uploaded_names: list[str] = []
+        for document in documents:
+            uploaded = await self._upload_document(
+                corpus_store_name,
+                document.display_name,
+                document.text,
+                document.metadata,
+            )
+            if not uploaded:
+                if uploaded_names:
+                    await self._delete_documents(uploaded_names)
+                raise RuntimeError(f"Failed to index {document.display_name}")
+            if isinstance(uploaded, str):
+                uploaded_names.append(uploaded)
+            result.documents_uploaded += 1
+
+        # 新文書が全てACTIVEになった後だけ旧文書を削除する。
+        if replace_existing and documents:
+            result.documents_replaced = await self._delete_documents(existing)
+        return result
+
+    def start_backfill(self, guild_id: int) -> bool:
+        """同じサーバーへの重複実行を防ぐ。"""
+        if guild_id in self._active_backfills:
+            return False
+        self._active_backfills.add(guild_id)
+        return True
+
+    def finish_backfill(self, guild_id: int):
+        self._active_backfills.discard(guild_id)

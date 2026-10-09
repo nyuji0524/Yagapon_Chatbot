@@ -10,4 +10,5 @@ data/
 .venv/
 venv/
 service_account.json
+gha-creds-*.json
 voiceprints/

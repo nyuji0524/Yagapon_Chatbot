@@ -3,16 +3,15 @@
 対面会議の録音ファイルをアップロードして議事録を生成する
 """
 
-import asyncio
 import io
 import logging
 import os
 
 import discord
 from google import genai
-from google.genai import types
 
-from bot.commands.voiceprint import get_voiceprints_with_names
+from bot.ai_models import fast_model, generation_config, log_usage, response_model
+from bot.transcription import transcribe_audio
 
 log = logging.getLogger("yagapon.minutes")
 
@@ -47,14 +46,12 @@ def register(bot):
             audio_bytes = await file.read()
             mime_type = _get_mime_type(ext)
 
-            # 声紋ファイルを取得
-            voiceprints = get_voiceprints_with_names(bot.config, ctx.guild_id)
             glossary_text = bot.config.get_glossary_text(ctx.guild_id)
 
-            # Geminiで文字起こし+議事録生成
+            # 専用STTで話者分離し、回答モデルで議事録を整形
             minutes = await _generate_minutes_from_file(
                 audio_bytes, mime_type, file.filename,
-                voiceprints, glossary_text, title,
+                glossary_text, title,
             )
 
             if not minutes:
@@ -76,12 +73,11 @@ def register(bot):
                 color=discord.Color.blue(),
             )
 
-            if voiceprints:
-                embed.add_field(
-                    name="🎙️ 声紋照合",
-                    value=f"{len(voiceprints)}人の声紋で話者を識別したぽん",
-                    inline=True,
-                )
+            embed.add_field(
+                name="🎙️ AI文字起こし",
+                value="話者ラベルはAIの推定だぽん。実名との対応は人が確認してねぽん",
+                inline=True,
+            )
 
             if drive_url:
                 embed.add_field(name="📄 全文", value=f"[Google Docsで見る]({drive_url})", inline=False)
@@ -117,65 +113,48 @@ async def _generate_minutes_from_file(
     audio_bytes: bytes,
     mime_type: str,
     filename: str,
-    voiceprints: dict[str, str],
     glossary_text: str,
     title: str,
 ) -> str | None:
-    """音声ファイル + 声紋からGeminiで議事録を生成"""
+    """専用STTで文字起こしし、別モデルで構造化議事録を生成。"""
     client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-    loop = asyncio.get_event_loop()
 
     try:
-        # メイン音声ファイルをアップロード
-        uploaded_main = await loop.run_in_executor(
-            None,
-            lambda: client.files.upload(
-                file=io.BytesIO(audio_bytes),
-                config={"mime_type": mime_type, "display_name": filename},
-            ),
-        )
+        try:
+            transcript = await transcribe_audio(
+                client,
+                audio_bytes,
+                mime_type=mime_type,
+                display_name=filename,
+                diarization=True,
+            )
+        except Exception as exc:
+            # 30分超など話者分離の制限に当たった場合も通常文字起こしで救済する。
+            message = str(exc).lower()
+            retryable = getattr(exc, "code", None) == 400 or any(
+                hint in message
+                for hint in ("diarization", "duration", "30 minute", "invalid argument")
+            )
+            if not retryable:
+                raise
+            log.warning("Diarized transcription failed; retrying without diarization: %s", exc)
+            transcript = await transcribe_audio(
+                client,
+                audio_bytes,
+                mime_type=mime_type,
+                display_name=filename,
+            )
 
-        # 声紋ファイルをアップロード
-        uploaded_voiceprints = []
-        for name, path in voiceprints.items():
-            try:
-                with open(path, 'rb') as f:
-                    vp_bytes = f.read()
-                uploaded_vp = await loop.run_in_executor(
-                    None,
-                    lambda b=vp_bytes, n=name: client.files.upload(
-                        file=io.BytesIO(b),
-                        config={"mime_type": "audio/wav", "display_name": f"voiceprint-{n}"},
-                    ),
-                )
-                uploaded_voiceprints.append({"name": name, "file": uploaded_vp})
-            except Exception as e:
-                log.warning(f"Failed to upload voiceprint for {name}: {e}")
+        if not transcript:
+            return None
 
-        # プロンプト構築
-        contents = []
-
-        # 声紋サンプルを先に提供
-        if uploaded_voiceprints:
-            vp_intro = "以下は参加者の声紋サンプルです。会議音声の中でこれらの声を識別してください。\n\n"
-            for vp in uploaded_voiceprints:
-                vp_intro += f"【{vp['name']}の声】\n"
-                contents.append(vp_intro)
-                contents.append(types.Part.from_uri(file_uri=vp['file'].uri, mime_type="audio/wav"))
-                vp_intro = ""
-
-        # メイン音声
-        contents.append("\n\n【会議の録音】\n")
-        contents.append(types.Part.from_uri(file_uri=uploaded_main.uri, mime_type=mime_type))
-
-        # 指示
         instruction = (
-            "\n\n上記の会議音声から、構造化された議事録を作成してください。\n\n"
+            "以下の文字起こしから、事実を補わず構造化された議事録を作成してください。\n\n"
             "## 出力フォーマット\n"
             f"# {title or '議事録'}\n\n"
             "## 基本情報\n"
             "- 日時: （推定できれば）\n"
-            "- 参加者: （声紋から識別した名前を使用。識別できない場合は「話者A」「話者B」等）\n\n"
+            "- 参加者: （文字起こしの話者ラベルを使用）\n\n"
             "## 議題\n"
             "- （議論されたトピックを箇条書き）\n\n"
             "## 議論内容\n"
@@ -184,35 +163,21 @@ async def _generate_minutes_from_file(
             "- （決まったこと）\n\n"
             "## アクションアイテム\n"
             "- 【担当者】内容（期限）\n\n"
+            "## 注意\n"
+            "- spk_1等の話者ラベルを実名だと推測しない\n"
+            "- 聞き取れない箇所や不明な担当者は不明と記載する\n\n"
         )
-
-        if uploaded_voiceprints:
-            instruction += (
-                "## 話者識別のルール\n"
-                "- 提供された声紋サンプルと会議音声の声を照合し、可能な限り実名で記載\n"
-                "- 声紋と一致しない話者は「話者A」「話者B」等で区別\n"
-                "- 識別に自信がない場合は「（推定）」と付記\n\n"
-            )
 
         if glossary_text:
-            instruction += f"## 用語辞書（音声認識の参考）\n{glossary_text}\n\n"
+            instruction += f"## 用語辞書（表記修正の参考）\n{glossary_text}\n\n"
 
-        contents.append(instruction)
-
-        # Geminiで生成
+        model = response_model()
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
+            model=model,
+            contents=f"{instruction}\n## 文字起こし\n{transcript}",
+            config=generation_config(model, thinking_level="medium", max_output_tokens=4096),
         )
-
-        # アップロードファイルを削除
-        try:
-            await loop.run_in_executor(None, lambda: client.files.delete(name=uploaded_main.name))
-            for vp in uploaded_voiceprints:
-                await loop.run_in_executor(None, lambda f=vp['file']: client.files.delete(name=f.name))
-        except Exception:
-            pass
-
+        log_usage(log, "minutes_format", model, response)
         return response.text
 
     except Exception as e:
@@ -224,15 +189,18 @@ async def _summarize(minutes: str) -> str:
     """議事録を要約"""
     client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
     try:
+        model = fast_model()
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model,
             contents=(
                 "以下の議事録を3〜5行で簡潔に要約してください。\n"
                 "要約には: 参加者、主な議題、決定事項を含めてください。\n"
                 "語尾は「ぽん」をつけてください。\n\n"
                 f"{minutes}"
             ),
+            config=generation_config(model, thinking_level="low", max_output_tokens=512),
         )
+        log_usage(log, "minutes_summary", model, response)
         return response.text or "要約を生成できなかったぽん..."
     except Exception:
         return minutes[:500] + ("\n\n..." if len(minutes) > 500 else "")

@@ -4,11 +4,13 @@
 """
 
 import logging
-import os
+
 import discord
+from discord.ui import Button, Select, View
+
+from bot.authorization import require_guild_admin
 
 log = logging.getLogger("yagapon.setup")
-from discord.ui import Select, View, Button
 
 BUREAUS = [
     ("IT局", "🩵"), ("総務局", "🩶"), ("装飾局", "💛"), ("ステージ局", "❤️"),
@@ -25,12 +27,12 @@ class SetupWizard:
         self.message = message  # 編集対象の固定メッセージ
         self.step = 0
         self.completed = {
-            "bureau": False, "ignore": False, "github": False,
+            "bureau": False, "ignore": False,
             "reactions": False, "members": False, "drive": False, "backfill": False,
         }
 
     def _progress_bar(self) -> str:
-        steps = ["局選択", "除外CH", "GitHub", "リアクション", "メンバー", "Drive", "過去ログ"]
+        steps = ["局選択", "除外CH", "リアクション", "メンバー", "Drive", "過去ログ"]
         parts = []
         for i, name in enumerate(steps):
             if i < self.step:
@@ -147,61 +149,6 @@ class Step2View(View):
     async def done(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
         self.wizard.step = 2
-        await show_step3(self.wizard)
-
-
-# ====== Step 3: GitHub連携 ======
-
-async def show_step3(wizard: SetupWizard):
-    channels = [
-        ch for ch in wizard.guild.text_channels
-        if ch.permissions_for(wizard.guild.me).send_messages
-    ]
-    view = Step3View(wizard, channels)
-    await wizard.update("GitHub通知を送るチャンネルを選んでねぽん。", view)
-
-
-class Step3View(View):
-    def __init__(self, wizard: SetupWizard, channels: list):
-        super().__init__(timeout=600)
-        self.wizard = wizard
-
-        options = [
-            discord.SelectOption(
-                label=f"#{ch.name}", value=str(ch.id),
-                description=ch.category.name if ch.category else "",
-            )
-            for ch in channels[:25]
-        ]
-        if options:
-            select = Select(placeholder="GitHub通知チャンネル", min_values=1, max_values=1, options=options)
-            select.callback = self._select
-            self.add_item(select)
-
-    async def _select(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        ch_id = int(interaction.data["values"][0])
-        await self.wizard.bot.config.set_github_channel(self.wizard.guild.id, ch_id)
-
-        api_host = os.environ.get("API_HOST", "https://your-server")
-        webhook_url = f"{api_host}/webhook/github/{self.wizard.guild.id}"
-        secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-
-        await interaction.followup.send(
-            f"📌 **GitHub Webhook設定情報**\n```\n"
-            f"Payload URL: {webhook_url}\n"
-            f"Content type: application/json\n"
-            f"Secret: {secret}\n"
-            f"Events: Just the push event\n```",
-            ephemeral=True,
-        )
-        self.wizard.step = 3
-        await show_step4(self.wizard)
-
-    @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary, row=1)
-    async def skip(self, button: Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        self.wizard.step = 3
         await show_step4(self.wizard)
 
 
@@ -236,7 +183,7 @@ class Step4View(View):
     async def disable(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
         await self.wizard.bot.config.set_reactions(self.wizard.guild.id, False, "💡", "😲", "😂")
-        self.wizard.step = 4
+        self.wizard.step = 3
         await show_step5(self.wizard)
 
 
@@ -274,7 +221,7 @@ class ReactionCollector:
             self.wizard.guild.id, True,
             self.emojis["interesting"], self.emojis["surprised"], self.emojis["funny"],
         )
-        self.wizard.step = 4
+        self.wizard.step = 3
         await show_step5(self.wizard)
 
 
@@ -300,7 +247,7 @@ class Step5View(View):
         roles = [r for r in guild.roles if r.name != "@everyone"]
         if not roles:
             await interaction.response.send_message("ロールがないぽん...", ephemeral=True)
-            self.wizard.step = 5
+            self.wizard.step = 4
             await show_step6(self.wizard)
             return
 
@@ -318,7 +265,7 @@ class Step5View(View):
                 await interaction_.response.send_message(
                     f"✅ **{len(members)}人** 登録したぽん！", ephemeral=True
                 )
-                self.wizard.step = 5
+                self.wizard.step = 4
                 await show_step6(self.wizard)
 
         view = SetupRoleMappingView(self.wizard.bot, guild, roles)
@@ -329,7 +276,7 @@ class Step5View(View):
     @discord.ui.button(label="あとで", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
-        self.wizard.step = 5
+        self.wizard.step = 4
         await show_step6(self.wizard)
 
 
@@ -355,7 +302,7 @@ class Step6View(View):
     @discord.ui.button(label="スキップ", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
-        self.wizard.step = 6
+        self.wizard.step = 5
         await show_step7(self.wizard)
 
 
@@ -373,7 +320,7 @@ class DriveModal(discord.ui.Modal):
         url = self.children[0].value.strip()
         await self.wizard.bot.config.set_drive_folder(self.wizard.guild.id, url)
         await interaction.response.send_message("✅ Drive連携設定したぽん！", ephemeral=True)
-        self.wizard.step = 6
+        self.wizard.step = 5
         await show_step7(self.wizard)
 
 
@@ -421,7 +368,7 @@ class Step7View(View):
     @discord.ui.button(label="あとで", style=discord.ButtonStyle.secondary)
     async def skip(self, button: Button, interaction: discord.Interaction):
         await interaction.response.defer()
-        self.wizard.step = 7
+        self.wizard.step = 6
         await self.wizard.update(
             "🎉 **セットアップ完了だぽん！**\n"
             "過去ログは `/backfill` で取り込めるぽん。\n"
@@ -449,28 +396,53 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
     ]
 
     total = 0
-    for i, ch in enumerate(channels, 1):
-        try:
-            async def progress(c, _ch=ch, _i=i):
+    documents = 0
+    failures = []
+    if not wizard.bot.corpus.start_backfill(wizard.guild.id):
+        await wizard.update("別の履歴取り込みが実行中だぽん。完了後に `/backfill` を実行してねぽん。", View())
+        return
+    try:
+        for i, ch in enumerate(channels, 1):
+            try:
+                async def progress(c, _ch=ch, _i=i):
+                    await wizard.update(
+                        f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件 | 合計: {total:,}件",
+                        View(),
+                    )
+
+                result = await wizard.bot.corpus.backfill_channel(
+                    ch,
+                    corpus,
+                    after=after,
+                    progress_callback=progress,
+                    replace_existing=True,
+                )
+                total += result.messages_indexed
+                documents += result.documents_uploaded
+                if result.latest_message_id and result.latest_message_at:
+                    await wizard.bot.config.set_backfill_cursor(
+                        wizard.guild.id,
+                        ch.id,
+                        result.latest_message_id,
+                        result.latest_message_at,
+                    )
                 await wizard.update(
-                    f"📚 {label}取り込み中... ({_i}/{len(channels)}) #{_ch.name}: {c:,}件 | 合計: {total:,}件",
+                    f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: "
+                    f"{result.messages_indexed:,}件 / {result.documents_uploaded:,}文書 | 合計: {total:,}件",
                     View(),
                 )
+            except Exception as e:
+                failures.append(ch.name)
+                log.exception("Backfill error #%s: %s", ch.name, e)
+    finally:
+        wizard.bot.corpus.finish_backfill(wizard.guild.id)
 
-            count = await wizard.bot.corpus.backfill_channel(ch, corpus, after=after, progress_callback=progress)
-            total += count
-            await wizard.update(
-                f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: {count:,}件完了 | 合計: {total:,}件",
-                View(),
-            )
-        except Exception as e:
-            log.warning(f"Backfill error #{ch.name}: {e}")
-
-    wizard.step = 7
+    wizard.step = 6
+    failure_text = f"⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}\n" if failures else ""
     await wizard.update(
         f"🎉 **セットアップ完了だぽん！**\n"
-        f"合計 **{total:,}件** のメッセージを学習したぽん！\n"
-        f"何でも聞いてねぽん！",
+        f"合計 **{total:,}件 / {documents:,}文書** を索引したぽん！\n"
+        f"{failure_text}何でも聞いてねぽん！",
         View(),
     )
 
@@ -479,21 +451,16 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
 
 def register(bot):
     @bot.slash_command(name="setup", description="初期設定をするぽん！")
+    @discord.default_permissions(administrator=True)
     async def setup_cmd(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         existing = bot.config.get_bureau(ctx.guild_id)
         if existing:
             await ctx.respond(
                 f"このサーバーは既に **{existing}** として設定済みだぽん！\n"
                 f"`/reset` でリセットしてねぽん。",
                 ephemeral=True,
-            )
-            return
-
-        # 2回目以降のsetup（reset後）は管理者のみ
-        setup_count = bot.config._guild(ctx.guild_id).get("setup_count", 0)
-        if setup_count > 0 and not ctx.author.guild_permissions.administrator:
-            await ctx.respond(
-                "再セットアップは管理者のみ実行できるぽん！", ephemeral=True
             )
             return
 
@@ -505,7 +472,7 @@ def register(bot):
         # 固定メッセージを作成
         msg = await ctx.respond(
             "**🔧 おしゃべりやがぽん セットアップ**\n準備中...",
-            silent=True,
+            ephemeral=True,
         )
         # InteractionResponseのメッセージを取得
         if hasattr(msg, 'original_response'):

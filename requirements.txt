@@ -1,5 +1,7 @@
-py-cord[voice]>=2.6.0,<3.0.0
-google-genai>=1.65.0,<2.0.0
+# Voice receive currently depends on Pycord PR #3159. Pin the reviewed commit so
+# local, CI, and container environments all run the same implementation.
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord.git@10a5e8cf13bd8db21f95baf62cf866056d1e1091
+google-genai>=1.75.0,<2.0.0
 fastapi>=0.115.0,<1.0.0
 uvicorn[standard]>=0.34.0,<1.0.0
 edge-tts>=7.0.0
@@ -8,3 +10,4 @@ PyNaCl>=1.5.0
 aiohttp>=3.9.0
 google-api-python-client>=2.100.0
 google-auth>=2.20.0
+PyYAML>=6.0

@@ -1,0 +1,18 @@
+[Unit]
+Description=YagaPon Discord Bot containers
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/yagapon
+EnvironmentFile=/etc/yagapon/deploy.env
+ExecStart=/usr/bin/docker compose up --no-build --remove-orphans
+ExecStop=/usr/bin/docker compose down
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -5,9 +5,11 @@ pycord版
 """
 
 import os
+
 import discord
 
-from bot.voice import VoiceMode, join_voice, leave_voice, get_session
+from bot.ai_models import fast_model, generation_config
+from bot.voice import VoiceMode, get_session, join_voice, leave_voice
 
 
 def register(bot):
@@ -102,14 +104,16 @@ async def _summarize_minutes(minutes: str) -> str:
     from google import genai
     try:
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        model = fast_model()
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model,
             contents=(
                 "以下の議事録を3〜5行で簡潔に要約してください。\n"
                 "要約には: 参加者、主な議題、決定事項を含めてください。\n"
                 "語尾は「ぽん」をつけてください。\n\n"
                 f"{minutes}"
             ),
+            config=generation_config(model, thinking_level="low", max_output_tokens=512),
         )
         return response.text or "要約を生成できなかったぽん..."
     except Exception:

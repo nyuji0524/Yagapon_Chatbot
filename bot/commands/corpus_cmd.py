@@ -2,13 +2,17 @@
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 
 def register(bot):
     group = bot.create_group("corpus", "コーパス管理コマンドだぽん")
 
     @group.command(name="delete", description="このサーバーのコーパスを完全削除するぽん")
-    # @discord.default_permissions(administrator=True)  # TODO: テスト後に戻す
+    @discord.default_permissions(administrator=True)
     async def corpus_delete(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         guild_id = ctx.guild_id
         store_name = bot.config.get_corpus(guild_id)
         bureau = bot.config.get_bureau(guild_id) or "不明"
@@ -41,7 +45,7 @@ class ConfirmCorpusDeleteView(discord.ui.View):
     @discord.ui.button(label="完全削除する", style=discord.ButtonStyle.danger)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content=f"コーパス内のドキュメントを削除中だぽん... ⏳\n（ドキュメント数が多いと少し時間がかかるぽん）",
+            content="コーパス内のドキュメントを削除中だぽん... ⏳\n（ドキュメント数が多いと少し時間がかかるぽん）",
             view=None,
         )
 

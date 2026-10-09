@@ -5,26 +5,29 @@
 """
 
 import asyncio
-import os
+import io
 import logging
+import os
 
 import discord
-
-log = logging.getLogger("yagapon.voiceprint")
-
-import io
 from google import genai
 from google.genai import types
 
-VOICEPRINT_DIR = "voiceprints"
+from bot.ai_models import audio_analysis_model, generation_config, log_usage
+from bot.authorization import can_manage_member
+
+log = logging.getLogger("yagapon.voiceprint")
+
+VOICEPRINT_DIR = os.environ.get("YAGAPON_VOICEPRINT_DIR", "voiceprints")
 RECORD_DURATION = 10  # 秒
 
 
 async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
     """Geminiで音声を検証。人の声が含まれているか確認"""
     client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+    uploaded = None
+    loop = asyncio.get_event_loop()
     try:
-        loop = asyncio.get_event_loop()
         uploaded = await loop.run_in_executor(
             None,
             lambda: client.files.upload(
@@ -33,8 +36,9 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
             ),
         )
 
+        model = audio_analysis_model()
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model,
             contents=[
                 types.Part.from_uri(file_uri=uploaded.uri, mime_type="audio/wav"),
                 "この音声ファイルを分析して、以下のJSON形式で回答してください。\n"
@@ -46,13 +50,9 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
                 "  例: 「落ち着いたダンディーな声だぽん！」「明るくてハキハキした素敵な声だぽん！」「優しくて聞き心地の良い声だぽん！」\n"
                 "JSONのみ返してください。"
             ],
+            config=generation_config(model, thinking_level="low", max_output_tokens=256),
         )
-
-        # アップロードファイル削除
-        try:
-            await loop.run_in_executor(None, lambda: client.files.delete(name=uploaded.name))
-        except Exception:
-            pass
+        log_usage(log, "voice_sample_validation", model, response)
 
         import json
         text = response.text.strip()
@@ -71,8 +71,16 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
 
     except Exception as e:
         log.error(f"Voice validation error: {e}")
-        # 検証失敗時は通す（録音データ自体はある）
-        return {"ok": True, "summary": "（検証スキップ）"}
+        return {
+            "ok": False,
+            "reason": "音声の検証に失敗したぽん。時間を置いてもう一度試してねぽん。",
+        }
+    finally:
+        if uploaded is not None:
+            try:
+                await loop.run_in_executor(None, lambda: client.files.delete(name=uploaded.name))
+            except Exception as e:
+                log.warning("Failed to delete uploaded voice sample %s: %s", uploaded.name, e)
 
 
 def _get_voiceprint_path(guild_id: int, user_id: int) -> str:
@@ -106,6 +114,9 @@ def register(bot):
     @discord.option("user", description="他のメンバーの声紋を登録する場合（省略で自分）", type=discord.Member, required=False, default=None)
     async def voiceprint_register(ctx: discord.ApplicationContext, user: discord.Member = None):
         target = user or ctx.author
+        if not can_manage_member(ctx, target):
+            await ctx.respond("他のメンバーの音声サンプルは管理者のみ登録できるぽん。", ephemeral=True)
+            return
         member = ctx.guild.get_member(target.id)
         if not member or not member.voice or not member.voice.channel:
             if user:
@@ -249,6 +260,9 @@ def register(bot):
     @discord.option("user", description="他のメンバーの声紋を削除する場合（省略で自分）", type=discord.Member, required=False, default=None)
     async def voiceprint_delete(ctx: discord.ApplicationContext, user: discord.Member = None):
         target = user or ctx.author
+        if not can_manage_member(ctx, target):
+            await ctx.respond("他のメンバーの音声サンプルは管理者のみ削除できるぽん。", ephemeral=True)
+            return
         path = _get_voiceprint_path(ctx.guild_id, target.id)
         display_name = target.display_name
 

@@ -1,11 +1,18 @@
 """設定管理 - サーバーごとの設定 + メンバー情報を server_config.json で管理"""
 
-import json
 import asyncio
+import json
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-CONFIG_PATH = Path(__file__).parent.parent / "server_config.json"
+CONFIG_PATH = Path(
+    os.environ.get(
+        "YAGAPON_CONFIG_PATH",
+        Path(__file__).parent.parent / "server_config.json",
+    )
+)
 
 
 class ConfigManager:
@@ -16,7 +23,6 @@ class ConfigManager:
             "bureau": "IT局",
             "corpus_store_name": "fileSearchStores/xxx",
             "ignore_channels": [channel_id, ...],
-            "github_webhook_channel": channel_id or null,
             "reactions": {
                 "enabled": true,
                 "interesting": "💡",
@@ -36,26 +42,31 @@ class ConfigManager:
     }
     """
 
-    def __init__(self):
+    def __init__(self, config_path: Path = CONFIG_PATH):
         self._lock = asyncio.Lock()
         self._config: dict = {}
+        self._config_path = config_path
         self._load()
 
     # ------ persistence ------
 
     def _load(self):
-        if CONFIG_PATH.exists():
+        if self._config_path.exists():
             try:
-                self._config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._config = {}
+                self._config = json.loads(self._config_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                # 壊れた設定を空設定として上書きすると復旧不能になるため起動を止める。
+                raise RuntimeError(f"Failed to load config: {self._config_path}") from exc
 
     async def _save(self):
         async with self._lock:
-            CONFIG_PATH.write_text(
+            self._config_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
+            temporary_path.write_text(
                 json.dumps(self._config, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            os.replace(temporary_path, self._config_path)
 
     # ------ guild helpers ------
 
@@ -79,6 +90,27 @@ class ConfigManager:
         g["corpus_store_name"] = corpus_store_name
         await self._save()
 
+    # ------ backfill cursors ------
+
+    def get_backfill_cursor(self, guild_id: int, channel_id: int) -> dict | None:
+        """最後に正常完了した履歴取り込み位置を返す。"""
+        cursor = self._guild(guild_id).get("backfill_cursors", {}).get(str(channel_id))
+        return dict(cursor) if cursor else None
+
+    async def set_backfill_cursor(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        message_at: datetime,
+    ):
+        cursors = self._guild(guild_id).setdefault("backfill_cursors", {})
+        cursors[str(channel_id)] = {
+            "message_id": str(message_id),
+            "message_at": message_at.isoformat(),
+        }
+        await self._save()
+
     # ------ ignore channels ------
 
     def is_ignored(self, guild_id: int, channel_id: int) -> bool:
@@ -92,15 +124,6 @@ class ConfigManager:
         channels.append(channel_id)
         await self._save()
         return True
-
-    # ------ github ------
-
-    def get_github_channel(self, guild_id: int) -> Optional[int]:
-        return self._guild(guild_id).get("github_webhook_channel")
-
-    async def set_github_channel(self, guild_id: int, channel_id: int):
-        self._guild(guild_id)["github_webhook_channel"] = channel_id
-        await self._save()
 
     # ------ reactions ------
 

@@ -21,17 +21,11 @@ def register(bot):
         corpus = bot.config.get_corpus(gid) or "未設定"
         members = bot.config.get_members(gid)
         reactions = bot.config.get_reactions(gid)
-        github_ch = bot.config.get_github_channel(gid)
 
         embed = discord.Embed(title="おしゃべりやがぽん - ステータス", color=discord.Color.green())
         embed.add_field(name="局", value=bureau, inline=True)
         embed.add_field(name="コーパス", value=f"`{corpus}`", inline=False)
         embed.add_field(name="登録メンバー数", value=f"{len(members)}人", inline=True)
-
-        if github_ch:
-            embed.add_field(name="GitHub通知", value=f"<#{github_ch}>", inline=True)
-        else:
-            embed.add_field(name="GitHub通知", value="未設定", inline=True)
 
         react_status = "有効" if reactions.get("enabled") else "無効"
         if reactions.get("enabled"):

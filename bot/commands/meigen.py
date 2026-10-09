@@ -36,7 +36,14 @@ def register(bot):
                 "※ 発言は改変せず原文のまま引用すること。"
             )
 
-        answer = await bot.corpus.query(query, corpus)
+        answer = await bot.corpus.query(
+            query,
+            corpus,
+            guild_id=ctx.guild_id,
+            members_info=bot._build_members_info(ctx.guild_id),
+            glossary_text=bot.config.get_glossary_text(ctx.guild_id),
+            glossary=bot.config.get_glossary(ctx.guild_id),
+        )
 
         embed = discord.Embed(
             title="📜 名言集だぽん！",

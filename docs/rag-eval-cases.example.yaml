@@ -1,0 +1,21 @@
+- id: current-role
+  question: "今年度のIT局長は誰ですか"
+  expected_any: ["局長"]
+  expected_festival: 28
+  must_cite: true
+  expect_no_answer: false
+
+- id: previous-standby-pass
+  question: "27thの整理券運用で問題になった点は何ですか"
+  expected_any: ["整理券"]
+  forbidden: ["記録なし"]
+  expected_festival: 27
+  must_cite: true
+  expect_no_answer: false
+
+- id: deliberately-unknown
+  question: "29thの未発表テーマを教えてください"
+  expected_any: ["見つけられなかった"]
+  expected_festival: 29
+  must_cite: false
+  expect_no_answer: true

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 import discord
 from google import genai
 
+from bot.ai_models import fast_model, generation_config, log_usage, rag_model
+
 log = logging.getLogger("yagapon.reports")
 
 WEEKLY_PROMPT = """あなたは矢上祭実行委員会のDiscordサーバーのアナリストです。
@@ -100,10 +102,14 @@ async def generate_weekly_report(bot, guild_id: int) -> str:
         "主要な議論・決定事項・活動を網羅してください。"
     )
 
+    model = rag_model()
     response = await client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(
+        config=generation_config(
+            model,
+            thinking_level="medium",
+            max_output_tokens=4096,
             system_instruction=(
                 "あなたは矢上祭実行委員会のDiscord活動をまとめるレポーターです。"
                 "ナレッジベースを徹底的に検索し、具体的な事実に基づいてレポートを書いてください。"
@@ -118,6 +124,7 @@ async def generate_weekly_report(bot, guild_id: int) -> str:
             ],
         ),
     )
+    log_usage(log, "weekly_report", model, response)
     return response.text or "レポート生成に失敗したぽん"
 
 
@@ -135,13 +142,16 @@ async def generate_monthly_report(bot, guild_id: int) -> str:
     combined = "\n\n".join(weekly_reports)
 
     client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+    model = fast_model()
     response = await client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=model,
         contents=MONTHLY_PROMPT.format(
             month=month_str,
             weekly_reports=combined,
         ),
+        config=generation_config(model, thinking_level="low", max_output_tokens=4096),
     )
+    log_usage(log, "monthly_report", model, response)
     return response.text or "月間報告書の生成に失敗したぽん"
 
 

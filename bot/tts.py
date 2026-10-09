@@ -2,8 +2,8 @@
 
 import asyncio
 import logging
-import tempfile
 import os
+import tempfile
 
 import discord
 

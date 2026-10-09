@@ -1,0 +1,93 @@
+name: Deploy to GCE
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: yagapon-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      vars.YAGAPON_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCE_INSTANCE: ${{ vars.GCE_INSTANCE }}
+      GCE_ZONE: ${{ vars.GCE_ZONE }}
+      IMAGE_REPOSITORY: ${{ vars.GCP_ARTIFACT_IMAGE }}
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Validate deployment configuration
+        run: |
+          set -eu
+          test -n "$GCP_PROJECT_ID"
+          test -n "$GCE_INSTANCE"
+          test -n "$GCE_ZONE"
+          test -n "$IMAGE_REPOSITORY"
+          case "$IMAGE_REPOSITORY" in
+            *-docker.pkg.dev/*/*/*) ;;
+            *) echo "GCP_ARTIFACT_IMAGE must be a full Artifact Registry image path" >&2; exit 1 ;;
+          esac
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          version: ">= 506.0.0"
+
+      - name: Build and push image
+        env:
+          IMAGE_SHA: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          registry="${IMAGE_REPOSITORY%%/*}"
+          gcloud auth configure-docker "$registry" --quiet
+          if gcloud artifacts docker images describe "$IMAGE_SHA" >/dev/null 2>&1; then
+            echo "Reusing existing image: $IMAGE_SHA"
+          else
+            docker build --tag "$IMAGE_SHA" .
+            docker push "$IMAGE_SHA"
+          fi
+
+      - name: Copy deployment files
+        run: |
+          gcloud compute scp \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            compose.yaml deploy/remote-deploy.sh \
+            "$GCE_INSTANCE:/tmp/"
+
+      - name: Deploy and verify health
+        env:
+          IMAGE_SHA: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
+        run: |
+          quoted_image=$(printf '%q' "$IMAGE_SHA")
+          gcloud compute ssh "$GCE_INSTANCE" \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            --command "sudo /bin/bash /tmp/remote-deploy.sh $quoted_image"

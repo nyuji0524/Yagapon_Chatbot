@@ -7,7 +7,9 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 
 ### 会話学習 & RAG回答
 - Discordの会話をバッチ学習（100メッセージ or 2時間ごと）
-- Gemini File Search（コーパス）によるRAG検索で質問に回答
+- Gemini File Search + ローカル完全一致索引によるハイブリッド検索
+- 10月1日切替の矢上祭年度、根拠リンク、「情報なし」判定
+- ✅/⚠️/❌の回答評価と認証付き品質ダッシュボード
 - メンション or DMで質問可能（DMは登録メンバーのみ）
 - 1日400クエリのレート制限
 
@@ -18,21 +20,21 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - **TTS読み上げ**: edge-tts（ja-JP-NanamiNeural）でVCに音声出力
 - **議事録自動生成**: `/leave`時にGeminiで構造化議事録を作成 → Google Docsに保存
 
-### 声紋登録
+### 音声サンプル登録（互換機能）
 - `/voiceprint register` でVCで10秒間録音、Geminiで音声検証
-- 対面会議の録音時に話者識別に活用
-- メンバー情報と紐づけて管理
+- 既存データとの互換性のため管理コマンドを維持
+- 議事録の話者識別には使用せず、Transcribeの話者ラベルを人が確認
 
-### コードレビュー（GitHub Webhook）
-- pushをトリガーにGeminiがコードレビュー
+### コードレビュー
+- Pull Request作成・更新時に再利用可能なGitHub Actions workflowから実行
 - コード差分 + リポジトリ全体のコンテキストを参照
 - 重大度別の指摘事項（Critical / Major / Minor / Trivial）
-- Discordチャンネルに自動投稿
+- 指摘はPull Requestのレビューとして投稿（Discordへのpush通知は行わない）
 
 ### レポート
 - `/report weekly` - 週次レポート生成
 - `/report monthly` - 月間報告書生成
-- Google Docsにリッチフォーマットで保存
+- Google Docsへ保存
 
 ### スマートリアクション
 - Geminiが会話を感情判定（interesting / surprised / funny）
@@ -49,8 +51,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - RAG回答・音声文字起こし・議事録の精度向上に活用
 
 ### Google Drive連携
-- Google Apps Script経由でGoogleドキュメントを作成
-- 議事録・レポートをリッチフォーマットで保存
+- Application Default CredentialsからDrive API・Docs APIへ直接接続
+- 議事録・レポートをGoogle Docsとして保存
 - Noto Sans JP、見出し色分け、コードブロック対応
 
 ## コマンド一覧
@@ -60,7 +62,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/setup` | 初期設定ウィザード（1メッセージ完結型） |
 | `/reset` | 設定リセット（管理者のみ） |
 | `/status` | 現在の設定状況を表示 |
-| `/backfill [days] [channel]` | 過去ログを取り込み |
+| `/backfill [mode] [days] [channel]` | 差分更新（推奨）または指定期間を安全に再構築 |
 | `/ignore` | 現在のチャンネルを学習対象から除外 |
 | `/join <mode>` | VCに参加（listen/meeting/chat） |
 | `/leave` | VCから退出（議事録生成） |
@@ -85,6 +87,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 ```
 Yagapon_Chatbot/
 ├── main.py              # エントリポイント（Bot + FastAPI同時起動）
+├── Dockerfile           # Python・ffmpeg・音声受信依存を固定
+├── compose.yaml         # 常駐・再起動・永続データ・ログ設定
 ├── requirements.txt
 ├── .env                 # 環境変数（非公開）
 ├── bot/
@@ -95,7 +99,7 @@ Yagapon_Chatbot/
 │   ├── tts.py           # edge-tts音声生成
 │   ├── reactions.py     # スマートリアクション
 │   ├── reports.py       # 週次・月次レポート生成
-│   ├── gdrive.py        # Google Drive連携（Apps Script経由）
+│   ├── gdrive.py        # Drive API・Docs API連携
 │   └── commands/
 │       ├── setup.py     # /setup ウィザード
 │       ├── reset.py     # /reset
@@ -111,18 +115,17 @@ Yagapon_Chatbot/
 │       └── corpus_cmd.py# /corpus サブコマンド群
 └── api/
     ├── server.py        # FastAPIアプリ
-    ├── routes.py        # /health, /status, /ask, /backfill
-    └── github_webhook.py# GitHub Webhook + コードレビュー
+    └── routes.py        # /health, /status, /ask, /backfill
 ```
 
 ## 技術スタック
 
 - **Discord**: py-cord 2.7+ (DAVE voice receive patch適用)
-- **AI**: Google Gemini 2.5 Flash（RAG, 文字起こし, レビュー, リアクション判定）
+- **AI**: Google Gemini（用途別モデルへの移行中）
 - **TTS**: edge-tts（ja-JP-NanamiNeural）
 - **API**: FastAPI + uvicorn（同一asyncioループ）
-- **Drive**: Google Apps Script経由
-- **インフラ**: GCE e2-micro（永久無料枠）
+- **Drive**: Google Drive API + Google Docs API（ADC）
+- **インフラ**: Docker Compose + GCE
 
 ## セットアップ
 
@@ -132,37 +135,90 @@ Yagapon_Chatbot/
 
 ```
 GOOGLE_API_KEY=your_gemini_api_key
+YAGAPON_RAG_MODEL=gemini-3.8-flash
+YAGAPON_RESPONSE_MODEL=gemini-3.8-flash
+YAGAPON_FAST_MODEL=gemini-3.1-flash-lite
+YAGAPON_TRANSCRIBE_MODEL=gemini-3.5-transcribe
+YAGAPON_AUDIO_MODEL=gemini-3.8-flash
+YAGAPON_DAILY_QUERY_LIMIT=400
+YAGAPON_RAG_DB_PATH=/data/rag.sqlite3
+YAGAPON_RAG_TRACE_CONTENT=false
+YAGAPON_RAG_FESTIVAL_FILTER_ENABLED=false
 DISCORD_TOKEN=your_discord_bot_token
-GITHUB_WEBHOOK_SECRET=your_webhook_secret
+YAGAPON_API_TOKEN=generate_a_long_random_token
 API_HOST=http://your-server-ip:8000
 API_PORT=8000
-GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/xxx/exec
+GOOGLE_OAUTH_AUTHORIZED_USER_JSON=
+GOOGLE_SERVICE_ACCOUNT_JSON=
+YAGAPON_CONFIG_PATH=/data/server_config.json
+YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json
+YAGAPON_CATALOG_MODEL=gemini-3.1-flash-lite
+YAGAPON_CATALOG_PASSES=2
+YAGAPON_VOICEPRINT_DIR=/data/voiceprints
+YAGAPON_KNOWLEDGE_REPO_PATH=../YagamiFes-IT-Knowledge
+YAGAPON_KNOWLEDGE_BASE_URL=https://github.com/YagamiFes-IT/YagamiFes-IT-Knowledge/blob/main
+YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
+YAGAPON_KNOWLEDGE_INDEX_STATE=/data/knowledge-index-state.json
+YAGAPON_KNOWLEDGE_INDEX_STATUSES=approved,verified,current
 ```
 
-### 2. 依存関係インストール
+RAGと回答生成はGemini 3.8 Flash、音声認識はGemini 3.5 Transcribe、
+短い要約やリアクション判定はFlash-Liteを既定値にする。モデル名は環境変数で
+切り戻せる。TTSは引き続きedge-ttsを使う。料金前提と予算ガードは
+[`docs/ai-model-budget.md`](docs/ai-model-budget.md)を参照。
+
+`YAGAPON_API_TOKEN` は `/status`、`/ask`、`/backfill` APIのBearer認証に使う。
+Driveへ人間のGoogleアカウントとして保存する場合は、OAuthのauthorized-user JSONを
+`GOOGLE_OAUTH_AUTHORIZED_USER_JSON`へ直接設定するか、コンテナ内のread-onlyファイルパスを
+指定する。この値はサービスアカウントとADCより優先される。GCEではSecret Managerから
+`/data/google-drive-oauth.json`へ配置し、Compose変数`YAGAPON_GOOGLE_OAUTH_FILE`で参照する。
+`GOOGLE_SERVICE_ACCOUNT_JSON`は移行中の互換用途だけに残し、新規のJSON鍵は発行しない。
+
+### 2. Dockerで起動
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+mkdir -p data
+docker compose up --build
 ```
 
-**音声録音を使う場合**（DAVE対応パッチ）：
-```bash
-pip install "git+https://github.com/Pycord-Development/pycord@refs/pull/3159/head#egg=py-cord[voice]"
-sudo apt install ffmpeg libopus0
-```
+コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。
 
-### 3. 起動
+バックグラウンド起動：
 
 ```bash
-nohup python main.py > bot.log 2>&1 &
+docker compose up -d
+docker compose logs -f yagapon
 ```
 
-### 4. Discord設定
+GCEではsystemdからComposeを管理し、再起動後も自動復旧させる。詳しくは[デプロイ手順](deploy/README.md)を参照。
+
+### 3. Discord設定
 
 1. Discordサーバーで `/setup` を実行
 2. ウィザードに従って設定を進める
+
+## 開発・テスト
+
+Python 3.12を使用する。
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
+
+Pull Requestと`main`へのpushでは、GitHub Actionsがlint、単体テスト、Dockerイメージのビルドを確認する。
+`main`のCI成功後はArtifact Registryへイメージをpushし、Compute Engine上のDocker Composeを
+自動更新する。初期IAM・Variables設定は[デプロイ手順](deploy/README.md)を参照。
+
+Google共有ドライブからKnowledge用draftを作る手順は[Drive同期設計](docs/google-drive-knowledge-sync.md)を参照。
+File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質とbackfill運用](docs/file-search-operations.md)を参照。
+年度別検索、品質ダッシュボード、評価セット、Knowledge差分索引の運用は
+[RAG品質・年度・評価](docs/rag-quality-operations.md)を参照。
+既存文書から用語・人名候補を一括生成し、管理画面から確認・編集するための仕様は
+[用語・人名カタログ](docs/knowledge-catalog.md)を参照。
 
 ## マルチギルド対応
 
