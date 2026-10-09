@@ -13,6 +13,7 @@ services:
       YAGAPON_CATALOG_PATH: /data/knowledge-catalog.json
       YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
       YAGAPON_VOICEPRINT_DIR: /data/voiceprints
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"
     volumes:
@@ -34,6 +35,7 @@ services:
     environment:
       YAGAPON_DRIVE_SYNC_STATE: /data/drive-sync-state.json
       YAGAPON_KNOWLEDGE_OUTPUT: /data/knowledge-drafts
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
     command: ["python", "-m", "knowledge_sync"]
@@ -51,6 +53,7 @@ services:
     environment:
       YAGAPON_DRIVE_SYNC_STATE: /data/drive-sync-state.json
       YAGAPON_KNOWLEDGE_OUTPUT: /data/knowledge-drafts
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
     command: ["python", "-m", "knowledge_sync", "--watch-interval", "900"]
@@ -70,6 +73,7 @@ services:
       YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
       YAGAPON_KNOWLEDGE_ROOT: /knowledge
       YAGAPON_KNOWLEDGE_INDEX_STATE: /data/knowledge-index-state.json
+      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
       - ${YAGAPON_KNOWLEDGE_REPO_PATH:-../YagamiFes-IT-Knowledge}:/knowledge:ro

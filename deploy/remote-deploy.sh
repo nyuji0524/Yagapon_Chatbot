@@ -54,6 +54,35 @@ install -m 0644 "$compose_source" "$compose_target"
 
 registry=${image%%/*}
 gcloud auth configure-docker "$registry" --quiet
+
+oauth_secret=$(sed -n 's/^YAGAPON_GOOGLE_OAUTH_SECRET=//p' "$deploy_env" | tail -1)
+oauth_project=$(sed -n 's/^YAGAPON_GCP_PROJECT_ID=//p' "$deploy_env" | tail -1)
+if [[ -n "$oauth_secret" ]]; then
+  if [[ -z "$oauth_project" || ! "$oauth_secret" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Invalid Google OAuth Secret Manager configuration" >&2
+    false
+  fi
+  oauth_tmp=$(mktemp /var/lib/yagapon/google-drive-oauth.json.XXXXXX)
+  trap '[[ -z "${oauth_tmp:-}" ]] || rm -f "$oauth_tmp"' EXIT
+  gcloud secrets versions access latest \
+    --project "$oauth_project" \
+    --secret "$oauth_secret" > "$oauth_tmp"
+  python3 -c '
+import json
+import sys
+
+with open(sys.argv[1]) as source:
+    value = json.load(source)
+required = {"client_id", "client_secret", "refresh_token"}
+if value.get("type") not in (None, "authorized_user") or not required.issubset(value):
+    raise SystemExit("Secret must contain authorized-user OAuth credentials")
+' "$oauth_tmp"
+  install -o 10001 -g 10001 -m 0600 \
+    "$oauth_tmp" /var/lib/yagapon/google-drive-oauth.json
+  rm -f "$oauth_tmp"
+  oauth_tmp=
+fi
+
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" config --quiet
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon
 systemctl restart yagapon

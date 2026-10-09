@@ -32,6 +32,9 @@ YAGAPON_ENV_FILE=/etc/yagapon/yagapon.env
 YAGAPON_DATA_PATH=/var/lib/yagapon
 YAGAPON_BIND_ADDRESS=127.0.0.1
 YAGAPON_HOST_PORT=8000
+YAGAPON_GCP_PROJECT_ID=PROJECT
+YAGAPON_GOOGLE_OAUTH_SECRET=yagapon-google-drive-oauth
+YAGAPON_GOOGLE_OAUTH_FILE=/data/google-drive-oauth.json
 EOF
 sudo chown -R 10001:10001 /var/lib/yagapon
 sudo systemctl daemon-reload
@@ -83,3 +86,21 @@ Composeの既定値はAPIを`127.0.0.1:8000`へだけ公開する。外部から
 - `/status`、`/ask`、`/backfill`は`YAGAPON_API_TOKEN`必須
 
 Secretが未設定の場合、保護対象APIはfail-closedで拒否する。
+
+## Google Drive OAuth
+
+個人のGoogle Driveへ保存する場合は、サービスアカウントではなく保存先を所有する
+Googleアカウントのauthorized-user OAuth認証情報を使う。OAuthクライアントはDesktop appとして
+作成し、次のスコープでoffline accessを許可する。
+
+- `https://www.googleapis.com/auth/drive.file`
+- `https://www.googleapis.com/auth/documents`
+
+authorized-user JSONはリポジトリやGitHub Secretsへ置かず、Secret Managerの
+`yagapon-google-drive-oauth`へ保存する。VMのサービスアカウントにはこのSecretだけの
+`roles/secretmanager.secretAccessor`を付与する。デプロイ時に
+`/var/lib/yagapon/google-drive-oauth.json`へ`0600`で展開され、コンテナから
+`/data/google-drive-oauth.json`として参照される。
+
+OAuth同意画面がTestingの間はrefresh tokenが7日で失効するため、常設運用前にProductionへ
+変更する。認証情報の失効時は新しいSecret versionを追加して再デプロイする。

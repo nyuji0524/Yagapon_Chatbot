@@ -1,4 +1,5 @@
-from unittest.mock import MagicMock
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -58,5 +59,67 @@ def test_drive_writer_removes_empty_document_when_insert_fails():
 def test_missing_legacy_credential_path_has_actionable_error(tmp_path):
     missing = tmp_path / "missing.json"
 
-    with pytest.raises(RuntimeError, match="inside the container"):
-        load_google_credentials(["scope"], str(missing))
+    with patch.dict("os.environ", {"GOOGLE_OAUTH_AUTHORIZED_USER_JSON": ""}):
+        with pytest.raises(RuntimeError, match="inside the container"):
+            load_google_credentials(["scope"], str(missing))
+
+
+def test_user_oauth_credentials_take_priority_over_service_account():
+    info = {
+        "type": "authorized_user",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+    }
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "GOOGLE_OAUTH_AUTHORIZED_USER_JSON": json.dumps(info),
+                "GOOGLE_SERVICE_ACCOUNT_JSON": "/missing/service-account.json",
+            },
+        ),
+        patch("bot.google_credentials.Credentials.from_authorized_user_info") as loader,
+    ):
+        credentials, source = load_google_credentials(["scope"])
+
+    assert credentials is loader.return_value
+    assert source == "user-oauth-json"
+    loader.assert_called_once_with(info, scopes=["scope"])
+
+
+def test_user_oauth_credentials_can_be_loaded_from_file(tmp_path):
+    info = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+    }
+    credentials_path = tmp_path / "authorized-user.json"
+    credentials_path.write_text(json.dumps(info))
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"GOOGLE_OAUTH_AUTHORIZED_USER_JSON": str(credentials_path)},
+        ),
+        patch("bot.google_credentials.Credentials.from_authorized_user_info") as loader,
+    ):
+        credentials, source = load_google_credentials(["scope"])
+
+    assert credentials is loader.return_value
+    assert source == "user-oauth-file"
+    loader.assert_called_once_with(info, scopes=["scope"])
+
+
+def test_user_oauth_rejects_service_account_json():
+    with patch.dict(
+        "os.environ",
+        {
+            "GOOGLE_OAUTH_AUTHORIZED_USER_JSON": json.dumps(
+                {"type": "service_account"}
+            )
+        },
+    ):
+        with pytest.raises(RuntimeError, match="authorized-user credentials"):
+            load_google_credentials(["scope"])

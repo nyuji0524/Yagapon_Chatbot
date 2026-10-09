@@ -148,6 +148,7 @@ DISCORD_TOKEN=your_discord_bot_token
 YAGAPON_API_TOKEN=generate_a_long_random_token
 API_HOST=http://your-server-ip:8000
 API_PORT=8000
+GOOGLE_OAUTH_AUTHORIZED_USER_JSON=
 GOOGLE_SERVICE_ACCOUNT_JSON=
 YAGAPON_CONFIG_PATH=/data/server_config.json
 YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json
@@ -167,8 +168,11 @@ RAGと回答生成はGemini 3.8 Flash、音声認識はGemini 3.5 Transcribe、
 [`docs/ai-model-budget.md`](docs/ai-model-budget.md)を参照。
 
 `YAGAPON_API_TOKEN` は `/status`、`/ask`、`/backfill` APIのBearer認証に使う。
-GCEでは`GOOGLE_SERVICE_ACCOUNT_JSON`を空にしてVMのADCを使う。ローカルでJSON鍵を
-使う場合だけ、コンテナ内へread-only mountしたパスを指定する。
+Driveへ人間のGoogleアカウントとして保存する場合は、OAuthのauthorized-user JSONを
+`GOOGLE_OAUTH_AUTHORIZED_USER_JSON`へ直接設定するか、コンテナ内のread-onlyファイルパスを
+指定する。この値はサービスアカウントとADCより優先される。GCEではSecret Managerから
+`/data/google-drive-oauth.json`へ配置し、Compose変数`YAGAPON_GOOGLE_OAUTH_FILE`で参照する。
+`GOOGLE_SERVICE_ACCOUNT_JSON`は移行中の互換用途だけに残し、新規のJSON鍵は発行しない。
 
 ### 2. Dockerで起動
 
