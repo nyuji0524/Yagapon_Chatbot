@@ -28,6 +28,7 @@ FLUSH_CHECK_INTERVAL = 120  # 2分ごとにチェック
 DOCUMENT_SCHEMA_VERSION = "discord-v2"
 DOCUMENT_MAX_MESSAGES = 80
 DOCUMENT_MAX_CHARS = 16_000
+CORPUS_DELETE_MAX_PASSES = 1_000
 DOCUMENT_MIN_MESSAGES = 8
 DOCUMENT_SESSION_GAP = timedelta(hours=6)
 DOCUMENT_MAX_MERGE_GAP = timedelta(hours=24)
@@ -213,7 +214,7 @@ class CorpusManager:
         loop = asyncio.get_running_loop()
 
         # Force-delete bounded pages. Never retry a page that made no progress.
-        for attempt in range(3):
+        for attempt in range(CORPUS_DELETE_MAX_PASSES):
             docs = await loop.run_in_executor(
                 None,
                 lambda: list(
@@ -238,7 +239,14 @@ class CorpusManager:
                     deleted += 1
                 except Exception as e:
                     log.warning(f"Failed to delete doc {doc.name}: {e}")
-            log.info("Deleted %s/%s docs from %s (pass %s/3)", deleted, len(docs), store_name, attempt + 1)
+            log.info(
+                "Deleted %s/%s docs from %s (pass %s/%s)",
+                deleted,
+                len(docs),
+                store_name,
+                attempt + 1,
+                CORPUS_DELETE_MAX_PASSES,
+            )
             if deleted == 0:
                 raise RuntimeError(f"Corpus deletion made no progress for {store_name}; aborting safely")
         else:
@@ -252,7 +260,9 @@ class CorpusManager:
                 ),
             )
             if remaining:
-                raise RuntimeError(f"Corpus still contains documents after 3 passes: {store_name}")
+                raise RuntimeError(
+                    f"Corpus still contains documents after {CORPUS_DELETE_MAX_PASSES} passes: {store_name}"
+                )
 
         # ストアを削除
         await loop.run_in_executor(
