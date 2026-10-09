@@ -78,7 +78,7 @@ jobs:
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            compose.yaml deploy/remote-deploy.sh \
+            compose.yaml deploy/remote-deploy.sh deploy/systemd/yagapon.service \
             "$GCE_INSTANCE:/tmp/"
 
       - name: Deploy and verify health
