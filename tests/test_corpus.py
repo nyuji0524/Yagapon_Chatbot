@@ -47,9 +47,7 @@ async def test_failed_upload_restores_messages(corpus_manager):
     uploaded = await corpus_manager._flush_buffer((1, 2))
 
     assert uploaded is False
-    assert corpus_manager._buffers[(1, 2)].messages[0].endswith(
-        "[member]: 失敗しても消えない"
-    )
+    assert corpus_manager._buffers[(1, 2)].messages[0].endswith("[member]: 失敗しても消えない")
 
 
 @pytest.mark.asyncio
@@ -99,10 +97,7 @@ def test_knowledge_document_has_traceable_metadata(corpus_manager):
     ]
 
     documents = corpus_manager._build_knowledge_documents(FakeChannel([]), messages)
-    metadata = {
-        item["key"]: item.get("string_value", item.get("numeric_value"))
-        for item in documents[0].metadata
-    }
+    metadata = {item["key"]: item.get("string_value", item.get("numeric_value")) for item in documents[0].metadata}
 
     assert metadata["channel_id"] == "2"
     assert metadata["schema"] == "discord-v2"
@@ -166,19 +161,19 @@ def test_response_sources_deduplicates_discord_links(corpus_manager):
         ],
     )
     response = SimpleNamespace(
-        candidates=[SimpleNamespace(
-            grounding_metadata=SimpleNamespace(
-                grounding_chunks=[
-                    SimpleNamespace(retrieved_context=context),
-                    SimpleNamespace(retrieved_context=context),
-                ]
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[
+                        SimpleNamespace(retrieved_context=context),
+                        SimpleNamespace(retrieved_context=context),
+                    ]
+                )
             )
-        )]
+        ]
     )
 
-    assert corpus_manager._response_sources(response) == [
-        "[#開発（2026-10-05）](https://discord.com/channels/1/2/3)"
-    ]
+    assert corpus_manager._response_sources(response) == ["[#開発（2026-10-05）](https://discord.com/channels/1/2/3)"]
 
 
 def test_incremental_boundary_is_previous_jst_midnight():
@@ -226,9 +221,33 @@ async def test_upload_waits_for_indexing_completion(corpus_manager):
 
 
 @pytest.mark.asyncio
-async def test_query_filters_explicit_festival_and_records_trace(
-    corpus_manager, tmp_path, monkeypatch
-):
+async def test_delete_corpus_force_deletes_documents_without_retry_loop(corpus_manager):
+    document = SimpleNamespace(name="documents/one")
+    corpus_manager._client.file_search_stores.documents.list.side_effect = [[document], []]
+
+    await corpus_manager.delete_corpus("fileSearchStores/test")
+
+    corpus_manager._client.file_search_stores.documents.delete.assert_called_once_with(
+        name="documents/one",
+        config={"force": True},
+    )
+    corpus_manager._client.file_search_stores.delete.assert_called_once_with(name="fileSearchStores/test")
+
+
+@pytest.mark.asyncio
+async def test_delete_corpus_aborts_when_page_makes_no_progress(corpus_manager):
+    document = SimpleNamespace(name="documents/stuck")
+    corpus_manager._client.file_search_stores.documents.list.return_value = [document]
+    corpus_manager._client.file_search_stores.documents.delete.side_effect = RuntimeError("blocked")
+
+    with pytest.raises(RuntimeError, match="made no progress"):
+        await corpus_manager.delete_corpus("fileSearchStores/test")
+
+    assert corpus_manager._client.file_search_stores.documents.list.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_query_filters_explicit_festival_and_records_trace(corpus_manager, tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "true")
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
     context = SimpleNamespace(
@@ -243,11 +262,11 @@ async def test_query_filters_explicit_festival_and_records_trace(
     response = SimpleNamespace(
         text="27thの回答",
         usage_metadata=None,
-        candidates=[SimpleNamespace(
-            grounding_metadata=SimpleNamespace(
-                grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(grounding_chunks=[SimpleNamespace(retrieved_context=context)])
             )
-        )],
+        ],
     )
     corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
 
@@ -265,9 +284,7 @@ async def test_query_filters_explicit_festival_and_records_trace(
 
 
 @pytest.mark.asyncio
-async def test_festival_filter_stays_off_during_legacy_migration(
-    corpus_manager, tmp_path, monkeypatch
-):
+async def test_festival_filter_stays_off_during_legacy_migration(corpus_manager, tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "false")
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
     response = SimpleNamespace(text="回答", usage_metadata=None, candidates=[])

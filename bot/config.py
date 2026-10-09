@@ -60,13 +60,15 @@ class ConfigManager:
 
     async def _save(self):
         async with self._lock:
-            self._config_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
-            temporary_path.write_text(
-                json.dumps(self._config, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            os.replace(temporary_path, self._config_path)
+            payload = json.dumps(self._config, indent=2, ensure_ascii=False)
+
+            def write() -> None:
+                self._config_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary_path = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
+                temporary_path.write_text(payload, encoding="utf-8")
+                os.replace(temporary_path, self._config_path)
+
+            await asyncio.to_thread(write)
 
     # ------ guild helpers ------
 
@@ -128,15 +130,17 @@ class ConfigManager:
     # ------ reactions ------
 
     def get_reactions(self, guild_id: int) -> dict:
-        return self._guild(guild_id).get("reactions", {
-            "enabled": False,
-            "interesting": "💡",
-            "surprised": "😲",
-            "funny": "😂",
-        })
+        return self._guild(guild_id).get(
+            "reactions",
+            {
+                "enabled": False,
+                "interesting": "💡",
+                "surprised": "😲",
+                "funny": "😂",
+            },
+        )
 
-    async def set_reactions(self, guild_id: int, enabled: bool,
-                            interesting: str, surprised: str, funny: str):
+    async def set_reactions(self, guild_id: int, enabled: bool, interesting: str, surprised: str, funny: str):
         self._guild(guild_id)["reactions"] = {
             "enabled": enabled,
             "interesting": interesting,

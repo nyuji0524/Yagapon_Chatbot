@@ -23,11 +23,12 @@ log = logging.getLogger("yagapon.corpus")
 
 # バッチ設定
 FLUSH_MESSAGE_THRESHOLD = 100  # メッセージ数でflush
-FLUSH_TIME_SECONDS = 7200      # 2時間でflush
-FLUSH_CHECK_INTERVAL = 120     # 2分ごとにチェック
+FLUSH_TIME_SECONDS = 7200  # 2時間でflush
+FLUSH_CHECK_INTERVAL = 120  # 2分ごとにチェック
 DOCUMENT_SCHEMA_VERSION = "discord-v2"
 DOCUMENT_MAX_MESSAGES = 80
 DOCUMENT_MAX_CHARS = 16_000
+CORPUS_DELETE_MAX_PASSES = 1_000
 DOCUMENT_MIN_MESSAGES = 8
 DOCUMENT_SESSION_GAP = timedelta(hours=6)
 DOCUMENT_MAX_MERGE_GAP = timedelta(hours=24)
@@ -61,21 +62,19 @@ def calculate_incremental_after(cursor: dict | None, now: datetime | None = None
         local -= timedelta(days=1)
     return local.astimezone(timezone.utc)
 
+
 SYSTEM_INSTRUCTION = (
     "あなたは慶應義塾大学 矢上祭実行委員会の専属AI「おしゃべりやがぽん」だぽん。\n"
     "矢上祭は慶應義塾大学理工学部の学園祭で、実行委員会は複数の局（IT局、総務局、装飾局など）で構成されているぽん。\n\n"
-
     "【キャラクター】\n"
     "- 明るく親しみやすい口調で、語尾に「ぽん」をつけるぽん。\n"
     "- 委員会のメンバーのことをよく知っている仲間として振る舞うぽん。\n"
     "- 質問者を助けたいという気持ちが強いぽん。\n\n"
-
     "【回答ルール】\n"
     "- ナレッジベース（Discordの会話ログ）を検索し、事実に基づいて回答するぽん。\n"
     "- ナレッジに含まれていない情報は推測・創作してはいけないぽん。\n"
     "- 関連情報がない場合は「その件に関する情報は、今のボクの記憶には見当たらないぽん...🙏」と正直に答えるぽん。\n"
     "- 長すぎず短すぎず、質問に応じた適切な分量で回答するぽん。\n\n"
-
     "【回答スタイル】\n"
     "- 断片的な情報の羅列ではなく、自然な文章として回答をまとめるぽん。\n"
     "- 人物紹介では、その人の「役割・性格・印象的なエピソード」を中心に、\n"
@@ -85,7 +84,6 @@ SYSTEM_INSTRUCTION = (
     "- 「〜について意見を出している」「〜とやり取りしている」のような\n"
     "  曖昧な表現より、具体的な内容やその人の個性が伝わる表現を使うぽん。\n"
     "- 出典（チャンネル名・日付）は文末にまとめるか、自然な形で触れるぽん。\n\n"
-
     "【検索戦略】\n"
     "- 複数のチャンネル・期間のドキュメントを横断的に検索するぽん。\n"
     "- 特定の発言者に偏らず、関連する全メンバーの発言を考慮するぽん。\n"
@@ -193,7 +191,8 @@ class CorpusManager:
     async def _check_time_flushes(self):
         now = datetime.now(timezone.utc)
         keys_to_flush = [
-            key for key, buf in self._buffers.items()
+            key
+            for key, buf in self._buffers.items()
             if buf.messages and (now - buf.first_message_at).total_seconds() >= FLUSH_TIME_SECONDS
         ]
         for key in keys_to_flush:
@@ -206,38 +205,64 @@ class CorpusManager:
         loop = asyncio.get_event_loop()
         store = await loop.run_in_executor(
             None,
-            lambda: self._client.file_search_stores.create(
-                config={"display_name": display_name}
-            ),
+            lambda: self._client.file_search_stores.create(config={"display_name": display_name}),
         )
         log.info(f"Created corpus: {store.name} ({display_name})")
         return store.name
 
     async def delete_corpus(self, store_name: str):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
-        # まずストア内のドキュメントを全削除
-        while True:
+        # Force-delete bounded pages. Never retry a page that made no progress.
+        for attempt in range(CORPUS_DELETE_MAX_PASSES):
             docs = await loop.run_in_executor(
                 None,
-                lambda: list(self._client.file_search_stores.documents.list(
-                    parent=store_name,
-                    config={"page_size": 20},
-                )),
+                lambda: list(
+                    self._client.file_search_stores.documents.list(
+                        parent=store_name,
+                        config={"page_size": 20},
+                    )
+                ),
             )
             if not docs:
                 break
+            deleted = 0
             for doc in docs:
                 try:
                     await loop.run_in_executor(
                         None,
                         lambda d=doc: self._client.file_search_stores.documents.delete(
                             name=d.name,
+                            config={"force": True},
                         ),
                     )
+                    deleted += 1
                 except Exception as e:
                     log.warning(f"Failed to delete doc {doc.name}: {e}")
-            log.info(f"Deleted {len(docs)} docs from {store_name}")
+            log.info(
+                "Deleted %s/%s docs from %s (pass %s/%s)",
+                deleted,
+                len(docs),
+                store_name,
+                attempt + 1,
+                CORPUS_DELETE_MAX_PASSES,
+            )
+            if deleted == 0:
+                raise RuntimeError(f"Corpus deletion made no progress for {store_name}; aborting safely")
+        else:
+            remaining = await loop.run_in_executor(
+                None,
+                lambda: list(
+                    self._client.file_search_stores.documents.list(
+                        parent=store_name,
+                        config={"page_size": 1},
+                    )
+                ),
+            )
+            if remaining:
+                raise RuntimeError(
+                    f"Corpus still contains documents after {CORPUS_DELETE_MAX_PASSES} passes: {store_name}"
+                )
 
         # ストアを削除
         await loop.run_in_executor(
@@ -250,10 +275,18 @@ class CorpusManager:
 
     # ------ batch learning ------
 
-    def add_message(self, guild_id: int, channel_id: int, channel_name: str,
-                    author: str, content: str, timestamp: datetime,
-                    corpus_store_name: str, message_id: int | None = None,
-                    source_url: str = ""):
+    def add_message(
+        self,
+        guild_id: int,
+        channel_id: int,
+        channel_name: str,
+        author: str,
+        content: str,
+        timestamp: datetime,
+        corpus_store_name: str,
+        message_id: int | None = None,
+        source_url: str = "",
+    ):
         """メッセージをバッファに追加。閾値超えたらflushをスケジュール。"""
         key = (guild_id, channel_id)
         if key not in self._buffers:
@@ -468,9 +501,15 @@ class CorpusManager:
 
     # ------ RAG query ------
 
-    async def query(self, question: str, corpus_store_name: str,
-                    guild_id: int = 0, members_info: str = "", glossary_text: str = "",
-                    glossary: dict | None = None) -> str:
+    async def query(
+        self,
+        question: str,
+        corpus_store_name: str,
+        guild_id: int = 0,
+        members_info: str = "",
+        glossary_text: str = "",
+        glossary: dict | None = None,
+    ) -> str:
         result = await self.query_with_trace(
             question,
             corpus_store_name,
@@ -494,17 +533,17 @@ class CorpusManager:
         glossary: dict | None = None,
     ) -> RagAnswer:
         if guild_id and not self._check_rate_limit(guild_id):
-            return RagAnswer(text=(
-                f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n"
-                "明日またたくさん聞いてねぽん！🙏"
-            ), no_answer=True)
+            return RagAnswer(
+                text=(
+                    f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n明日またたくさん聞いてねぽん！🙏"
+                ),
+                no_answer=True,
+            )
         started = time.monotonic()
         festival = festival_from_query(question)
         metadata_filter = festival_metadata_filter(festival) if festival_filter_enabled() else None
         terms = self.rag_store.query_terms(question, glossary)
-        lexical_hits = self.rag_store.search_exact(
-            guild_id, terms, festival=festival, limit=4
-        ) if guild_id else []
+        lexical_hits = self.rag_store.search_exact(guild_id, terms, festival=festival, limit=4) if guild_id else []
         try:
             system = SYSTEM_INSTRUCTION
             if festival is not None:
@@ -516,8 +555,7 @@ class CorpusManager:
             if lexical_hits:
                 system += (
                     "\n\n【完全一致検索の候補】意味検索とは別に取得した原文候補だぽん。"
-                    "質問との関係を確認し、関係がないものは使わないぽん。\n"
-                    + self._lexical_context(lexical_hits)
+                    "質問との関係を確認し、関係がないものは使わないぽん。\n" + self._lexical_context(lexical_hits)
                 )
 
             model = rag_model()
@@ -534,11 +572,7 @@ class CorpusManager:
                     thinking_level="low",
                     max_output_tokens=1024,
                     system_instruction=system,
-                    tools=[
-                        types.Tool(
-                            file_search=search
-                        )
-                    ],
+                    tools=[types.Tool(file_search=search)],
                 ),
             )
             log_usage(log, "rag_query", model, response)
@@ -553,19 +587,23 @@ class CorpusManager:
                 )
             if sources:
                 answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
-            query_id = self.rag_store.record_query(
-                guild_id=guild_id,
-                actor_id=actor_id,
-                channel_id=channel_id,
-                question=question,
-                answer=answer,
-                festival=festival,
-                metadata_filter=metadata_filter,
-                citations=sources,
-                lexical_keys=[hit.document_key for hit in lexical_hits],
-                latency_ms=round((time.monotonic() - started) * 1000),
-                no_answer=no_answer,
-            ) if guild_id else None
+            query_id = (
+                self.rag_store.record_query(
+                    guild_id=guild_id,
+                    actor_id=actor_id,
+                    channel_id=channel_id,
+                    question=question,
+                    answer=answer,
+                    festival=festival,
+                    metadata_filter=metadata_filter,
+                    citations=sources,
+                    lexical_keys=[hit.document_key for hit in lexical_hits],
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                    no_answer=no_answer,
+                )
+                if guild_id
+                else None
+            )
             return RagAnswer(
                 text=answer,
                 query_id=query_id,
@@ -637,8 +675,7 @@ class CorpusManager:
     # ------ backfill ------
 
     @staticmethod
-    def _build_document_text(channel_name: str, bucket_key: str, lines: list[str],
-                              authors: dict[str, int]) -> str:
+    def _build_document_text(channel_name: str, bucket_key: str, lines: list[str], authors: dict[str, int]) -> str:
         """ドキュメントテキストを構築。参加者サマリー付き。"""
         # 参加者サマリー（発言数順）
         sorted_authors = sorted(authors.items(), key=lambda x: x[1], reverse=True)
@@ -648,8 +685,7 @@ class CorpusManager:
             f"チャンネル: #{channel_name}\n"
             f"期間: {bucket_key}\n"
             f"参加者: {participants}\n"
-            f"発言数: {len(lines)}\n\n"
-            + "\n".join(lines)
+            f"発言数: {len(lines)}\n\n" + "\n".join(lines)
         )
 
     @staticmethod
@@ -696,13 +732,11 @@ class CorpusManager:
         for message in messages:
             gap = message.timestamp - current[-1].timestamp if current else timedelta(0)
             exceeds_size = (
-                len(current) >= DOCUMENT_MAX_MESSAGES
-                or current_chars + len(message.content) > DOCUMENT_MAX_CHARS
+                len(current) >= DOCUMENT_MAX_MESSAGES or current_chars + len(message.content) > DOCUMENT_MAX_CHARS
             )
             closes_session = bool(current) and (
                 message.timestamp.astimezone(JST).date() != current[-1].timestamp.astimezone(JST).date()
-                or
-                gap > DOCUMENT_MAX_MERGE_GAP
+                or gap > DOCUMENT_MAX_MERGE_GAP
                 or (gap > DOCUMENT_SESSION_GAP and len(current) >= DOCUMENT_MIN_MESSAGES)
             )
             if current and (exceeds_size or closes_session):
@@ -723,8 +757,7 @@ class CorpusManager:
                 len(previous) + len(trailing) <= DOCUMENT_MAX_MESSAGES
                 and combined_chars <= DOCUMENT_MAX_CHARS
                 and gap <= DOCUMENT_MAX_MERGE_GAP
-                and previous[-1].timestamp.astimezone(JST).date()
-                == trailing[0].timestamp.astimezone(JST).date()
+                and previous[-1].timestamp.astimezone(JST).date() == trailing[0].timestamp.astimezone(JST).date()
             ):
                 groups[-2] = previous + trailing
                 groups.pop()
@@ -741,7 +774,9 @@ class CorpusManager:
         for group in cls._split_knowledge_messages(messages):
             start_at = group[0].timestamp.astimezone(JST)
             end_at = group[-1].timestamp.astimezone(JST)
-            key_source = f"{guild_id}:{channel_id}:{group[0].message_id}:{group[-1].message_id}:{DOCUMENT_SCHEMA_VERSION}"
+            key_source = (
+                f"{guild_id}:{channel_id}:{group[0].message_id}:{group[-1].message_id}:{DOCUMENT_SCHEMA_VERSION}"
+            )
             document_key = hashlib.sha256(key_source.encode()).hexdigest()[:24]
             authors: dict[str, int] = {}
             lines = []
@@ -789,14 +824,16 @@ class CorpusManager:
                 {"key": "document_key", "string_value": document_key},
                 {"key": "source_url", "string_value": source_url[:500]},
             ]
-            documents.append(KnowledgeDocument(
-                display_name=display_name,
-                text=text,
-                metadata=metadata,
-                message_count=len(group),
-                start_at=start_at,
-                end_at=end_at,
-            ))
+            documents.append(
+                KnowledgeDocument(
+                    display_name=display_name,
+                    text=text,
+                    metadata=metadata,
+                    message_count=len(group),
+                    start_at=start_at,
+                    end_at=end_at,
+                )
+            )
         return documents
 
     @staticmethod
@@ -820,10 +857,12 @@ class CorpusManager:
         loop = asyncio.get_running_loop()
         documents = await loop.run_in_executor(
             None,
-            lambda: list(self._client.file_search_stores.documents.list(
-                parent=store_name,
-                config={"page_size": 20},
-            )),
+            lambda: list(
+                self._client.file_search_stores.documents.list(
+                    parent=store_name,
+                    config={"page_size": 20},
+                )
+            ),
         )
         prefix = f"#{channel.name} | "
         after_timestamp = after.timestamp() if after else None
