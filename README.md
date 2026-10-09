@@ -155,6 +155,10 @@ YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json
 YAGAPON_CATALOG_MODEL=gemini-3.1-flash-lite
 YAGAPON_CATALOG_PASSES=2
 YAGAPON_VOICEPRINT_DIR=/data/voiceprints
+YAGAPON_RECORDING_DIR=/data/recordings
+YAGAPON_MAX_RECORDING_BYTES=4294967296
+YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
+YAGAPON_RECORDING_RETENTION_DAYS=7
 YAGAPON_KNOWLEDGE_REPO_PATH=../YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_URL=https://github.com/YagamiFes-IT/YagamiFes-IT-Knowledge/blob/main
 YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
@@ -181,7 +185,7 @@ mkdir -p data
 docker compose up --build
 ```
 
-コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。
+コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMを逐次保存し、メモリ量を録音時間に依存させない。正常に議事録を配信した録音は既定7日で自動削除し、文字起こし失敗や容量上限に達した録音は復旧用に保持する。
 
 バックグラウンド起動：
 

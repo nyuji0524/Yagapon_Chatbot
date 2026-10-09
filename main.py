@@ -15,6 +15,9 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 log = logging.getLogger("yagapon")
+# Pycord logs an INFO line for many normal RTCP packets. During long sessions
+# that synchronous log volume can starve the Discord interaction event loop.
+logging.getLogger("discord.voice.receive.reader").setLevel(logging.WARNING)
 
 
 async def main():

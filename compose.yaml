@@ -13,6 +13,7 @@ services:
       YAGAPON_CATALOG_PATH: /data/knowledge-catalog.json
       YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
       YAGAPON_VOICEPRINT_DIR: /data/voiceprints
+      YAGAPON_RECORDING_DIR: /data/recordings
       GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"

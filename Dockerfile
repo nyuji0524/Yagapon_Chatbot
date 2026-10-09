@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     YAGAPON_CONFIG_PATH=/data/server_config.json \
     YAGAPON_CATALOG_PATH=/data/knowledge-catalog.json \
     YAGAPON_RAG_DB_PATH=/data/rag.sqlite3 \
-    YAGAPON_VOICEPRINT_DIR=/data/voiceprints
+    YAGAPON_VOICEPRINT_DIR=/data/voiceprints \
+    YAGAPON_RECORDING_DIR=/data/recordings
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ffmpeg libopus0 ca-certificates git \
@@ -28,7 +29,7 @@ COPY rag_eval ./rag_eval
 COPY main.py ./
 
 RUN useradd --create-home --uid 10001 yagapon \
-    && mkdir -p /data/voiceprints \
+    && mkdir -p /data/voiceprints /data/recordings \
     && chown -R yagapon:yagapon /app /data
 
 USER yagapon

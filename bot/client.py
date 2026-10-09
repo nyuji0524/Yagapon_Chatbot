@@ -1,19 +1,18 @@
 """YagaPon Discord Client - メイン処理 (pycord)"""
 
+import asyncio
 import logging
 
 import discord
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
+from bot.recording import cleanup_old_recordings
 from bot.voice import VoiceMode
 
 log = logging.getLogger("yagapon.client")
 
-RAG_FEEDBACK_PROMPT = (
-    "回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り"
-    "（対応した絵文字でリアクション）"
-)
+RAG_FEEDBACK_PROMPT = "回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
 RAG_FEEDBACK_RATINGS = {"✅": "positive", "⚠️": "partial", "❌": "negative"}
 
 
@@ -45,6 +44,7 @@ class YagaPon(discord.Bot):
             voice_cmd,
             voiceprint,
         )
+
         setup.register(self)
         status.register(self)
         ignore.register(self)
@@ -62,6 +62,9 @@ class YagaPon(discord.Bot):
 
     async def on_ready(self):
         self.corpus.start_flush_loop()
+        removed = await asyncio.to_thread(cleanup_old_recordings)
+        if removed:
+            log.info("Removed %s expired delivered recording(s)", removed)
         log.info(f"おしゃべりやがぽん起動: {self.user}")
 
     async def on_guild_join(self, guild: discord.Guild):
@@ -75,7 +78,9 @@ class YagaPon(discord.Bot):
                 )
                 break
 
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    async def on_voice_state_update(
+        self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+    ):
         """VCから人がいなくなったら自動退出"""
         # 誰かがVCから抜けた場合のみ処理
         if not before.channel or member.id == self.user.id:
@@ -83,6 +88,7 @@ class YagaPon(discord.Bot):
 
         # botがそのVCにいるか確認
         from bot.voice import get_session, leave_voice
+
         session = get_session(member.guild.id)
         if not session or not session.voice_client or not session.voice_client.is_connected():
             return
@@ -96,7 +102,19 @@ class YagaPon(discord.Bot):
 
             # 議事録生成がある場合はテキストチャンネルに通知
             has_minutes = session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING)
-            minutes = await leave_voice(member.guild.id)
+            if not session.claim_delivery():
+                return
+            try:
+                minutes = await leave_voice(member.guild.id)
+            except Exception as exc:
+                if session.recording_sink:
+                    session.recording_sink.mark("automatic_leave_failed", error=type(exc).__name__)
+                log.exception("Automatic voice leave failed for guild %s", member.guild.id)
+                return
+
+            if not minutes:
+                session.mark_delivered()
+                return
 
             if minutes and has_minutes:
                 # 通知先の優先順位: システムチャンネル → 最初の送信可能チャンネル
@@ -121,10 +139,20 @@ class YagaPon(discord.Bot):
                         description=summary[:4096],
                         color=discord.Color.blue(),
                     )
+                    file = None
                     if drive_url:
                         embed.add_field(name="📄 全文", value=f"[Google Docsで見る]({drive_url})", inline=False)
+                    else:
+                        import io
 
-                    await notify_ch.send(embed=embed, silent=True)
+                        file = discord.File(
+                            io.BytesIO(minutes.encode("utf-8")),
+                            filename=f"議事録_{session.channel.name}.md",
+                        )
+                        embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
+
+                    await notify_ch.send(embed=embed, file=file, silent=True)
+                    session.mark_delivered(drive_url=drive_url)
 
     async def on_message(self, message: discord.Message):
         if message.author == self.user or message.author.bot:
@@ -149,17 +177,21 @@ class YagaPon(discord.Bot):
 
         # VCセッション中のテキストチャットを参考資料として収集
         from bot.voice import get_session
+
         vc_session = get_session(guild_id)
         if vc_session and vc_session.is_active:
             # VCのテキストチャンネル or botがいるVCと同じチャンネル
-            vc_text_ch = getattr(vc_session.channel, 'id', None)
+            vc_text_ch = getattr(vc_session.channel, "id", None)
             msg_ch_id = message.channel.id
             # VCチャンネルのテキストチャット、またはボイスチャンネル名と一致するテキストチャンネル
             is_vc_text = (
                 msg_ch_id == vc_text_ch
-                or getattr(message.channel, 'name', '') == getattr(vc_session.channel, 'name', '')
-                or (hasattr(message.channel, 'category') and hasattr(vc_session.channel, 'category')
-                    and message.channel.category == vc_session.channel.category)
+                or getattr(message.channel, "name", "") == getattr(vc_session.channel, "name", "")
+                or (
+                    hasattr(message.channel, "category")
+                    and hasattr(vc_session.channel, "category")
+                    and message.channel.category == vc_session.channel.category
+                )
             )
             if is_vc_text and (message.content or message.attachments):
                 await vc_session.add_reference_from_message(message)
@@ -193,6 +225,7 @@ class YagaPon(discord.Bot):
         # スマートリアクション (別モジュールで処理)
         try:
             from bot.reactions import maybe_react
+
             await maybe_react(self, message)
         except Exception:
             pass
@@ -306,6 +339,7 @@ class YagaPon(discord.Bot):
             # VCにいればTTSも
             try:
                 from bot.tts import speak_in_vc
+
                 await speak_in_vc(self, message, result.text)
             except Exception:
                 pass

@@ -4,6 +4,8 @@
 pycord版
 """
 
+import asyncio
+import logging
 import os
 
 import discord
@@ -11,11 +13,14 @@ import discord
 from bot.ai_models import fast_model, generation_config
 from bot.voice import VoiceMode, get_session, join_voice, leave_voice
 
+log = logging.getLogger("yagapon.commands.voice")
+
 
 def register(bot):
     @bot.slash_command(name="join", description="ボイスチャンネルに参加するぽん！")
     @discord.option(
-        "mode", description="モードを選ぶぽん",
+        "mode",
+        description="モードを選ぶぽん",
         choices=[
             discord.OptionChoice("聞き専 (議事録のみ)", "listen"),
             discord.OptionChoice("参加者 (議事録 + 質問対応)", "meeting"),
@@ -23,11 +28,15 @@ def register(bot):
         ],
     )
     async def join_cmd(ctx: discord.ApplicationContext, mode: str):
+        if get_session(ctx.guild_id):
+            await ctx.respond(
+                "すでに録音中だぽん。先に `/leave` で議事録の保存を完了してねぽん！",
+                ephemeral=True,
+            )
+            return
         member = ctx.guild.get_member(ctx.author.id)
         if not member or not member.voice or not member.voice.channel:
-            await ctx.respond(
-                "先にボイスチャンネルに入ってほしいぽん！", ephemeral=True
-            )
+            await ctx.respond("先にボイスチャンネルに入ってほしいぽん！", ephemeral=True)
             return
 
         await ctx.defer()
@@ -54,23 +63,39 @@ def register(bot):
 
         # セッション情報を退出前に取得
         session = get_session(ctx.guild_id)
+        if not session:
+            await ctx.followup.send("ボイスチャンネルには参加していないぽん。", silent=True)
+            return
+        if not session.claim_delivery():
+            await ctx.followup.send("退出と議事録作成はすでに進行中だぽん。完了通知を待ってねぽん！", silent=True)
+            return
         channel_name = session.channel.name if session else "unknown"
         has_audio = bool(session and session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING))
 
         if has_audio:
             await ctx.followup.send("🎙️ 音声を文字起こし中だぽん...少し待ってねぽん ⏳", silent=True)
 
-        minutes = await leave_voice(ctx.guild_id)
+        try:
+            minutes = await leave_voice(ctx.guild_id)
+        except Exception as exc:
+            if session.recording_sink:
+                session.recording_sink.mark("leave_failed", error=type(exc).__name__)
+            log.exception("Voice leave failed for guild %s", ctx.guild_id)
+            await ctx.channel.send(
+                "退出処理中にエラーが発生したぽん。録音データはサーバーに保管してあるので、管理者が復旧できるぽん。",
+                silent=True,
+            )
+            return
 
         if not minutes:
-            await ctx.followup.send("退出したぽん！👋", silent=True)
+            session.mark_delivered()
+            await ctx.channel.send("退出したぽん！👋", silent=True)
             return
 
         # まずGoogle Docsに全文保存
         from bot.gdrive import upload_minutes
-        drive_url = await upload_minutes(
-            bot.config, ctx.guild_id, minutes, channel_name
-        )
+
+        drive_url = await upload_minutes(bot.config, ctx.guild_id, minutes, channel_name)
 
         # Geminiで要約を生成
         summary = await _summarize_minutes(minutes)
@@ -89,31 +114,37 @@ def register(bot):
             embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
 
         if drive_url:
-            await ctx.followup.send(embed=embed, silent=True)
+            await ctx.channel.send(embed=embed, silent=True)
         else:
             import io
+
             file = discord.File(
                 io.BytesIO(minutes.encode("utf-8")),
                 filename=f"議事録_{channel_name}.md",
             )
-            await ctx.followup.send(embed=embed, file=file, silent=True)
+            await ctx.channel.send(embed=embed, file=file, silent=True)
+        session.mark_delivered(drive_url=drive_url)
 
 
 async def _summarize_minutes(minutes: str) -> str:
     """議事録を要約"""
     from google import genai
+
     try:
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
         model = fast_model()
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=(
-                "以下の議事録を3〜5行で簡潔に要約してください。\n"
-                "要約には: 参加者、主な議題、決定事項を含めてください。\n"
-                "語尾は「ぽん」をつけてください。\n\n"
-                f"{minutes}"
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model,
+                contents=(
+                    "以下の議事録を3〜5行で簡潔に要約してください。\n"
+                    "要約には: 参加者、主な議題、決定事項を含めてください。\n"
+                    "語尾は「ぽん」をつけてください。\n\n"
+                    f"{minutes}"
+                ),
+                config=generation_config(model, thinking_level="low", max_output_tokens=512),
             ),
-            config=generation_config(model, thinking_level="low", max_output_tokens=512),
+            timeout=90,
         )
         return response.text or "要約を生成できなかったぽん..."
     except Exception:
