@@ -49,6 +49,7 @@ class VoiceSession:
         self._stop_lock = asyncio.Lock()
         self._stop_completed = False
         self._stop_result: str | None = None
+        self._stop_error: BaseException | None = None
         self._delivery_claimed = False
         self._transcription_failed = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -404,10 +405,17 @@ class VoiceSession:
     async def stop(self) -> str | None:
         async with self._stop_lock:
             if self._stop_completed:
+                if self._stop_error:
+                    raise self._stop_error
                 return self._stop_result
-            self._stop_result = await self._stop_once()
-            self._stop_completed = True
-            return self._stop_result
+            try:
+                self._stop_result = await self._stop_once()
+                return self._stop_result
+            except BaseException as exc:
+                self._stop_error = exc
+                raise
+            finally:
+                self._stop_completed = True
 
     def claim_delivery(self) -> bool:
         """Ensure concurrent manual/automatic leave paths publish only once."""
@@ -630,11 +638,19 @@ async def join_voice(bot, guild_id: int, channel: discord.VoiceChannel, mode: Vo
 async def leave_voice(guild_id: int) -> str | None:
     session = _sessions.get(guild_id)
     if session:
-        try:
-            return await asyncio.shield(session.stop())
-        finally:
-            if session._stop_completed and _sessions.get(guild_id) is session:
-                _sessions.pop(guild_id, None)
+        if session._stop_task is None:
+            session._stop_task = asyncio.create_task(session.stop())
+
+            def release_session(task: asyncio.Task) -> None:
+                # Retrieve an exception even when the caller itself was cancelled.
+                if not task.cancelled():
+                    task.exception()
+                if _sessions.get(guild_id) is session:
+                    _sessions.pop(guild_id, None)
+                session._stop_task = None
+
+            session._stop_task.add_done_callback(release_session)
+        return await asyncio.shield(session._stop_task)
     return None
 
 

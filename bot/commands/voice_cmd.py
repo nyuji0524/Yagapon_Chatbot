@@ -81,7 +81,8 @@ def register(bot):
             if session.recording_sink:
                 session.recording_sink.mark("leave_failed", error=type(exc).__name__)
             log.exception("Voice leave failed for guild %s", ctx.guild_id)
-            await ctx.channel.send(
+            destination = ctx.channel.send if has_audio else ctx.followup.send
+            await destination(
                 "退出処理中にエラーが発生したぽん。録音データはサーバーに保管してあるので、管理者が復旧できるぽん。",
                 silent=True,
             )
@@ -89,7 +90,7 @@ def register(bot):
 
         if not minutes:
             session.mark_delivered()
-            await ctx.channel.send("退出したぽん！👋", silent=True)
+            await ctx.followup.send("退出したぽん！👋", silent=True)
             return
 
         # まずGoogle Docsに全文保存

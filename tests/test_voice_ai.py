@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from bot import voice
 from bot.commands.minutes import _generate_minutes_from_file
 from bot.voice import VoiceMode, VoiceSession
 
@@ -59,6 +60,47 @@ async def test_stop_is_idempotent_for_concurrent_leave_paths():
 
     assert await asyncio.gather(session.stop(), session.stop()) == ["done", "done"]
     session._stop_once.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_leave_releases_guild_session_for_retry():
+    session = VoiceSession(SimpleNamespace(), 123, SimpleNamespace(), VoiceMode.LISTEN)
+    session._stop_once = AsyncMock(side_effect=RuntimeError("Gemini unavailable"))
+    voice._sessions[123] = session
+
+    with pytest.raises(RuntimeError, match="Gemini unavailable"):
+        await voice.leave_voice(123)
+    await asyncio.sleep(0)
+
+    assert voice.get_session(123) is None
+    assert session._stop_completed is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_leave_caller_does_not_orphan_session():
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    session = VoiceSession(SimpleNamespace(), 124, SimpleNamespace(), VoiceMode.CHAT)
+
+    async def slow_stop():
+        started.set()
+        await finish.wait()
+        return None
+
+    session._stop_once = AsyncMock(side_effect=slow_stop)
+    voice._sessions[124] = session
+    caller = asyncio.create_task(voice.leave_voice(124))
+    await started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    stop_task = session._stop_task
+    finish.set()
+    await stop_task
+    await asyncio.sleep(0)
+
+    assert voice.get_session(124) is None
 
 
 @pytest.mark.asyncio
