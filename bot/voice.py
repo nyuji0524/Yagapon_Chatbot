@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 from enum import Enum
+from pathlib import Path
 
 import discord
 from google import genai
@@ -56,6 +57,7 @@ class VoiceSession:
         self._stop_error: BaseException | None = None
         self._delivery_claimed = False
         self._transcription_failed = False
+        self._transcript_path: Path | None = None
         self._speaker_labels: dict[int, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
@@ -229,7 +231,7 @@ class VoiceSession:
                     continue
                 self._last_audio_len[user_id] = next_offsets[user_id]
                 if text.strip():
-                    self.transcript.append(f"[{name}]: {text}")
+                    await self._append_transcript(f"[{name}]: {text}")
                     log.info(f"Transcribed: [{name}]: {text[:50]}...")
             return
 
@@ -239,7 +241,7 @@ class VoiceSession:
             transcript_text, response = result
             # 議事録用に文字起こしを蓄積
             if transcript_text:
-                self.transcript.append(transcript_text)
+                await self._append_transcript(transcript_text)
             if response:
                 await self.speak(response)
                 self._conversation_history.append({"role": "assistant", "text": response})
@@ -434,17 +436,63 @@ class VoiceSession:
         self._delivery_claimed = True
         return True
 
-    def mark_delivered(self, *, drive_url: str | None = None) -> None:
+    @property
+    def transcript_text(self) -> str:
+        return "\n".join(self.transcript)
+
+    @property
+    def transcript_path(self) -> Path | None:
+        return self._transcript_path
+
+    async def _append_transcript(self, text: str) -> None:
+        self.transcript.append(text)
+        await self._persist_transcript()
+
+    async def _persist_transcript(self) -> Path | None:
+        if not self.recording_sink or not self.transcript:
+            return self._transcript_path
+        self._transcript_path = await asyncio.to_thread(
+            self.recording_sink.save_transcript,
+            self.transcript_text,
+        )
+        return self._transcript_path
+
+    def mark_delivered(
+        self,
+        *,
+        drive_url: str | None = None,
+        transcript_url: str | None = None,
+    ) -> None:
         if self.recording_sink:
-            if self._transcription_failed or self.recording_sink.limit_reached:
+            transcript_saved = bool(self._transcript_path and self._transcript_path.exists())
+            has_recording = self.recording_sink.total_bytes > 0
+            if (
+                self._transcription_failed
+                or self.recording_sink.limit_reached
+                or (has_recording and not transcript_saved)
+            ):
                 self.recording_sink.mark(
                     "delivered_recording_retained",
                     drive_url=drive_url or "",
+                    transcript_url=transcript_url or "",
+                    transcript_path=str(self._transcript_path or ""),
                     transcription_failed=self._transcription_failed,
                     storage_limit_reached=self.recording_sink.limit_reached,
+                    transcript_saved=transcript_saved,
                 )
             else:
-                self.recording_sink.mark("delivered", drive_url=drive_url or "")
+                self.recording_sink.mark(
+                    "delivered_audio_deleted",
+                    drive_url=drive_url or "",
+                    transcript_url=transcript_url or "",
+                    transcript_path=str(self._transcript_path or ""),
+                )
+                deleted = self.recording_sink.delete_audio()
+                log.info(
+                    "Deleted raw recording after transcript preservation session=%s files=%s",
+                    self.recording_sink.session_dir.name,
+                    deleted,
+                )
 
     async def _stop_once(self) -> str | None:
         self.is_active = False
@@ -470,6 +518,7 @@ class VoiceSession:
 
         if self.recording_sink:
             await self._drain_recording()
+            await self._persist_transcript()
 
         if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
             minutes = await self._generate_minutes()
@@ -501,7 +550,7 @@ class VoiceSession:
                 self._last_audio_len[user_id] = next_offset
                 progressed = True
                 if text.strip():
-                    self.transcript.append(f"[{speaker}]: {text}")
+                    await self._append_transcript(f"[{speaker}]: {text}")
             if not progressed:
                 self._transcription_failed = True
                 self.recording_sink.mark("transcription_failed")

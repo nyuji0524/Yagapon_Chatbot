@@ -111,6 +111,17 @@ async def upload_minutes(config, guild_id: int, minutes: str, channel_name: str)
     return await upload_to_drive(folder_url, f"議事録_{channel_name}_{now}", minutes)
 
 
+async def upload_transcript(config, guild_id: int, transcript: str, channel_name: str) -> str | None:
+    """Store the verbatim transcript as a separate document from the minutes."""
+    if not transcript.strip():
+        return None
+    folder_url = config.get_drive_folder(guild_id)
+    if not folder_url:
+        return None
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
+    return await upload_to_drive(folder_url, f"文字起こし_{channel_name}_{now}", transcript)
+
+
 async def upload_report(config, guild_id: int, report: str, report_type: str) -> str | None:
     folder_url = config.get_drive_folder(guild_id)
     if not folder_url:

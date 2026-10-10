@@ -1,9 +1,9 @@
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bot.gdrive import DriveWriter, _extract_folder_id
+from bot.gdrive import DriveWriter, _extract_folder_id, upload_transcript
 from bot.google_credentials import load_google_credentials
 
 
@@ -19,6 +19,22 @@ def execute_result(value=None, error: Exception | None = None):
 def test_extract_folder_id():
     assert _extract_folder_id("https://drive.google.com/drive/folders/folder_123") == "folder_123"
     assert _extract_folder_id("https://example.com/no-folder") is None
+
+
+@pytest.mark.asyncio
+async def test_transcript_is_uploaded_as_a_separate_document():
+    config = MagicMock()
+    config.get_drive_folder.return_value = "https://drive.google.com/drive/folders/folder_123"
+    uploader = AsyncMock(return_value="https://docs.example/transcript")
+
+    with patch("bot.gdrive.upload_to_drive", uploader):
+        result = await upload_transcript(config, 1, "[Speaker 1]: 発言", "全体会議")
+
+    assert result == "https://docs.example/transcript"
+    args = uploader.await_args.args
+    assert args[0] == "https://drive.google.com/drive/folders/folder_123"
+    assert args[1].startswith("文字起こし_全体会議_")
+    assert args[2] == "[Speaker 1]: 発言"
 
 
 def test_drive_writer_creates_document_and_inserts_content():

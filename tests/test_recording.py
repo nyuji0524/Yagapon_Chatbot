@@ -73,3 +73,37 @@ def test_cleanup_only_removes_expired_delivered_recordings(tmp_path, monkeypatch
     assert cleanup_old_recordings(retention_days=7) == 1
     assert not delivered.exists()
     assert failed.exists()
+
+
+def test_transcript_is_archived_separately_before_raw_audio_deletion(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    session_dir = tmp_path / "recordings" / "1" / "session-1"
+    sink = PersistentPCMSink(1, "全体会議", "listen", session_dir=session_dir)
+    sink.write(b"raw-audio", SimpleNamespace(id=42))
+
+    transcript_path = sink.save_transcript("[Speaker 1]: 発言です")
+    deleted = sink.delete_audio()
+
+    assert deleted == 1
+    assert transcript_path == tmp_path / "transcripts" / "1" / "session-1.md"
+    assert "[Speaker 1]: 発言です" in transcript_path.read_text(encoding="utf-8")
+    assert list(session_dir.glob("user-*.pcm")) == []
+
+
+def test_cleanup_of_recording_metadata_keeps_separate_transcript(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    old = datetime.now(timezone.utc) - timedelta(days=8)
+    session = tmp_path / "recordings" / "1" / "session-1"
+    transcript = tmp_path / "transcripts" / "1" / "session-1.md"
+    session.mkdir(parents=True)
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("文字起こし", encoding="utf-8")
+    (session / "metadata.json").write_text(
+        json.dumps({"status": "delivered_audio_deleted", "updated_at": old.isoformat()})
+    )
+
+    assert cleanup_old_recordings(retention_days=7) == 1
+    assert not session.exists()
+    assert transcript.read_text(encoding="utf-8") == "文字起こし"
