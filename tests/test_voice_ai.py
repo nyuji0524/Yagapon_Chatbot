@@ -141,6 +141,15 @@ def test_failed_transcription_recording_is_retained_after_notification():
     )
 
 
+def test_listen_mode_uses_five_minute_large_chunks():
+    listen = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    chat = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.CHAT)
+
+    assert voice.REALTIME_INTERVAL_LISTEN == 300
+    assert listen._transcription_chunk_bytes() == 50 * 1024 * 1024
+    assert chat._transcription_chunk_bytes() == 5 * 1024 * 1024
+
+
 @pytest.mark.asyncio
 async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypatch):
     generated = AsyncMock(return_value=SimpleNamespace(text="# 会議"))

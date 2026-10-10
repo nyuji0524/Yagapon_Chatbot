@@ -3,11 +3,19 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from bot import transcription
 from bot.transcription import transcribe_audio
 
 
 class RateLimitError(RuntimeError):
     code = 429
+
+
+@pytest.fixture(autouse=True)
+def reset_dedicated_transcription_circuit():
+    transcription._dedicated_transcription_rate_limiter.reset()
+    yield
+    transcription._dedicated_transcription_rate_limiter.reset()
 
 
 @pytest.mark.asyncio
@@ -59,20 +67,19 @@ async def test_transcription_deletes_upload_when_generation_fails():
 
 
 @pytest.mark.asyncio
-async def test_transcription_retries_429_without_reuploading(monkeypatch):
+async def test_transcription_falls_back_on_429_without_reuploading(monkeypatch):
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
-    create = AsyncMock(
-        side_effect=[
-            RateLimitError("Too Many Requests"),
-            SimpleNamespace(output_text="Speaker 1: 復旧しました"),
-        ]
+    create = AsyncMock(side_effect=RateLimitError("Too Many Requests"))
+    fallback = AsyncMock(
+        return_value=SimpleNamespace(text="Speaker 1: 復旧しました")
     )
     client = SimpleNamespace(
         files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
-        aio=SimpleNamespace(interactions=SimpleNamespace(create=create)),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=create),
+            models=SimpleNamespace(generate_content=fallback),
+        ),
     )
-    sleep = AsyncMock()
-    monkeypatch.setattr("bot.ai_retry.asyncio.sleep", sleep)
 
     result = await transcribe_audio(
         client,
@@ -82,6 +89,63 @@ async def test_transcription_retries_429_without_reuploading(monkeypatch):
     )
 
     assert result == "Speaker 1: 復旧しました"
-    assert create.await_count == 2
+    create.assert_awaited_once()
+    fallback.assert_awaited_once()
+    assert fallback.await_args.kwargs["model"] == "gemini-3.8-flash"
+    assert transcription._dedicated_transcription_rate_limiter.remaining() > 0
     client.files.upload.assert_called_once()
     client.files.delete.assert_called_once_with(name="files/test")
+
+
+@pytest.mark.asyncio
+async def test_transcription_skips_dedicated_during_shared_cooldown():
+    transcription._dedicated_transcription_rate_limiter.trip()
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    create = AsyncMock()
+    fallback = AsyncMock(return_value=SimpleNamespace(text="フォールバック"))
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=create),
+            models=SimpleNamespace(generate_content=fallback),
+        ),
+    )
+
+    result = await transcribe_audio(
+        client,
+        b"RIFFtest",
+        mime_type="audio/wav",
+        display_name="meeting.wav",
+    )
+
+    assert result == "フォールバック"
+    create.assert_not_awaited()
+    fallback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_transcription_can_reserve_dedicated_quota_for_listen_mode():
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    create = AsyncMock()
+    fallback = AsyncMock(return_value=SimpleNamespace(text="短時間モード"))
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=create),
+            models=SimpleNamespace(generate_content=fallback),
+        ),
+    )
+
+    result = await transcribe_audio(
+        client,
+        b"RIFFtest",
+        mime_type="audio/wav",
+        display_name="chat.wav",
+        prefer_dedicated=False,
+        custom_vocabulary=["矢上祭"],
+    )
+
+    assert result == "短時間モード"
+    create.assert_not_awaited()
+    prompt = fallback.await_args.kwargs["contents"][0]
+    assert "矢上祭" in prompt

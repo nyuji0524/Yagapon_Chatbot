@@ -7,7 +7,9 @@ observable, bounded place instead.
 """
 
 import asyncio
+import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -22,6 +24,46 @@ T = TypeVar("T")
 class RateLimitExceeded(RuntimeError):
     """Raised after the configured 429 retries have been exhausted."""
 
+    def __init__(self, message: str, *, retry_after: float | None = None, diagnostic: str = ""):
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.diagnostic = diagnostic
+
+
+class RateLimitCircuitBreaker:
+    """Process-wide backoff for APIs whose quota is shared by all sessions."""
+
+    def __init__(
+        self,
+        *,
+        base_cooldown: float = 300.0,
+        max_cooldown: float = 1800.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.base_cooldown = base_cooldown
+        self.max_cooldown = max_cooldown
+        self._clock = clock
+        self._blocked_until = 0.0
+        self._failure_count = 0
+
+    @property
+    def failure_count(self) -> int:
+        return self._failure_count
+
+    def remaining(self) -> float:
+        return max(0.0, self._blocked_until - self._clock())
+
+    def trip(self, *, retry_after: float | None = None) -> float:
+        self._failure_count += 1
+        exponential = self.base_cooldown * (2 ** (self._failure_count - 1))
+        cooldown = min(self.max_cooldown, max(exponential, retry_after or 0.0))
+        self._blocked_until = self._clock() + cooldown
+        return cooldown
+
+    def reset(self) -> None:
+        self._blocked_until = 0.0
+        self._failure_count = 0
+
 
 def new_genai_client(api_key: str):
     """Create a client whose retries are controlled by :func:`retry_rate_limit`."""
@@ -29,30 +71,98 @@ def new_genai_client(api_key: str):
         api_key=api_key,
         http_options=types.HttpOptions(
             timeout=120_000,
-            retry_options=types.HttpRetryOptions(attempts=1),
+            # Interactions uses a separate generated SDK. In google-genai 2.29,
+            # attempts=1 still means one *retry*, and a server Retry-After of
+            # 180 seconds can collide with our outer timeout. Exclude 429 from
+            # that layer and handle it explicitly below. Keep one retry for
+            # short-lived network/server failures.
+            retry_options=types.HttpRetryOptions(
+                attempts=1,
+                http_status_codes=[408, 500, 502, 503, 504],
+            ),
         ),
     )
 
 
 def is_rate_limit_error(exc: BaseException) -> bool:
-    code = getattr(exc, "code", None)
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
     if code is None:
-        response = getattr(exc, "response", None)
+        response = getattr(exc, "response", None) or getattr(exc, "raw_response", None)
         code = getattr(response, "status_code", None)
     message = str(exc).lower()
     return code == 429 or "too many requests" in message or "resource_exhausted" in message
 
 
 def _retry_after(exc: BaseException) -> float | None:
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    if not headers:
-        return None
-    value = headers.get("retry-after") or headers.get("Retry-After")
+    response = getattr(exc, "response", None) or getattr(exc, "raw_response", None)
+    headers = getattr(exc, "headers", None) or getattr(response, "headers", None)
+    value = (headers.get("retry-after") or headers.get("Retry-After")) if headers else None
     try:
         return max(0.0, float(value))
     except (TypeError, ValueError):
-        return None
+        pass
+
+    payload = _error_payload(exc)
+    details = payload.get("error", {}).get("details", []) if isinstance(payload, dict) else []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        retry_delay = detail.get("retryDelay")
+        if isinstance(retry_delay, str) and retry_delay.endswith("s"):
+            try:
+                return max(0.0, float(retry_delay[:-1]))
+            except ValueError:
+                continue
+    return None
+
+
+def _error_payload(exc: BaseException) -> dict:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        return body
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+    data = getattr(exc, "response_json", None)
+    return data if isinstance(data, dict) else {}
+
+
+def rate_limit_diagnostic(exc: BaseException) -> str:
+    """Extract quota information without logging credentials or request bodies."""
+    payload = _error_payload(exc)
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    parts: list[str] = []
+    status = error.get("status")
+    message = error.get("message")
+    if status:
+        parts.append(f"status={status}")
+    if message:
+        parts.append(f"message={str(message)[:500]}")
+    for detail in error.get("details", []):
+        if not isinstance(detail, dict):
+            continue
+        retry_delay = detail.get("retryDelay")
+        if retry_delay:
+            parts.append(f"retry_delay={retry_delay}")
+        for violation in detail.get("violations", []):
+            if not isinstance(violation, dict):
+                continue
+            for key in ("quotaMetric", "quotaId", "quotaValue"):
+                if violation.get(key):
+                    parts.append(f"{key}={violation[key]}")
+            dimensions = violation.get("quotaDimensions")
+            if isinstance(dimensions, dict):
+                safe_dimensions = ",".join(f"{key}:{value}" for key, value in sorted(dimensions.items()))
+                if safe_dimensions:
+                    parts.append(f"dimensions={safe_dimensions}")
+    if not parts:
+        status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        parts.append(f"status_code={status_code or 'unknown'}")
+        parts.append(f"message={str(exc)[:500]}")
+    return " ".join(parts)
 
 
 async def retry_rate_limit(
@@ -75,8 +185,18 @@ async def retry_rate_limit(
             if not is_rate_limit_error(exc):
                 raise
             if attempt >= attempts:
+                retry_after = _retry_after(exc)
+                diagnostic = rate_limit_diagnostic(exc)
+                log.error(
+                    "Rate limit exhausted operation=%s attempts=%s diagnostic=%s",
+                    operation_name,
+                    attempts,
+                    diagnostic,
+                )
                 raise RateLimitExceeded(
-                    f"{operation_name} remained rate limited after {attempts} attempts"
+                    f"{operation_name} remained rate limited after {attempts} attempts",
+                    retry_after=retry_after,
+                    diagnostic=diagnostic,
                 ) from exc
             delay = _retry_after(exc)
             if delay is None:

@@ -5,7 +5,6 @@ import io
 import logging
 import os
 import tempfile
-import time
 from enum import Enum
 
 import discord
@@ -13,7 +12,7 @@ from google import genai
 from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, response_model
-from bot.ai_retry import RateLimitExceeded, new_genai_client
+from bot.ai_retry import RateLimitCircuitBreaker, RateLimitExceeded, new_genai_client
 from bot.minutes_generation import generate_minutes
 from bot.recording import PersistentPCMSink
 from bot.transcription import transcribe_audio
@@ -23,9 +22,11 @@ log = logging.getLogger("yagapon.voice")
 # リアルタイム処理の間隔（秒）
 REALTIME_INTERVAL_CHAT = 5  # chatモード: 短い間隔で即応答
 REALTIME_INTERVAL_MEETING = 15  # meetingモード: 会議の邪魔にならないよう長め
-REALTIME_INTERVAL_LISTEN = 30  # listenモード: 文字起こし蓄積用
-TRANSCRIPTION_CHUNK_BYTES = 5 * 1024 * 1024
+REALTIME_INTERVAL_LISTEN = 300  # listenモード: 専用STTの日次リクエスト枠を温存
+TRANSCRIPTION_CHUNK_BYTES_REALTIME = 5 * 1024 * 1024
+TRANSCRIPTION_CHUNK_BYTES_LISTEN = 50 * 1024 * 1024
 TRANSCRIPTION_TIMEOUT_SECONDS = 180
+_transcription_rate_limiter = RateLimitCircuitBreaker()
 
 
 class VoiceMode(Enum):
@@ -55,8 +56,6 @@ class VoiceSession:
         self._stop_error: BaseException | None = None
         self._delivery_claimed = False
         self._transcription_failed = False
-        self._transcription_backoff_until = 0.0
-        self._transcription_rate_limit_failures = 0
         self._speaker_labels: dict[int, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
@@ -198,7 +197,7 @@ class VoiceSession:
             current_audio = await asyncio.to_thread(
                 self.recording_sink.read_chunks,
                 self._last_audio_len,
-                chunk_bytes=TRANSCRIPTION_CHUNK_BYTES,
+                chunk_bytes=self._transcription_chunk_bytes(),
             )
         except Exception as e:
             log.error(f"Sink read error: {e}")
@@ -489,7 +488,7 @@ class VoiceSession:
             chunks = await asyncio.to_thread(
                 self.recording_sink.read_chunks,
                 self._last_audio_len,
-                chunk_bytes=TRANSCRIPTION_CHUNK_BYTES,
+                chunk_bytes=self._transcription_chunk_bytes(),
             )
             if not chunks:
                 return
@@ -526,12 +525,12 @@ class VoiceSession:
         if len(audio_bytes) < 1000:  # ほぼ無音
             return ""
 
-        now = time.monotonic()
-        if now < self._transcription_backoff_until:
-            log.info(
+        cooldown_remaining = _transcription_rate_limiter.remaining()
+        if cooldown_remaining > 0:
+            log.debug(
                 "Skipping transcription during rate-limit cooldown speaker=%s remaining=%.1fs",
                 speaker_name,
-                self._transcription_backoff_until - now,
+                cooldown_remaining,
             )
             return None
 
@@ -553,26 +552,32 @@ class VoiceSession:
                     mime_type="audio/wav",
                     display_name=f"vc-{speaker_name}",
                     custom_vocabulary=vocabulary,
+                    # Short interactive modes can create many requests. Reserve
+                    # the dedicated STT quota for long-form listen/minutes mode.
+                    prefer_dedicated=self.mode == VoiceMode.LISTEN,
                 ),
                 timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
             )
-            self._transcription_rate_limit_failures = 0
-            self._transcription_backoff_until = 0.0
+            _transcription_rate_limiter.reset()
             return text
-        except RateLimitExceeded:
-            self._transcription_rate_limit_failures += 1
-            cooldown = min(1800.0, 300.0 * (2 ** (self._transcription_rate_limit_failures - 1)))
-            self._transcription_backoff_until = time.monotonic() + cooldown
+        except RateLimitExceeded as exc:
+            cooldown = _transcription_rate_limiter.trip(retry_after=exc.retry_after)
             log.warning(
-                "Transcription rate limit exhausted speaker=%s cooldown=%.0fs failures=%s",
+                "Transcription rate limit exhausted speaker=%s cooldown=%.0fs failures=%s diagnostic=%s",
                 speaker_name,
                 cooldown,
-                self._transcription_rate_limit_failures,
+                _transcription_rate_limiter.failure_count,
+                exc.diagnostic,
             )
             return None
         except Exception as e:
             log.error("Transcription error for %s: %r", speaker_name, e)
             return None
+
+    def _transcription_chunk_bytes(self) -> int:
+        if self.mode == VoiceMode.LISTEN:
+            return TRANSCRIPTION_CHUNK_BYTES_LISTEN
+        return TRANSCRIPTION_CHUNK_BYTES_REALTIME
 
     async def _generate_minutes(self) -> str:
         """蓄積済みの文字起こしから議事録を生成（長時間でも対応可能）"""
