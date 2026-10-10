@@ -8,9 +8,10 @@ import logging
 import os
 
 import discord
-from google import genai
 
-from bot.ai_models import fast_model, generation_config, log_usage, response_model
+from bot.ai_models import fast_model, generation_config, log_usage
+from bot.ai_retry import new_genai_client
+from bot.minutes_generation import generate_minutes
 from bot.transcription import transcribe_audio
 
 log = logging.getLogger("yagapon.minutes")
@@ -117,7 +118,7 @@ async def _generate_minutes_from_file(
     title: str,
 ) -> str | None:
     """専用STTで文字起こしし、別モデルで構造化議事録を生成。"""
-    client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+    client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
 
     try:
         try:
@@ -148,37 +149,12 @@ async def _generate_minutes_from_file(
         if not transcript:
             return None
 
-        instruction = (
-            "以下の文字起こしから、事実を補わず構造化された議事録を作成してください。\n\n"
-            "## 出力フォーマット\n"
-            f"# {title or '議事録'}\n\n"
-            "## 基本情報\n"
-            "- 日時: （推定できれば）\n"
-            "- 参加者: （文字起こしの話者ラベルを使用）\n\n"
-            "## 議題\n"
-            "- （議論されたトピックを箇条書き）\n\n"
-            "## 議論内容\n"
-            "（話者名付きで議論の流れを記載。重要な発言は引用形式で）\n\n"
-            "## 決定事項\n"
-            "- （決まったこと）\n\n"
-            "## アクションアイテム\n"
-            "- 【担当者】内容（期限）\n\n"
-            "## 注意\n"
-            "- spk_1等の話者ラベルを実名だと推測しない\n"
-            "- 聞き取れない箇所や不明な担当者は不明と記載する\n\n"
+        return await generate_minutes(
+            client,
+            transcript,
+            title=title,
+            glossary_text=glossary_text,
         )
-
-        if glossary_text:
-            instruction += f"## 用語辞書（表記修正の参考）\n{glossary_text}\n\n"
-
-        model = response_model()
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=f"{instruction}\n## 文字起こし\n{transcript}",
-            config=generation_config(model, thinking_level="medium", max_output_tokens=4096),
-        )
-        log_usage(log, "minutes_format", model, response)
-        return response.text
 
     except Exception as e:
         log.error(f"Gemini minutes generation error: {e}")
@@ -187,7 +163,7 @@ async def _generate_minutes_from_file(
 
 async def _summarize(minutes: str) -> str:
     """議事録を要約"""
-    client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+    client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     try:
         model = fast_model()
         response = await client.aio.models.generate_content(

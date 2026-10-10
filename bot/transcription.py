@@ -5,6 +5,7 @@ import io
 import logging
 
 from bot.ai_models import log_usage, transcribe_model
+from bot.ai_retry import retry_rate_limit
 
 log = logging.getLogger("yagapon.transcription")
 
@@ -22,12 +23,18 @@ async def transcribe_audio(
     loop = asyncio.get_running_loop()
     uploaded = None
     try:
-        uploaded = await loop.run_in_executor(
-            None,
-            lambda: client.files.upload(
-                file=io.BytesIO(audio_bytes),
-                config={"mime_type": mime_type, "display_name": display_name},
-            ),
+        async def upload():
+            return await loop.run_in_executor(
+                None,
+                lambda: client.files.upload(
+                    file=io.BytesIO(audio_bytes),
+                    config={"mime_type": mime_type, "display_name": display_name},
+                ),
+            )
+
+        uploaded = await retry_rate_limit(
+            upload,
+            operation_name="transcription_upload",
         )
 
         transcription_options: dict = {"language_codes": ["ja-JP"]}
@@ -40,16 +47,22 @@ async def transcribe_audio(
             # diarizationとcustom_vocabularyはAPI上併用できない。
             transcription_options["custom_vocabulary"] = custom_vocabulary[:100]
 
-        response = await client.aio.interactions.create(
-            model=transcribe_model(),
-            input=[
-                {
-                    "type": "audio",
-                    "uri": uploaded.uri,
-                    "mime_type": mime_type,
-                }
-            ],
-            generation_config={"transcription_config": transcription_options},
+        async def create_transcription():
+            return await client.aio.interactions.create(
+                model=transcribe_model(),
+                input=[
+                    {
+                        "type": "audio",
+                        "uri": uploaded.uri,
+                        "mime_type": mime_type,
+                    }
+                ],
+                generation_config={"transcription_config": transcription_options},
+            )
+
+        response = await retry_rate_limit(
+            create_transcription,
+            operation_name="transcription_create",
         )
         log_usage(log, "transcription", transcribe_model(), response)
         return (response.output_text or "").strip()

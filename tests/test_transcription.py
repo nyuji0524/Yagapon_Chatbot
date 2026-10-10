@@ -6,6 +6,10 @@ import pytest
 from bot.transcription import transcribe_audio
 
 
+class RateLimitError(RuntimeError):
+    code = 429
+
+
 @pytest.mark.asyncio
 async def test_transcription_uses_dedicated_model_and_deletes_upload(monkeypatch):
     monkeypatch.setenv("YAGAPON_TRANSCRIBE_MODEL", "gemini-3.5-transcribe")
@@ -51,4 +55,33 @@ async def test_transcription_deletes_upload_when_generation_fails():
             display_name="meeting.wav",
         )
 
+    client.files.delete.assert_called_once_with(name="files/test")
+
+
+@pytest.mark.asyncio
+async def test_transcription_retries_429_without_reuploading(monkeypatch):
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    create = AsyncMock(
+        side_effect=[
+            RateLimitError("Too Many Requests"),
+            SimpleNamespace(output_text="Speaker 1: 復旧しました"),
+        ]
+    )
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(interactions=SimpleNamespace(create=create)),
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("bot.ai_retry.asyncio.sleep", sleep)
+
+    result = await transcribe_audio(
+        client,
+        b"RIFFtest",
+        mime_type="audio/wav",
+        display_name="meeting.wav",
+    )
+
+    assert result == "Speaker 1: 復旧しました"
+    assert create.await_count == 2
+    client.files.upload.assert_called_once()
     client.files.delete.assert_called_once_with(name="files/test")

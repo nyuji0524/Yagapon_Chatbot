@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 from enum import Enum
 
 import discord
@@ -12,6 +13,8 @@ from google import genai
 from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, response_model
+from bot.ai_retry import RateLimitExceeded, new_genai_client
+from bot.minutes_generation import generate_minutes
 from bot.recording import PersistentPCMSink
 from bot.transcription import transcribe_audio
 
@@ -52,6 +55,9 @@ class VoiceSession:
         self._stop_error: BaseException | None = None
         self._delivery_claimed = False
         self._transcription_failed = False
+        self._transcription_backoff_until = 0.0
+        self._transcription_rate_limit_failures = 0
+        self._speaker_labels: dict[int, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
         self._last_audio_len: dict[int, int] = {}  # user_id -> 文字起こし済みPCMバイト数
@@ -61,6 +67,12 @@ class VoiceSession:
         """VCテキストチャットに投稿された資料を参考資料として追加"""
         self._reference_docs.append(f"[{source}]\n{content}")
         log.info(f"Reference doc added: {source} ({len(content)} chars)")
+
+    def _speaker_label(self, user_id: int) -> str:
+        """Return a stable anonymous label for this recording session."""
+        if user_id not in self._speaker_labels:
+            self._speaker_labels[user_id] = f"Speaker {len(self._speaker_labels) + 1}"
+        return self._speaker_labels[user_id]
 
     async def add_reference_from_message(self, message: discord.Message):
         """Discordメッセージから参考資料を収集（テキスト+添付ファイル）"""
@@ -202,9 +214,8 @@ class VoiceSession:
             if len(audio_bytes) < 1000:
                 self._last_audio_len[user_id] = next_offset
                 continue
-            member = self.channel.guild.get_member(user_id)
-            name = member.display_name if member else f"User {user_id}"
-            audio_chunks[user_id] = (name, audio_bytes)
+            speaker = self._speaker_label(user_id)
+            audio_chunks[user_id] = (speaker, audio_bytes)
             next_offsets[user_id] = next_offset
 
         if not audio_chunks:
@@ -484,15 +495,14 @@ class VoiceSession:
                 return
             progressed = False
             for user_id, (audio_bytes, next_offset) in chunks.items():
-                member = self.channel.guild.get_member(user_id)
-                name = member.display_name if member else f"User {user_id}"
-                text = await self._transcribe_audio(audio_bytes, name)
+                speaker = self._speaker_label(user_id)
+                text = await self._transcribe_audio(audio_bytes, speaker)
                 if text is None:
                     continue
                 self._last_audio_len[user_id] = next_offset
                 progressed = True
                 if text.strip():
-                    self.transcript.append(f"[{name}]: {text}")
+                    self.transcript.append(f"[{speaker}]: {text}")
             if not progressed:
                 self._transcription_failed = True
                 self.recording_sink.mark("transcription_failed")
@@ -516,18 +526,27 @@ class VoiceSession:
         if len(audio_bytes) < 1000:  # ほぼ無音
             return ""
 
+        now = time.monotonic()
+        if now < self._transcription_backoff_until:
+            log.info(
+                "Skipping transcription during rate-limit cooldown speaker=%s remaining=%.1fs",
+                speaker_name,
+                self._transcription_backoff_until - now,
+            )
+            return None
+
         # WAVヘッダーがなければ付与（sinkからの生PCMデータ対応）
         if not audio_bytes[:4] == b"RIFF":
             audio_bytes = self._pcm_to_wav(audio_bytes)
 
-        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
 
         try:
             vocabulary = []
             if self.bot and hasattr(self.bot, "config"):
                 vocabulary = list(self.bot.config.get_glossary(self.guild_id).keys())
 
-            return await asyncio.wait_for(
+            text = await asyncio.wait_for(
                 transcribe_audio(
                     client,
                     audio_bytes,
@@ -537,8 +556,22 @@ class VoiceSession:
                 ),
                 timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
             )
+            self._transcription_rate_limit_failures = 0
+            self._transcription_backoff_until = 0.0
+            return text
+        except RateLimitExceeded:
+            self._transcription_rate_limit_failures += 1
+            cooldown = min(1800.0, 300.0 * (2 ** (self._transcription_rate_limit_failures - 1)))
+            self._transcription_backoff_until = time.monotonic() + cooldown
+            log.warning(
+                "Transcription rate limit exhausted speaker=%s cooldown=%.0fs failures=%s",
+                speaker_name,
+                cooldown,
+                self._transcription_rate_limit_failures,
+            )
+            return None
         except Exception as e:
-            log.error(f"Transcription error for {speaker_name}: {e}")
+            log.error("Transcription error for %s: %r", speaker_name, e)
             return None
 
     async def _generate_minutes(self) -> str:
@@ -556,36 +589,12 @@ class VoiceSession:
         if self.bot and hasattr(self.bot, "config"):
             glossary_text = self.bot.config.get_glossary_text(self.guild_id)
 
-        glossary_hint = ""
-        if glossary_text:
-            glossary_hint = f"\n\n【用語辞書】（正しい表記に修正して使用してください）\n{glossary_text}"
-
-        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-        model = response_model()
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=model,
-                contents=(
-                    "以下の会議の記録から、構造化された議事録を作成してください。\n"
-                    "形式:\n"
-                    "## 議事録\n"
-                    "- **日時**: \n"
-                    "- **参加者**: \n"
-                    "### 議題\n"
-                    "### 議論内容\n"
-                    "### 決定事項\n"
-                    "### アクションアイテム\n"
-                    "### 名言・印象的な発言\n\n"
-                    "話者名は記録通りに使用してください。"
-                    f"{glossary_hint}\n\n"
-                    f"=== 会議記録 ===\n{transcript_text}"
-                ),
-                config=generation_config(model, thinking_level="medium", max_output_tokens=4096),
-            ),
-            timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
+        client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
+        return await generate_minutes(
+            client,
+            transcript_text,
+            glossary_text=glossary_text,
         )
-        log_usage(log, "voice_minutes", model, response)
-        return response.text or transcript_text
 
     async def speak(self, text: str):
         """TTSで発話"""

@@ -122,7 +122,7 @@ async def test_drain_recording_processes_bounded_chunks_until_caught_up():
     await session._drain_recording()
 
     assert session._last_audio_len == {42: 11}
-    assert session.transcript == ["[user-42]: 最初", "[user-42]: 次"]
+    assert session.transcript == ["[Speaker 1]: 最初", "[Speaker 1]: 次"]
     assert session.recording_sink.read_chunks.call_count == 3
 
 
@@ -146,7 +146,7 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
     generated = AsyncMock(return_value=SimpleNamespace(text="# 会議"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
     transcribe = AsyncMock(return_value="spk_1: 提案します")
-    monkeypatch.setattr("bot.commands.minutes.genai.Client", lambda **kwargs: client)
+    monkeypatch.setattr("bot.commands.minutes.new_genai_client", lambda _api_key: client)
     monkeypatch.setattr("bot.commands.minutes.transcribe_audio", transcribe)
 
     result = await _generate_minutes_from_file(
@@ -160,8 +160,33 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
     assert result == "# 会議"
     assert transcribe.await_args.kwargs["diarization"] is True
     assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
-    assert "spk_1: 提案します" in generated.await_args.kwargs["contents"]
-    assert "実名だと推測しない" in generated.await_args.kwargs["contents"]
+    assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
+    assert "実名を推測しない" in generated.await_args.kwargs["contents"]
+
+
+@pytest.mark.asyncio
+async def test_voice_assigns_stable_anonymous_speaker_labels():
+    guild = SimpleNamespace(get_member=lambda _user_id: None)
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(guild=guild), VoiceMode.LISTEN)
+    session.recording_sink = SimpleNamespace(
+        read_chunks=Mock(
+            side_effect=[
+                {20: (b"first-b", 7), 10: (b"first-a", 7)},
+                {10: (b"second-a", 15)},
+                {},
+            ]
+        ),
+        mark=Mock(),
+    )
+    session._transcribe_audio = AsyncMock(side_effect=["Bです", "Aです", "Aの続き"])
+
+    await session._drain_recording()
+
+    assert session.transcript == [
+        "[Speaker 1]: Bです",
+        "[Speaker 2]: Aです",
+        "[Speaker 2]: Aの続き",
+    ]
 
 
 @pytest.mark.asyncio
@@ -169,7 +194,7 @@ async def test_uploaded_minutes_retries_without_diarization(monkeypatch):
     generated = AsyncMock(return_value=SimpleNamespace(text="# 会議"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
     transcribe = AsyncMock(side_effect=[RuntimeError("diarization limit"), "文字起こし"])
-    monkeypatch.setattr("bot.commands.minutes.genai.Client", lambda **kwargs: client)
+    monkeypatch.setattr("bot.commands.minutes.new_genai_client", lambda _api_key: client)
     monkeypatch.setattr("bot.commands.minutes.transcribe_audio", transcribe)
 
     result = await _generate_minutes_from_file(
@@ -189,7 +214,7 @@ async def test_uploaded_minutes_retries_without_diarization(monkeypatch):
 async def test_uploaded_minutes_does_not_retry_quota_errors(monkeypatch):
     client = SimpleNamespace()
     transcribe = AsyncMock(side_effect=RuntimeError("quota exceeded"))
-    monkeypatch.setattr("bot.commands.minutes.genai.Client", lambda **kwargs: client)
+    monkeypatch.setattr("bot.commands.minutes.new_genai_client", lambda _api_key: client)
     monkeypatch.setattr("bot.commands.minutes.transcribe_audio", transcribe)
 
     result = await _generate_minutes_from_file(
