@@ -13,6 +13,7 @@ from bot.authorization import require_guild_admin
 log = logging.getLogger("yagapon.setup")
 
 BUREAUS = [
+    ("実行委員会全体", "🏮"),
     ("IT局", "🩵"), ("総務局", "🩶"), ("装飾局", "💛"), ("ステージ局", "❤️"),
     ("屋外局", "🧡"), ("室内局", "🩵"), ("広報局", "🩷"), ("渉外局", "💜"),
 ]
@@ -55,27 +56,21 @@ class SetupWizard:
 # ====== Step 1: 局選択 ======
 
 class Step1View(View):
-    def __init__(self, wizard: SetupWizard, used_bureaus: set[str]):
+    def __init__(self, wizard: SetupWizard):
         super().__init__(timeout=600)
         self.wizard = wizard
         options = []
         for name, emoji in BUREAUS:
-            taken = name in used_bureaus
             options.append(discord.SelectOption(
                 label=name, emoji=emoji,
-                description="⛔ 使用中" if taken else f"{name}として登録",
+                description=f"{name}としてこのサーバーを登録",
             ))
         select = Select(placeholder="局を選んでねぽん", min_values=1, max_values=1, options=options)
         select.callback = self._select
-        self._used = used_bureaus
         self.add_item(select)
 
     async def _select(self, interaction: discord.Interaction):
         bureau = interaction.data["values"][0]
-        if bureau in self._used:
-            await interaction.response.send_message(f"❌ 「{bureau}」は使用中だぽん！", ephemeral=True)
-            return
-
         existing = self.wizard.bot.config.get_bureau(self.wizard.guild.id)
         if existing:
             await interaction.response.send_message(
@@ -464,11 +459,6 @@ def register(bot):
             )
             return
 
-        used_bureaus = set()
-        for gid, gdata in bot.config._config.items():
-            if gid != str(ctx.guild_id) and "bureau" in gdata:
-                used_bureaus.add(gdata["bureau"])
-
         # 固定メッセージを作成
         msg = await ctx.respond(
             "**🔧 おしゃべりやがぽん セットアップ**\n準備中...",
@@ -479,5 +469,5 @@ def register(bot):
             msg = await msg.original_response()
 
         wizard = SetupWizard(bot, ctx.guild, msg)
-        view = Step1View(wizard, used_bureaus)
+        view = Step1View(wizard)
         await wizard.update("まずは局を選んでねぽん！", view)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 from dataclasses import dataclass
@@ -63,6 +64,33 @@ def transcript_root() -> Path:
     if configured:
         return Path(configured)
     return recording_root().parent / "transcripts"
+
+
+def save_external_transcript(
+    guild_id: int,
+    session_id: str,
+    channel_name: str,
+    content: str,
+    *,
+    mode: str = "uploaded",
+) -> Path | None:
+    """Atomically archive a non-VC transcript under the same retention contract."""
+    if not content.strip():
+        return None
+    safe_session_id = re.sub(r"[^A-Za-z0-9_.-]", "-", session_id)[:120]
+    destination = transcript_root() / str(guild_id) / f"{safe_session_id}.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    document = (
+        f"# 文字起こし - {channel_name}\n\n"
+        f"- セッション: `{safe_session_id}`\n"
+        f"- モード: `{mode}`\n\n"
+        "---\n\n"
+        f"{content.rstrip()}\n"
+    )
+    temporary = destination.with_suffix(".md.tmp")
+    temporary.write_text(document, encoding="utf-8")
+    os.replace(temporary, destination)
+    return destination
 
 
 class RecordingLimitExceeded(RuntimeError):
@@ -275,21 +303,13 @@ class PersistentPCMSink(Sink):
 
     def save_transcript(self, content: str) -> Path | None:
         """Atomically persist a transcript outside the raw recording lifecycle."""
-        if not content.strip():
-            return None
-        destination = transcript_root() / str(self.guild_id) / f"{self.session_dir.name}.md"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        document = (
-            f"# 文字起こし - {self.channel_name}\n\n"
-            f"- セッション: `{self.session_dir.name}`\n"
-            f"- モード: `{self.mode}`\n\n"
-            "---\n\n"
-            f"{content.rstrip()}\n"
+        return save_external_transcript(
+            self.guild_id,
+            self.session_dir.name,
+            self.channel_name,
+            content,
+            mode=self.mode,
         )
-        temporary = destination.with_suffix(".md.tmp")
-        temporary.write_text(document, encoding="utf-8")
-        os.replace(temporary, destination)
-        return destination
 
     def delete_audio(self) -> int:
         """Delete raw PCM after the transcript has been durably preserved."""

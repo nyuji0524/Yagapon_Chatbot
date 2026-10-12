@@ -4,10 +4,15 @@
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 
 def register(bot):
     @bot.slash_command(name="status", description="現在の設定状況を確認するぽん！")
+    @discord.default_permissions(administrator=True)
     async def status_cmd(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         gid = ctx.guild_id
         bureau = bot.config.get_bureau(gid)
 

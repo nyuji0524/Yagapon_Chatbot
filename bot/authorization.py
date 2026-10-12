@@ -16,6 +16,26 @@ async def require_guild_admin(ctx) -> bool:
     return False
 
 
+async def require_registered_member(ctx, config) -> bool:
+    """Allow guild admins and registered members; keep pre-sync guilds usable."""
+    guild = getattr(ctx, "guild", None)
+    author = getattr(ctx, "author", None)
+    if guild is None or author is None:
+        await ctx.respond("このコマンドは設定済みのDiscordサーバー内で実行してほしいぽん。", ephemeral=True)
+        return False
+    if not config.get_corpus(guild.id):
+        await ctx.respond("先にサーバー管理者が `/setup` を実行してほしいぽん。", ephemeral=True)
+        return False
+    members = config.get_members(guild.id)
+    if members and str(author.id) not in members and not is_guild_admin(ctx):
+        await ctx.respond(
+            "この機能は登録メンバー専用だぽん。管理者に `/member sync` をお願いしてねぽん。",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+
 def can_manage_member(ctx, target) -> bool:
     """Members may manage themselves; only administrators may manage others."""
     author = getattr(ctx, "author", None)

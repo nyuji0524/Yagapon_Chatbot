@@ -265,7 +265,9 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
     assert transcribe.await_args.kwargs["diarization"] is True
     assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
     assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
-    assert "実名を推測しない" in generated.await_args.kwargs["contents"]
+    prompt = generated.await_args.kwargs["contents"]
+    assert "## 話題別まとめ" in prompt
+    assert "声質だけで実名を推測しない" in prompt
 
 
 @pytest.mark.asyncio
@@ -292,6 +294,28 @@ async def test_voice_assigns_stable_anonymous_speaker_labels():
         "[Speaker 2]: Aです",
         "[Speaker 2]: Aの続き",
     ]
+
+
+def test_listen_mode_separates_multiple_people_using_one_discord_account():
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+
+    first = session._format_transcribed_text(
+        42,
+        "Speaker 1: 司会です\nSpeaker 2: 企画担当です\nSpeaker 1: 次へ進みます",
+        diarized=True,
+    )
+    second = session._format_transcribed_text(
+        42,
+        "Speaker 2: 補足します",
+        diarized=True,
+    )
+
+    assert first == (
+        "[Speaker 1]: 司会です\n"
+        "[Speaker 2]: 企画担当です\n"
+        "[Speaker 1]: 次へ進みます"
+    )
+    assert second == "[Speaker 2]: 補足します"
 
 
 @pytest.mark.asyncio

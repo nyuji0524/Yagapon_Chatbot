@@ -5,11 +5,15 @@
 
 import discord
 
+from bot.authorization import require_registered_member
+
 
 def register(bot):
     @bot.slash_command(name="meigen", description="名言を表示するぽん！")
     @discord.option("user", description="特定ユーザーの名言を見たい場合", type=discord.Member, required=False, default=None)
     async def meigen_cmd(ctx: discord.ApplicationContext, user: discord.Member = None):
+        if not await require_registered_member(ctx, bot.config):
+            return
         await ctx.defer()
 
         corpus = bot.config.get_corpus(ctx.guild_id)

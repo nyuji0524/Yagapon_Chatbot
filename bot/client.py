@@ -10,6 +10,7 @@ from bot.corpus import CorpusManager
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.voice import VoiceMode
+from knowledge_catalog.store import CatalogStore, normalize_label
 
 log = logging.getLogger("yagapon.client")
 
@@ -28,6 +29,7 @@ class YagaPon(discord.Bot):
         self.config = ConfigManager()
         self.corpus = CorpusManager()
         self.operations = OperationalStore()
+        self.catalog = CatalogStore()
         self._recording_recovery_task: asyncio.Task | None = None
 
         # コマンド登録
@@ -332,13 +334,13 @@ class YagaPon(discord.Bot):
         await self._handle_question(message, corpus, guild_id)
 
     def _build_members_info(self, guild_id: int) -> str:
-        """メンバー情報をテキストに変換"""
+        """Build speaker candidates from Discord members and approved Knowledge people."""
         members = self.config.get_members(guild_id)
-        if not members:
-            return ""
         lines = []
+        known = set()
         for uid, info in members.items():
             name = info.get("name", "不明")
+            known.add(normalize_label(name))
             role = info.get("role", "")
             tasks = ", ".join(info.get("tasks", []))
             grade = info.get("grade", "")
@@ -349,6 +351,17 @@ class YagaPon(discord.Bot):
                 parts.append(f"担当:{tasks}")
             if grade:
                 parts.append(f"学年:{grade}")
+            lines.append(" | ".join(parts))
+        for person in self.catalog.list(guild_id, kind="person", status="approved"):
+            if normalize_label(person.label) in known:
+                continue
+            parts = [person.label]
+            if person.aliases:
+                parts.append(f"別名:{', '.join(person.aliases)}")
+            if person.roles:
+                parts.append(f"役職:{', '.join(person.roles)}")
+            if person.description:
+                parts.append(f"説明:{person.description}")
             lines.append(" | ".join(parts))
         return "\n".join(lines)
 

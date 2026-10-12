@@ -45,6 +45,24 @@ async def test_long_minutes_uses_segment_notes_and_combines(monkeypatch):
     assert "区間1" in final_prompt
     assert "区間2" in final_prompt
     assert "後半の議題や少数意見も落とさず" in final_prompt
+    assert "## 話題別まとめ" in final_prompt
+
+
+@pytest.mark.asyncio
+async def test_minutes_uses_roster_only_as_evidence_based_identity_candidates():
+    generated = AsyncMock(return_value=SimpleNamespace(text="# 議事録"))
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    await generate_minutes(
+        client,
+        "Speaker 1: 私はIT局長の中山です",
+        speaker_roster="中山裕二 | 役職:IT局長",
+    )
+
+    prompt = generated.await_args.kwargs["contents"]
+    assert "実名候補、役職、確度" in prompt
+    assert "中山裕二 | 役職:IT局長" in prompt
+    assert "声質だけで実名を推測しない" in prompt
 
 
 @pytest.mark.asyncio

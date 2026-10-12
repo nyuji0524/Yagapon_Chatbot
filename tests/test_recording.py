@@ -7,6 +7,7 @@ from bot.recording import (
     cleanup_old_recordings,
     find_recoverable_recordings,
     load_transcript_content,
+    save_external_transcript,
 )
 
 
@@ -112,6 +113,21 @@ def test_cleanup_of_recording_metadata_keeps_separate_transcript(tmp_path, monke
     assert cleanup_old_recordings(retention_days=7) == 1
     assert not session.exists()
     assert transcript.read_text(encoding="utf-8") == "文字起こし"
+
+
+def test_uploaded_transcript_uses_same_durable_archive(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+
+    path = save_external_transcript(
+        99,
+        "20261012T000000Z-upload/unsafe",
+        "対面全体会議",
+        "Speaker 1: 発言",
+    )
+
+    assert path.parent == tmp_path / "transcripts" / "99"
+    assert "/" not in path.name
+    assert load_transcript_content(path) == "Speaker 1: 発言"
 
 
 def test_recording_checkpoint_can_be_resumed(tmp_path):
