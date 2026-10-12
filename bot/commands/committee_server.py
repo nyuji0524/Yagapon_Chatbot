@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 import discord
 
@@ -27,6 +27,7 @@ POSITION_ROLES = ("一般委員", "企画長", "役員", "副局長", "局長", 
 ROLE_REQUEST_CHANNEL = "ロール申請"
 ROLE_PANEL_CHANNEL = "ロール選択"
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
+ProgressReporter = Callable[[str], Awaitable[None]]
 
 
 def _role_names(entries: Iterable[tuple[str, int, str, str]]) -> tuple[str, ...]:
@@ -353,10 +354,20 @@ async def _post_once(channel: discord.TextChannel, marker: str, *, content=None,
     return message, True
 
 
-async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
+async def bootstrap_committee_server(
+    guild: discord.Guild,
+    *,
+    report_progress: ProgressReporter | None = None,
+) -> dict[str, int]:
     """Create the approved server template without deleting existing resources."""
     counts = {"roles": 0, "categories": 0, "channels": 0, "messages": 0}
 
+    async def report(stage: str) -> None:
+        log.info("Committee setup progress guild=%s stage=%s", guild.id, stage)
+        if report_progress is not None:
+            await report_progress(stage)
+
+    await report("ロールを準備中")
     member_role, created = await _ensure_role(guild, MEMBER_ROLE, color=0x2ECC71)
     counts["roles"] += int(created)
     bureau_roles = {}
@@ -372,6 +383,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         position_roles[name], created = await _ensure_role(guild, name, color=0xF39C12)
         counts["roles"] += int(created)
 
+    await report("既存メンバーへ基本ロールを設定中")
     if not guild.chunked:
         await guild.chunk()
     for member in guild.members:
@@ -381,6 +393,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
             except (discord.Forbidden, discord.HTTPException):
                 log.warning("Could not add initial member role guild=%s member=%s", guild.id, member.id)
 
+    await report("案内・ロール選択チャンネルを準備中")
     start, created = await _ensure_category(guild, "00｜はじめに")
     counts["categories"] += int(created)
     intro, created = await _ensure_text(
@@ -422,6 +435,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     counts["channels"] += int(created)
     await requests.edit(overwrites=request_overwrites, reason="役職申請の閲覧権限を同期")
 
+    await report("全体チャンネルを準備中")
     general, created = await _ensure_category(guild, "01｜全体")
     counts["categories"] += int(created)
     _channel, created = await _ensure_text(
@@ -447,6 +461,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     )
     counts["channels"] += int(created)
 
+    await report("会議チャンネルを準備中")
     meetings, created = await _ensure_category(guild, "02｜会議")
     counts["categories"] += int(created)
     _channel, created = await _ensure_text(
@@ -476,6 +491,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     _channel, created = await _ensure_voice(guild, "全体会議", meetings)
     counts["channels"] += int(created)
 
+    await report("Bot・ナレッジチャンネルを準備中")
     bot_category, created = await _ensure_category(guild, "03｜BOT・ナレッジ")
     counts["categories"] += int(created)
     bot_guide, created = await _ensure_text(
@@ -503,6 +519,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     _channel, created = await _ensure_voice(guild, "やがぽん会議", bot_category)
     counts["channels"] += int(created)
 
+    await report("役員・局間連携チャンネルを準備中")
     leaders = [position_roles[name] for name in POSITION_ROLES if name != "一般委員"]
     leader_overwrites = _private_overwrites(guild, leaders)
     leadership, created = await _ensure_category(guild, "04｜役員・企画長", overwrites=leader_overwrites)
@@ -545,6 +562,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     )
     counts["channels"] += int(created)
 
+    await report("局別チャンネルを準備中")
     for index, (bureau_name, _color, _emoji, slug) in enumerate(BUREAU_ROLES, 10):
         overwrites = _private_overwrites(guild, [bureau_roles[bureau_name]])
         category, created = await _ensure_category(guild, f"{index}｜{bureau_name}", overwrites=overwrites)
@@ -569,6 +587,7 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         _channel, created = await _ensure_voice(guild, f"{bureau_name}会議", category, overwrites=overwrites)
         counts["channels"] += int(created)
 
+    await report("案内とロール選択パネルを掲示中")
     intro_text = (
         f"`{ROLE_PANEL_MARKER}`\n"
         "# 28th矢上祭実行委員会 Discord\n"
@@ -638,24 +657,51 @@ def register(bot):
             await ctx.respond(f"権限が足りないぽん: {', '.join(missing)}", ephemeral=True)
             return
         await ctx.defer(ephemeral=True)
+        progress_message = await ctx.followup.send(
+            "⏳ 委員会サーバーの整備を開始したぽん…",
+            ephemeral=True,
+            wait=True,
+        )
+
+        async def report_progress(stage: str) -> None:
+            try:
+                await progress_message.edit(content=f"⏳ {stage}だぽん…")
+            except discord.HTTPException:
+                log.warning("Could not update committee setup progress guild=%s", ctx.guild_id)
+
         try:
-            counts = await bootstrap_committee_server(ctx.guild)
+            counts = await bootstrap_committee_server(ctx.guild, report_progress=report_progress)
         except discord.Forbidden:
             log.exception("Committee setup permission error guild=%s", ctx.guild_id)
-            await ctx.followup.send(
-                "セットアップ中に権限エラーになったぽん。やがぽんのロールを他の管理対象ロールより上にしてほしいぽん。",
-                ephemeral=True,
+            await progress_message.edit(
+                content="❌ セットアップ中に権限エラーになったぽん。やがぽんのロールを他の管理対象ロールより上にしてほしいぽん。"
+            )
+            return
+        except discord.HTTPException as exc:
+            log.exception("Committee setup Discord API error guild=%s", ctx.guild_id)
+            await progress_message.edit(
+                content=(
+                    "❌ Discord APIエラーで停止したぽん。"
+                    f" status={exc.status} / code={exc.code}。再実行しても既存設定は重複しないぽん。"
+                )
+            )
+            return
+        except Exception:
+            log.exception("Unexpected committee setup error guild=%s", ctx.guild_id)
+            await progress_message.edit(
+                content="❌ 予期しないエラーで停止したぽん。ログに記録したので、管理者に確認してほしいぽん。"
             )
             return
         minutes_channel = _find_named(ctx.guild.text_channels, "議事録")
         if minutes_channel:
             await bot.config.set_minutes_channel(ctx.guild.id, minutes_channel.id)
-        await ctx.followup.send(
-            "✅ 委員会サーバーを整備したぽん！\n"
-            f"新規: ロール {counts['roles']} / カテゴリ {counts['categories']} / "
-            f"チャンネル {counts['channels']} / 案内 {counts['messages']}\n"
-            "既存のものは削除・重複作成していないぽん。",
-            ephemeral=True,
+        await progress_message.edit(
+            content=(
+                "✅ 委員会サーバーを整備したぽん！\n"
+                f"新規: ロール {counts['roles']} / カテゴリ {counts['categories']} / "
+                f"チャンネル {counts['channels']} / 案内 {counts['messages']}\n"
+                "既存のものは削除・重複作成していないぽん。"
+            )
         )
 
     @bot.slash_command(name="role_panel", description="ロール選択パネルを再掲するぽん")
