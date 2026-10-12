@@ -135,6 +135,7 @@ class YagaPon(discord.Bot):
                 member.guild.id,
                 session.transcript_text,
                 session.channel.name,
+                meeting_at=session.started_at,
             )
 
             if not minutes:
@@ -157,7 +158,13 @@ class YagaPon(discord.Bot):
                     from bot.commands.voice_cmd import _summarize_minutes
                     from bot.gdrive import upload_minutes
 
-                    drive_url = await upload_minutes(self.config, member.guild.id, minutes, session.channel.name)
+                    drive_url = await upload_minutes(
+                        self.config,
+                        member.guild.id,
+                        minutes,
+                        session.channel.name,
+                        meeting_at=session.started_at,
+                    )
                     summary = await _summarize_minutes(minutes)
                     knowledge_url = await session.publish_knowledge(
                         summary=summary,

@@ -101,6 +101,7 @@ def register(bot):
             ctx.guild_id,
             session.transcript_text,
             channel_name,
+            meeting_at=session.started_at,
         )
 
         if not minutes:
@@ -115,7 +116,13 @@ def register(bot):
             return
 
         # 議事録と逐語文字起こしをそれぞれ保存
-        drive_url = await upload_minutes(bot.config, ctx.guild_id, minutes, channel_name)
+        drive_url = await upload_minutes(
+            bot.config,
+            ctx.guild_id,
+            minutes,
+            channel_name,
+            meeting_at=session.started_at,
+        )
 
         # Geminiで要約を生成
         summary = await _summarize_minutes(minutes)

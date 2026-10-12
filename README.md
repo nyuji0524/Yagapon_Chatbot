@@ -20,10 +20,11 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - **TTS読み上げ**: edge-tts（ja-JP-NanamiNeural）でVCに音声出力
 - **議事録自動生成**: `/leave`時にGeminiで構造化議事録を作成 → Google Docsに保存
 
-### 音声サンプル登録（互換機能）
-- `/voiceprint register` でVCで10秒間録音、Geminiで音声検証
-- 既存データとの互換性のため管理コマンドを維持
-- 議事録の話者識別には使用せず、Transcribeの話者ラベルを人が確認
+### 声紋による話者識別
+- `/voiceprint register` でVCから10秒間の登録音声を取得し、音質を検証
+- listenモードと `/minutes` では登録音声を会議音声と照合
+- 十分一致した登録者だけ名前を表示し、未一致話者は `Speaker N` のまま保持
+- 声紋照合は確率的なため、公開前に人が話者ラベルを確認
 
 ### コードレビュー
 - Pull Request作成・更新時に再利用可能なGitHub Actions workflowから実行
@@ -52,8 +53,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 
 ### Google Drive連携
 - Application Default CredentialsからDrive API・Docs APIへ直接接続
-- 議事録・レポートをGoogle Docsとして保存
-- Noto Sans JP、見出し色分け、コードブロック対応
+- 議事録名は `yymmdd{会議名}`、文字起こしは保存先直下の `文字起こし` フォルダへ同名で保存
+- Markdown見出し・箇条書きをGoogle Docsの段落スタイルに変換し、Noto Sans JPで保存
 
 ## コマンド一覧
 

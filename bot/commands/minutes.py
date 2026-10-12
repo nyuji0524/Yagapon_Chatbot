@@ -16,6 +16,7 @@ import discord
 from bot.ai_models import fast_model, generation_config, log_usage
 from bot.ai_retry import new_genai_client
 from bot.authorization import require_registered_member
+from bot.meeting_time import display_meeting_date
 from bot.minutes_generation import generate_minutes
 from bot.recording import save_external_transcript
 from bot.transcription import transcribe_audio
@@ -54,8 +55,9 @@ def register(bot):
         transcript_path = None
         transcript_url = None
         session_id = ""
-        doc_title = title or f"議事録_{os.path.splitext(file.filename)[0]}"
+        doc_title = title or os.path.splitext(file.filename)[0]
         checkpoint_dir = None
+        meeting_at = datetime.now(timezone.utc)
         try:
             # 音声ファイルをダウンロード
             audio_bytes = await file.read()
@@ -65,7 +67,10 @@ def register(bot):
 
             # 文字起こしを先に恒久保存し、議事録生成失敗時にも失わない。
             transcript = await _transcribe_file(
-                audio_bytes, mime_type, file.filename,
+                audio_bytes,
+                mime_type,
+                file.filename,
+                voiceprint_paths=_voiceprint_paths(bot, ctx.guild_id),
             )
             if not transcript:
                 if hasattr(bot, "operations"):
@@ -93,7 +98,11 @@ def register(bot):
             from bot.gdrive import upload_minutes, upload_transcript
 
             transcript_url = await upload_transcript(
-                bot.config, ctx.guild_id, transcript, doc_title
+                bot.config,
+                ctx.guild_id,
+                transcript,
+                doc_title,
+                meeting_at=meeting_at,
             )
             checkpoint_dir = (
                 transcript_path.parent / f"{session_id}-checkpoints"
@@ -102,16 +111,23 @@ def register(bot):
             minutes = await generate_minutes(
                 new_genai_client(os.environ.get("GOOGLE_API_KEY", "")),
                 transcript,
-                title=title,
+                title=doc_title,
                 glossary_text=glossary_text,
                 speaker_roster=bot._build_members_info(ctx.guild_id),
+                meeting_date=display_meeting_date(meeting_at),
                 checkpoint_dir=checkpoint_dir,
             )
             if not minutes or not minutes.strip():
                 raise RuntimeError("minutes generation returned empty content")
 
             # Google Docsに保存
-            drive_url = await upload_minutes(bot.config, ctx.guild_id, minutes, doc_title)
+            drive_url = await upload_minutes(
+                bot.config,
+                ctx.guild_id,
+                minutes,
+                doc_title,
+                meeting_at=meeting_at,
+            )
 
             # 要約を生成
             summary = await _summarize(minutes)
@@ -137,7 +153,7 @@ def register(bot):
 
             embed.add_field(
                 name="🎙️ AI文字起こし",
-                value="話者ラベルはAIの推定だぽん。実名との対応は人が確認してねぽん",
+                value="登録声紋と十分一致した話者だけ実名表示し、それ以外は匿名ラベルだぽん。最終確認してねぽん",
                 inline=True,
             )
 
@@ -232,10 +248,16 @@ async def _generate_minutes_from_file(
     glossary_text: str,
     title: str,
     speaker_roster: str = "",
+    voiceprint_paths: dict[str, str] | None = None,
 ) -> str | None:
     """専用STTで文字起こしし、別モデルで構造化議事録を生成。"""
     try:
-        transcript = await _transcribe_file(audio_bytes, mime_type, filename)
+        transcript = await _transcribe_file(
+            audio_bytes,
+            mime_type,
+            filename,
+            voiceprint_paths=voiceprint_paths,
+        )
 
         if not transcript:
             return None
@@ -253,14 +275,28 @@ async def _generate_minutes_from_file(
         return None
 
 
-async def _transcribe_file(audio_bytes: bytes, mime_type: str, filename: str) -> str | None:
+def _voiceprint_paths(bot, guild_id: int) -> dict[str, str]:
+    from bot.commands.voiceprint import get_voiceprints_with_names
+
+    return get_voiceprints_with_names(bot.config, guild_id)
+
+
+async def _transcribe_file(
+    audio_bytes: bytes,
+    mime_type: str,
+    filename: str,
+    *,
+    voiceprint_paths: dict[str, str] | None = None,
+) -> str | None:
     """Diarize a whole in-person recording, with a non-diarized fallback."""
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     try:
         try:
             return await transcribe_audio(
                 client, audio_bytes, mime_type=mime_type,
-                display_name=filename, diarization=True,
+                display_name=filename,
+                diarization=True,
+                voiceprint_paths=voiceprint_paths,
             )
         except Exception as exc:
             message = str(exc).lower()

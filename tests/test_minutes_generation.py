@@ -45,11 +45,13 @@ async def test_long_minutes_uses_segment_notes_and_combines(monkeypatch):
     assert "区間1" in final_prompt
     assert "区間2" in final_prompt
     assert "後半の議題や少数意見も落とさず" in final_prompt
-    assert "## 話題別まとめ" in final_prompt
+    assert "## 今日の議題" in final_prompt
+    assert "## 連絡事項" in final_prompt
+    assert "## 来週の議題" in final_prompt
 
 
 @pytest.mark.asyncio
-async def test_minutes_uses_roster_only_as_evidence_based_identity_candidates():
+async def test_minutes_forbids_identity_guessing_from_roster():
     generated = AsyncMock(return_value=SimpleNamespace(text="# 議事録"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
 
@@ -60,9 +62,28 @@ async def test_minutes_uses_roster_only_as_evidence_based_identity_candidates():
     )
 
     prompt = generated.await_args.kwargs["contents"]
-    assert "実名候補、役職、確度" in prompt
     assert "中山裕二 | 役職:IT局長" in prompt
-    assert "声質だけで実名を推測しない" in prompt
+    assert "この一覧は話者同定に使用禁止" in prompt
+    assert "Speakerラベルを実名へ置換しない" in prompt
+
+
+@pytest.mark.asyncio
+async def test_minutes_uses_reference_document_heading_structure():
+    generated = AsyncMock(return_value=SimpleNamespace(text="# 26/10/12 全体会議"))
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    await generate_minutes(
+        client,
+        "Speaker 1: 議題を始めます",
+        title="全体会議",
+        meeting_date="26/10/12",
+    )
+
+    prompt = generated.await_args.kwargs["contents"]
+    assert "# 26/10/12 全体会議" in prompt
+    assert "## 今日の議題" in prompt
+    assert "- 問題:" in prompt
+    assert "- 対応:" in prompt
 
 
 @pytest.mark.asyncio

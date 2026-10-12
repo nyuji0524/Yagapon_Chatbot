@@ -17,6 +17,7 @@ from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import RateLimitCircuitBreaker, RateLimitExceeded, new_genai_client
+from bot.meeting_time import display_meeting_date
 from bot.minutes_generation import generate_minutes
 from bot.recording import PersistentPCMSink, find_recoverable_recordings, load_transcript_content
 from bot.transcription import transcribe_audio
@@ -47,6 +48,7 @@ class VoiceSession:
         self.guild_id = guild_id
         self.channel = channel
         self.mode = mode
+        self.started_at = datetime.now(timezone.utc)
         self.voice_client: discord.VoiceClient | None = None
         self.transcript: list[str] = []  # テキストチャットの記録
         self.recording_sink: PersistentPCMSink | None = None
@@ -70,6 +72,18 @@ class VoiceSession:
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
         self._last_audio_len: dict[int, int] = {}  # user_id -> 文字起こし済みPCMバイト数
         self._reference_docs: list[str] = []  # VCテキストチャットに投稿された参考資料
+        self._voiceprint_paths: dict[str, str] | None = None
+
+    def _registered_voiceprints(self) -> dict[str, str]:
+        """Load enrolled samples once per session for real speaker attribution."""
+        if self._voiceprint_paths is None:
+            try:
+                from bot.commands.voiceprint import get_voiceprints_with_names
+
+                self._voiceprint_paths = get_voiceprints_with_names(self.bot.config, self.guild_id)
+            except (AttributeError, OSError):
+                self._voiceprint_paths = {}
+        return self._voiceprint_paths
 
     async def add_reference(self, content: str, source: str = "テキスト"):
         """VCテキストチャットに投稿された資料を参考資料として追加"""
@@ -110,7 +124,13 @@ class VoiceSession:
             r"(?im)^\s*\[?(?:speaker|spk)[ _-]?(\d+)\]?\s*:\s*"
         )
         matches = list(pattern.finditer(text))
-        if not matches:
+        registered = set(self._registered_voiceprints())
+        named_pattern = None
+        if registered:
+            alternatives = "|".join(re.escape(name) for name in sorted(registered, key=len, reverse=True))
+            named_pattern = re.compile(rf"(?im)^\s*\[?({alternatives})\]?\s*:\s*")
+        named_matches = list(named_pattern.finditer(text)) if named_pattern else []
+        if not matches and not named_matches:
             return f"[{self._speaker_label(user_id)}]: {text}"
 
         if chunk_id is None:
@@ -123,7 +143,10 @@ class VoiceSession:
                 self._diarized_speaker_labels[key] = self._next_speaker_label()
             return f"[{self._diarized_speaker_labels[key]}]: "
 
-        return pattern.sub(replace, text).strip()
+        formatted = pattern.sub(replace, text)
+        if named_pattern:
+            formatted = named_pattern.sub(lambda match: f"[{match.group(1)}]: ", formatted)
+        return formatted.strip()
 
     async def add_reference_from_message(self, message: discord.Message):
         """Discordメッセージから参考資料を収集（テキスト+添付ファイル）"""
@@ -733,6 +756,7 @@ class VoiceSession:
                     # Short interactive modes can create many requests. Reserve
                     # the dedicated STT quota for long-form listen/minutes mode.
                     prefer_dedicated=self.mode == VoiceMode.LISTEN,
+                    voiceprint_paths=(self._registered_voiceprints() if diarization else None),
                 ),
                 timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
             )
@@ -793,6 +817,8 @@ class VoiceSession:
             transcript_text,
             glossary_text=glossary_text,
             speaker_roster=speaker_roster,
+            title=self.channel.name,
+            meeting_date=display_meeting_date(self.started_at),
             checkpoint_dir=(
                 self.recording_sink.session_dir / "minutes-checkpoints"
                 if self.recording_sink
@@ -890,6 +916,12 @@ async def _recover_recording(bot, candidate) -> None:
         mode = VoiceMode.LISTEN
     channel = SimpleNamespace(name=str(metadata.get("channel_name") or "recovered-session"))
     session = VoiceSession(bot, guild_id, channel, mode)
+    started_at = metadata.get("started_at")
+    if started_at:
+        try:
+            session.started_at = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        except ValueError:
+            pass
     session.recording_sink = PersistentPCMSink(
         guild_id, channel.name, mode.value, session_dir=candidate.session_dir, resume=True
     )

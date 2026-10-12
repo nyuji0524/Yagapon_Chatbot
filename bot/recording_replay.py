@@ -17,6 +17,7 @@ from uuid import uuid4
 import discord
 
 from bot.ai_retry import new_genai_client
+from bot.meeting_time import display_meeting_date
 from bot.minutes_generation import generate_minutes
 from bot.recording import (
     PCM_CHANNELS,
@@ -393,6 +394,9 @@ class RecordingReplayManager:
                 session.recording_sink = ReadOnlyReplaySink(
                     artifact, job.target_guild_id, job.id
                 )
+                session.started_at = datetime.fromisoformat(
+                    artifact.started_at.replace("Z", "+00:00")
+                ) if artifact.started_at else datetime.now(timezone.utc)
                 await session._drain_recording()
                 await session._persist_transcript()
                 if session._transcription_failed or not session.transcript_text.strip():
@@ -411,6 +415,7 @@ class RecordingReplayManager:
                 title=f"テスト再生 - {artifact.channel_name}",
                 glossary_text=self.bot.config.get_glossary_text(artifact.source_guild_id),
                 speaker_roster=self.bot._build_members_info(artifact.source_guild_id),
+                meeting_date=display_meeting_date(artifact.started_at or None),
                 checkpoint_dir=work_dir / "minutes-checkpoints",
             )
             if not minutes.strip():
@@ -425,8 +430,20 @@ class RecordingReplayManager:
 
             title = f"[テスト] {artifact.channel_name} {artifact.session_id}"
             transcript_url, minutes_url, summary = await asyncio.gather(
-                upload_transcript(self.bot.config, job.target_guild_id, transcript, title),
-                upload_minutes(self.bot.config, job.target_guild_id, minutes, title),
+                upload_transcript(
+                    self.bot.config,
+                    job.target_guild_id,
+                    transcript,
+                    title,
+                    meeting_at=artifact.started_at or None,
+                ),
+                upload_minutes(
+                    self.bot.config,
+                    job.target_guild_id,
+                    minutes,
+                    title,
+                    meeting_at=artifact.started_at or None,
+                ),
                 _summarize_minutes(minutes),
             )
             job.drive_transcript_url = transcript_url or ""
