@@ -244,12 +244,12 @@ def test_recording_replay_api_is_authenticated_and_targets_named_guild(monkeypat
 
     assert client.post(
         "/admin/recordings/replay",
-        json={"session_id": "session-long", "target_guild_name": "毛蟹のサーバー"},
+        json={"session_id": "session-long", "target_guild_name": "毛蟹"},
     ).status_code == 401
     response = client.post(
         "/admin/recordings/replay",
         headers=headers,
-        json={"session_id": "session-long", "target_guild_name": "毛蟹のサーバー"},
+        json={"session_id": "session-long", "target_guild_name": "毛蟹"},
     )
 
     assert response.status_code == 202

@@ -32,12 +32,16 @@ def _target_guild(bot, payload: ReplayRequest):
         if guild:
             return guild
     if payload.target_guild_name:
+        needle = payload.target_guild_name.strip().casefold()
         exact = [
             guild for guild in bot.guilds
-            if guild.name.casefold() == payload.target_guild_name.casefold()
+            if guild.name.strip().casefold() == needle
         ]
         if len(exact) == 1:
             return exact[0]
+        partial = [guild for guild in bot.guilds if needle in guild.name.casefold()]
+        if len(partial) == 1:
+            return partial[0]
     raise HTTPException(status_code=404, detail="target guild not found or ambiguous")
 
 
