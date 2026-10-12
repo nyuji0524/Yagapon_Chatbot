@@ -167,6 +167,11 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
     member_id = _embed_field_id(embed, "申請者ID") if embed else None
     role_id = _embed_field_id(embed, "役職ロールID") if embed else None
     member = guild.get_member(member_id) if guild and member_id else None
+    if member is None and guild and member_id:
+        try:
+            member = await guild.fetch_member(member_id)
+        except (discord.NotFound, discord.HTTPException):
+            member = None
     role = guild.get_role(role_id) if guild and role_id else None
     if not embed or member is None or role is None or role.name not in POSITION_ROLES:
         await _respond_ephemeral(interaction, "申請データを確認できなかったぽん。")
@@ -246,7 +251,7 @@ async def _ensure_text(guild, name: str, category, *, topic: str, overwrites=Non
 
 
 async def _ensure_forum(guild, name: str, category, *, topic: str, tags, overwrites=None):
-    channel = next((item for item in guild.forums if item.name == name), None)
+    channel = _find_named(guild.forum_channels, name)
     if channel:
         return channel, False
     channel = await guild.create_forum_channel(
