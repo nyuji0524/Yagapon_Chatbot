@@ -376,11 +376,10 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         read_only=True,
     )
     counts["channels"] += int(created)
+    # Administrators bypass channel overwrites. Non-admin approvers must already
+    # have Discord's Manage Roles permission; leadership labels alone are not an
+    # authorization source.
     approver_roles = [role for role in guild.roles if role.permissions.manage_roles]
-    approver_roles.extend(
-        position_roles[name]
-        for name in ("委員長", "副委員長", "執行部", "局長")
-    )
     request_overwrites = _private_overwrites(guild, approver_roles)
     requests, created = await _ensure_text(
         guild,
@@ -391,20 +390,6 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     )
     counts["channels"] += int(created)
     await requests.edit(overwrites=request_overwrites, reason="役職申請の閲覧権限を同期")
-
-    if "COMMUNITY" not in guild.features:
-        try:
-            await guild.edit(
-                community=True,
-                rules_channel=intro,
-                public_updates_channel=announcements,
-                default_notifications=discord.NotificationLevel.only_mentions,
-                verification_level=discord.VerificationLevel.low,
-                explicit_content_filter=discord.ContentFilter.all_members,
-                reason="フォーラム形式で案件を整理するためコミュニティ機能を有効化",
-            )
-        except discord.HTTPException:
-            log.warning("Could not enable community features guild=%s; forums will fall back", guild.id)
 
     general, created = await _ensure_category(guild, "01｜全体")
     counts["categories"] += int(created)
