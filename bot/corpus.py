@@ -917,6 +917,9 @@ class CorpusManager:
 
         documents = self._build_knowledge_documents(channel, messages)
         if dry_run:
+            # Keep this explicit even though the counter is incremented above;
+            # dry-run reports the exact number of indexable messages collected.
+            result.messages_indexed = len(messages)
             result.documents_uploaded = len(documents)
             result.documents_replaced = len(existing) if documents else 0
             return result

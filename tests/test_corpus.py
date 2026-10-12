@@ -124,6 +124,24 @@ async def test_backfill_replaces_old_documents_only_after_all_uploads(corpus_man
 
 
 @pytest.mark.asyncio
+async def test_backfill_dry_run_reports_counts_without_mutation(corpus_manager):
+    channel = FakeChannel([fake_message(1), fake_message(2, 1)])
+    corpus_manager._existing_channel_documents = AsyncMock(return_value=["documents/old"])
+    corpus_manager._upload_document = AsyncMock()
+    corpus_manager._delete_documents = AsyncMock()
+
+    result = await corpus_manager.backfill_channel(
+        channel, "fileSearchStores/test", dry_run=True
+    )
+
+    assert result.messages_indexed == 2
+    assert result.documents_uploaded == 1
+    assert result.documents_replaced == 1
+    corpus_manager._upload_document.assert_not_awaited()
+    corpus_manager._delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_backfill_upload_failure_keeps_old_documents(corpus_manager):
     messages = [fake_message(i + 1, content=f"決定事項 {i}") for i in range(DOCUMENT_MAX_MESSAGES + 1)]
     for index, message in enumerate(messages):
