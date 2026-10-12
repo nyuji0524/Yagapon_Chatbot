@@ -315,7 +315,23 @@ def test_listen_mode_separates_multiple_people_using_one_discord_account():
         "[Speaker 2]: 企画担当です\n"
         "[Speaker 1]: 次へ進みます"
     )
-    assert second == "[Speaker 2]: 補足します"
+    # A later STT request restarts its local numbering, so it must not be
+    # silently merged with Speaker 2 from the previous chunk.
+    assert second == "[Speaker 3]: 補足します"
+
+
+def test_listen_mode_does_not_merge_chunk_local_speaker_numbers():
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+
+    first = session._format_transcribed_text(
+        42, "Speaker 1: 最初の話者", diarized=True
+    )
+    second = session._format_transcribed_text(
+        42, "Speaker 1: 次のチャンクの話者", diarized=True
+    )
+
+    assert first == "[Speaker 1]: 最初の話者"
+    assert second == "[Speaker 2]: 次のチャンクの話者"
 
 
 @pytest.mark.asyncio

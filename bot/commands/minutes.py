@@ -49,6 +49,11 @@ def register(bot):
         await ctx.defer()
         await ctx.followup.send("🎙️ 音声ファイルを処理中だぽん...しばらく待ってねぽん ⏳", silent=True)
 
+        transcript = None
+        transcript_path = None
+        transcript_url = None
+        session_id = ""
+        doc_title = title or f"議事録_{file.filename}"
         try:
             # 音声ファイルをダウンロード
             audio_bytes = await file.read()
@@ -74,6 +79,14 @@ def register(bot):
                 title or file.filename,
                 transcript,
             )
+
+            # 生文字起こしは議事録生成より先に外部へ退避する。
+            # 後続の要約APIが失敗しても、再度STTする必要はない。
+            from bot.gdrive import upload_minutes, upload_transcript
+
+            transcript_url = await upload_transcript(
+                bot.config, ctx.guild_id, transcript, doc_title
+            )
             minutes = await generate_minutes(
                 new_genai_client(os.environ.get("GOOGLE_API_KEY", "")),
                 transcript,
@@ -85,12 +98,7 @@ def register(bot):
             )
 
             # Google Docsに保存
-            from bot.gdrive import upload_minutes, upload_transcript
-            doc_title = title or f"議事録_{file.filename}"
             drive_url = await upload_minutes(bot.config, ctx.guild_id, minutes, doc_title)
-            transcript_url = await upload_transcript(
-                bot.config, ctx.guild_id, transcript, doc_title
-            )
 
             # 要約を生成
             summary = await _summarize(minutes)
@@ -166,14 +174,26 @@ def register(bot):
             if hasattr(bot, "operations"):
                 bot.operations.record_event(
                     "minutes", "uploaded_audio", "failed",
-                    guild_id=ctx.guild_id,
+                    guild_id=ctx.guild_id, item_key=session_id or None,
                     details={"error_type": type(e).__name__},
                 )
-            await ctx.followup.send(
-                "議事録処理中にエラーが発生したぽん。生文字起こしが完了していた場合は"
-                "サーバーに保存されているので、管理者が再処理できるぽん。",
-                silent=True,
-            )
+            message = "議事録の生成中にエラーが発生したぽん。"
+            files = []
+            if transcript:
+                message += f"\n生文字起こしは保存済みだぽん。セッション: `{session_id}`"
+                if transcript_url:
+                    message += f"\nGoogle Docs: {transcript_url}"
+                else:
+                    files.append(discord.File(
+                        io.BytesIO(transcript.encode("utf-8")),
+                        filename=f"文字起こし_{doc_title}.md",
+                    ))
+            else:
+                message += "\n文字起こしは完了していないぽん。"
+            kwargs = {"content": message, "silent": True}
+            if files:
+                kwargs["files"] = files
+            await ctx.followup.send(**kwargs)
 
 
 def _get_mime_type(ext: str) -> str:

@@ -65,6 +65,7 @@ class VoiceSession:
         self._knowledge_outbox_path: Path | None = None
         self._speaker_labels: dict[int, str] = {}
         self._diarized_speaker_labels: dict[str, str] = {}
+        self._diarization_chunk_sequence = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
         self._last_audio_len: dict[int, int] = {}  # user_id -> 文字起こし済みPCMバイト数
@@ -88,8 +89,21 @@ class VoiceSession:
             number += 1
         return f"Speaker {number}"
 
-    def _format_transcribed_text(self, user_id: int, text: str, *, diarized: bool) -> str:
-        """Map per-audio-stream diarization labels to session-wide anonymous labels."""
+    def _format_transcribed_text(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        diarized: bool,
+        chunk_id: int | None = None,
+    ) -> str:
+        """Map chunk-local diarization labels to non-colliding session labels.
+
+        STT providers restart ``Speaker 1`` numbering for every request.  The
+        chunk identifier therefore has to be part of the mapping key; reusing
+        only the local number would silently merge different people who spoke
+        in different five-minute chunks.
+        """
         if not diarized:
             return f"[{self._speaker_label(user_id)}]: {text}"
         pattern = re.compile(
@@ -99,8 +113,12 @@ class VoiceSession:
         if not matches:
             return f"[{self._speaker_label(user_id)}]: {text}"
 
+        if chunk_id is None:
+            self._diarization_chunk_sequence += 1
+            chunk_id = self._diarization_chunk_sequence
+
         def replace(match: re.Match) -> str:
-            key = f"{user_id}:{int(match.group(1))}"
+            key = f"{user_id}:{chunk_id}:{int(match.group(1))}"
             if key not in self._diarized_speaker_labels:
                 self._diarized_speaker_labels[key] = self._next_speaker_label()
             return f"[{self._diarized_speaker_labels[key]}]: "
@@ -541,6 +559,7 @@ class VoiceSession:
             transcript_path=self._transcript_path,
             status=status,
             diarized_speaker_labels=self._diarized_speaker_labels,
+            diarization_chunk_sequence=self._diarization_chunk_sequence,
             **extra,
         )
 
@@ -884,6 +903,9 @@ async def _recover_recording(bot, candidate) -> None:
         str(key): str(value)
         for key, value in (metadata.get("diarized_speaker_labels") or {}).items()
     }
+    session._diarization_chunk_sequence = int(
+        metadata.get("diarization_chunk_sequence") or 0
+    )
     transcript_path_value = str(metadata.get("transcript_path") or "")
     session._transcript_path = Path(transcript_path_value) if transcript_path_value else None
     existing = load_transcript_content(session._transcript_path)
