@@ -46,11 +46,9 @@ async def test_replace_role_group_removes_old_role_and_adds_selected():
     unrelated = SimpleNamespace(id=3, name="1年")
     member = SimpleNamespace(
         roles=[old, unrelated],
-        remove_roles=AsyncMock(),
-        add_roles=AsyncMock(),
+        edit=AsyncMock(),
     )
 
     await _replace_role_group(member, selected, ("IT局", "総務局"))
 
-    member.remove_roles.assert_awaited_once_with(old, reason="本人によるロール選択")
-    member.add_roles.assert_awaited_once_with(selected, reason="本人によるロール選択")
+    member.edit.assert_awaited_once_with(roles=[unrelated, selected], reason="本人によるロール選択")

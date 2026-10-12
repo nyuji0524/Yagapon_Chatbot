@@ -44,11 +44,18 @@ async def _replace_role_group(
     *,
     reason: str = "本人によるロール選択",
 ) -> None:
-    removable = [current for current in member.roles if current.name in role_names and current.id != role.id]
-    if removable:
-        await member.remove_roles(*removable, reason=reason)
-    if role not in member.roles:
-        await member.add_roles(role, reason=reason)
+    role_names = set(role_names)
+    desired_roles = [
+        current
+        for current in member.roles
+        if not getattr(current, "is_default", lambda: False)() and current.name not in role_names
+    ]
+    desired_roles.append(role)
+    if {current.id for current in desired_roles} == {
+        current.id for current in member.roles if not getattr(current, "is_default", lambda: False)()
+    }:
+        return
+    await member.edit(roles=desired_roles, reason=reason)
 
 
 async def _respond_ephemeral(interaction: discord.Interaction, message: str) -> None:
@@ -202,6 +209,11 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
         embed.color = discord.Color.red()
         embed.add_field(name="結果", value=f"❌ {interaction.user.mention} が却下", inline=False)
     await interaction.response.edit_message(embed=embed, view=None)
+    try:
+        result = "承認" if approve else "却下"
+        await member.send(f"28th矢上祭実行委員会で申請した **{role.name}** ロールは{result}されました。")
+    except discord.HTTPException:
+        pass
 
 
 class RoleApprovalView(discord.ui.View):
@@ -364,7 +376,10 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         await guild.chunk()
     for member in guild.members:
         if not member.bot and member_role not in member.roles:
-            await member.add_roles(member_role, reason="28thサーバー初期構築")
+            try:
+                await member.add_roles(member_role, reason="28thサーバー初期構築")
+            except (discord.Forbidden, discord.HTTPException):
+                log.warning("Could not add initial member role guild=%s member=%s", guild.id, member.id)
 
     start, created = await _ensure_category(guild, "00｜はじめに")
     counts["categories"] += int(created)
