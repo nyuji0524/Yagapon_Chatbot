@@ -34,6 +34,8 @@ Botの常駐API、push Webhook、Discord通知は使わない。レビューと�
 
 Yagapon_Chatbot自身は`.github/workflows/ai-review-self.yml`から同じ再利用workflowを呼ぶ。
 
+`GOOGLE_API_KEY`が未設定のリポジトリではworkflowを失敗させず、Noticeを表示してレビュー処理だけをスキップする。Secretを共有すると次のPRイベントから自動的に有効になる。
+
 本番運用では`@main`ではなく、レビュー済みのrelease tagまたはcommit SHAへ固定する。Private forkからのPRはGitHubの既定保護により書き込みトークンとSecretを受け取れないため、レビューは投稿されない。
 
 ## Gemini 3.8 Flashの評価
