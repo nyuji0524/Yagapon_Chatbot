@@ -122,6 +122,7 @@ class YagaPon(discord.Bot):
             )
 
             if not minutes:
+                await session.publish_knowledge()
                 session.mark_delivered(transcript_url=transcript_url)
                 return
 
@@ -142,6 +143,10 @@ class YagaPon(discord.Bot):
 
                     drive_url = await upload_minutes(self.config, member.guild.id, minutes, session.channel.name)
                     summary = await _summarize_minutes(minutes)
+                    knowledge_url = await session.publish_knowledge(
+                        summary=summary,
+                        minutes=minutes,
+                    )
 
                     embed = discord.Embed(
                         title=f"📝 議事録（自動生成） - {session.channel.name}",
@@ -154,6 +159,12 @@ class YagaPon(discord.Bot):
                         embed.add_field(
                             name="📜 逐語文字起こし",
                             value=f"[Google Docsで見る]({transcript_url})",
+                            inline=False,
+                        )
+                    if knowledge_url:
+                        embed.add_field(
+                            name="🗂️ Knowledge",
+                            value=f"[Draft PRを確認する]({knowledge_url})",
                             inline=False,
                         )
 

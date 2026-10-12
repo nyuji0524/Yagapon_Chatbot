@@ -15,6 +15,7 @@ services:
       YAGAPON_VOICEPRINT_DIR: /data/voiceprints
       YAGAPON_RECORDING_DIR: /data/recordings
       YAGAPON_TRANSCRIPT_DIR: /data/transcripts
+      YAGAPON_KNOWLEDGE_OUTBOX: /data/knowledge-outbox
       GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"

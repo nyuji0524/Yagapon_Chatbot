@@ -45,3 +45,34 @@ async def test_long_minutes_uses_segment_notes_and_combines(monkeypatch):
     assert "区間1" in final_prompt
     assert "区間2" in final_prompt
     assert "後半の議題や少数意見も落とさず" in final_prompt
+
+
+@pytest.mark.asyncio
+async def test_long_minutes_reuses_completed_segment_checkpoints(tmp_path, monkeypatch):
+    first_generated = AsyncMock(
+        side_effect=[
+            SimpleNamespace(text="区間1"),
+            SimpleNamespace(text="区間2"),
+            RuntimeError("combine failed"),
+        ]
+    )
+    first_client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=first_generated))
+    )
+    monkeypatch.setattr("bot.minutes_generation.TRANSCRIPT_CHUNK_CHARS", 40)
+    transcript = "[Speaker 1]: 最初の議題について詳しく話します\n[Speaker 2]: 次の議題について詳しく話します"
+
+    with pytest.raises(RuntimeError, match="combine failed"):
+        await generate_minutes(first_client, transcript, checkpoint_dir=tmp_path)
+
+    assert len(list(tmp_path.glob("segment-*.json"))) == 2
+    resumed_generate = AsyncMock(return_value=SimpleNamespace(text="# 復旧した議事録"))
+    resumed_client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=resumed_generate))
+    )
+
+    result = await generate_minutes(resumed_client, transcript, checkpoint_dir=tmp_path)
+
+    assert result == "# 復旧した議事録"
+    assert resumed_generate.await_count == 1
+    assert "区間1" in resumed_generate.await_args.kwargs["contents"]

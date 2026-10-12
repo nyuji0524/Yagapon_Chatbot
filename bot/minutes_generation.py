@@ -1,7 +1,11 @@
 """High-quality, long-form meeting minutes generation."""
 
+import asyncio
+import hashlib
+import json
 import logging
 import re
+from pathlib import Path
 
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import retry_rate_limit
@@ -9,6 +13,7 @@ from bot.ai_retry import retry_rate_limit
 log = logging.getLogger("yagapon.minutes_generation")
 
 TRANSCRIPT_CHUNK_CHARS = 14_000
+REDUCE_BATCH_CHARS = 48_000
 
 
 def normalize_speaker_labels(transcript: str) -> str:
@@ -91,12 +96,95 @@ async def _generate(client, *, prompt: str, operation_name: str, max_output_toke
     return (response.text or "").strip()
 
 
+def _checkpoint_path(checkpoint_dir: Path, index: int) -> Path:
+    return checkpoint_dir / f"segment-{index:04d}.json"
+
+
+def _load_checkpoint(checkpoint_dir: Path, index: int, chunk: str) -> str | None:
+    path = _checkpoint_path(checkpoint_dir, index)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    expected = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
+    if payload.get("inputSha256") != expected:
+        return None
+    note = payload.get("note")
+    return note if isinstance(note, str) and note.strip() else None
+
+
+def _save_checkpoint(checkpoint_dir: Path, index: int, chunk: str, note: str) -> None:
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    path = _checkpoint_path(checkpoint_dir, index)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "inputSha256": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
+                "note": note,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _group_notes(notes: list[str], max_chars: int = REDUCE_BATCH_CHARS) -> list[list[str]]:
+    groups: list[list[str]] = []
+    current: list[str] = []
+    current_size = 0
+    for note in notes:
+        note_size = len(note) + 2
+        if current and current_size + note_size > max_chars:
+            groups.append(current)
+            current = []
+            current_size = 0
+        current.append(note)
+        current_size += note_size
+    if current:
+        groups.append(current)
+    return groups
+
+
+async def _reduce_notes(client, notes: list[str]) -> list[str]:
+    """Hierarchically reduce segment notes without exceeding one model context."""
+    level = 1
+    current = notes
+    while len("\n\n".join(current)) > REDUCE_BATCH_CHARS:
+        groups = _group_notes(current)
+        reduced: list[str] = []
+        for index, group in enumerate(groups, start=1):
+            reduced.append(
+                await _generate(
+                    client,
+                    prompt=(
+                        f"以下は長時間会議の中間メモ第{level}段階、{index}/{len(groups)}群です。\n"
+                        "重複だけを統合し、議題、各Speakerの主張、提案、決定、保留、担当、期限、"
+                        "数値、固有名詞、意見の変化を落とさず残してください。事実を補わないでください。\n\n"
+                        + "\n\n".join(group)
+                    ),
+                    operation_name="minutes_reduce",
+                    max_output_tokens=8192,
+                )
+            )
+        if len(reduced) >= len(current):
+            # A pathological verbose response must not create an infinite loop.
+            return reduced
+        current = reduced
+        level += 1
+    return current
+
+
 async def generate_minutes(
     client,
     transcript: str,
     *,
     title: str = "",
     glossary_text: str = "",
+    checkpoint_dir: Path | None = None,
 ) -> str:
     """Use map/reduce generation so long meetings do not collapse into a weak summary."""
     transcript = normalize_speaker_labels(transcript)
@@ -115,6 +203,18 @@ async def generate_minutes(
 
     notes: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
+        checkpoint = None
+        if checkpoint_dir:
+            checkpoint = await asyncio.to_thread(
+                _load_checkpoint,
+                checkpoint_dir,
+                index,
+                chunk,
+            )
+        if checkpoint:
+            log.info("Reusing minutes checkpoint segment=%s/%s", index, len(chunks))
+            notes.append(f"### 区間 {index}/{len(chunks)}\n{checkpoint}")
+            continue
         note = await _generate(
             client,
             prompt=(
@@ -126,9 +226,18 @@ async def generate_minutes(
             operation_name="minutes_segment",
             max_output_tokens=4096,
         )
+        if checkpoint_dir:
+            await asyncio.to_thread(
+                _save_checkpoint,
+                checkpoint_dir,
+                index,
+                chunk,
+                note,
+            )
         notes.append(f"### 区間 {index}/{len(chunks)}\n{note}")
 
     log.info("Combining %s transcript segment notes", len(notes))
+    notes = await _reduce_notes(client, notes)
     return await _generate(
         client,
         prompt=(

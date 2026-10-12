@@ -58,6 +58,7 @@ class VoiceSession:
         self._delivery_claimed = False
         self._transcription_failed = False
         self._transcript_path: Path | None = None
+        self._knowledge_pull_request_url: str | None = None
         self._speaker_labels: dict[int, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
@@ -444,6 +445,34 @@ class VoiceSession:
     def transcript_path(self) -> Path | None:
         return self._transcript_path
 
+    @property
+    def knowledge_pull_request_url(self) -> str | None:
+        return self._knowledge_pull_request_url
+
+    async def publish_knowledge(
+        self,
+        *,
+        summary: str | None = None,
+        minutes: str | None = None,
+    ) -> str | None:
+        """Queue the transcript and optional derived documents for Knowledge review."""
+        if not self.recording_sink or not self.transcript_text.strip():
+            return None
+        from bot.knowledge_publish import publish_meeting_knowledge
+
+        result = await publish_meeting_knowledge(
+            session_id=self.recording_sink.session_dir.name,
+            guild_id=self.guild_id,
+            channel_name=self.channel.name,
+            mode=self.mode.value,
+            transcript=self.transcript_text,
+            summary=summary,
+            minutes=minutes,
+        )
+        if result:
+            self._knowledge_pull_request_url = result.pull_request_url
+        return self._knowledge_pull_request_url
+
     async def _append_transcript(self, text: str) -> None:
         self.transcript.append(text)
         await self._persist_transcript()
@@ -521,7 +550,17 @@ class VoiceSession:
             await self._persist_transcript()
 
         if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
-            minutes = await self._generate_minutes()
+            try:
+                minutes = await self._generate_minutes()
+            except Exception as exc:
+                log.exception("Minutes generation failed; preserving transcript for delivery")
+                if self.recording_sink:
+                    self.recording_sink.mark(
+                        "minutes_generation_failed",
+                        error=type(exc).__name__,
+                        transcript_path=str(self._transcript_path or ""),
+                    )
+                return None
             if self.recording_sink and not self._transcription_failed:
                 self.recording_sink.mark("minutes_generated")
             return minutes
@@ -648,6 +687,11 @@ class VoiceSession:
             client,
             transcript_text,
             glossary_text=glossary_text,
+            checkpoint_dir=(
+                self.recording_sink.session_dir / "minutes-checkpoints"
+                if self.recording_sink
+                else None
+            ),
         )
 
     async def speak(self, text: str):

@@ -99,10 +99,13 @@ def register(bot):
         )
 
         if not minutes:
+            knowledge_url = await session.publish_knowledge()
             session.mark_delivered(transcript_url=transcript_url)
             message = "退出したぽん！👋"
             if transcript_url:
                 message += f"\n📜 [文字起こしをGoogle Docsで見る]({transcript_url})"
+            if knowledge_url:
+                message += f"\n🗂️ [KnowledgeのDraft PR]({knowledge_url})"
             await ctx.followup.send(message, silent=True)
             return
 
@@ -111,6 +114,7 @@ def register(bot):
 
         # Geminiで要約を生成
         summary = await _summarize_minutes(minutes)
+        knowledge_url = await session.publish_knowledge(summary=summary, minutes=minutes)
 
         # Discordには要約 + Google Docsリンクを送信
         embed = discord.Embed(
@@ -128,6 +132,12 @@ def register(bot):
             embed.add_field(
                 name="📜 逐語文字起こし",
                 value=f"[Google Docsで見る]({transcript_url})",
+                inline=False,
+            )
+        if knowledge_url:
+            embed.add_field(
+                name="🗂️ Knowledge",
+                value=f"[Draft PRを確認する]({knowledge_url})",
                 inline=False,
             )
 
