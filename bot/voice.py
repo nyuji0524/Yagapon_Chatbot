@@ -902,6 +902,10 @@ async def recover_incomplete_recordings(bot) -> None:
     ]
     for candidate in due[: max(1, batch_size)]:
         await _recover_recording(bot, candidate)
+        # A single exhausted STT quota applies to every session. Do not burn
+        # recovery attempts for the remainder of this batch during cooldown.
+        if _transcription_rate_limiter.remaining() > 0:
+            break
 
 
 async def recording_recovery_loop(bot) -> None:

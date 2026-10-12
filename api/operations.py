@@ -8,7 +8,7 @@ router = APIRouter(dependencies=[Depends(require_api_token)])
 
 
 @router.get("/admin/operations/summary")
-async def operations_summary(
+def operations_summary(
     request: Request,
     hours: int = Query(default=24, ge=1, le=24 * 90),
 ):
@@ -16,7 +16,7 @@ async def operations_summary(
 
 
 @router.get("/admin/operations/events")
-async def operations_events(
+def operations_events(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
 ):
@@ -25,7 +25,7 @@ async def operations_events(
 
 
 @router.get("/admin/operations/dead-letters")
-async def operations_dead_letters(
+def operations_dead_letters(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
 ):

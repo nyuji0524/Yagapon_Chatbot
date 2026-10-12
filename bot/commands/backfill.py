@@ -140,6 +140,7 @@ def register(bot):
             content=(
                 f"✅ {'事前確認' if dry_run else '取り込み'}完了: "
                 f"**{total_messages:,}件 / {total_documents:,}文書**\n"
-                f"旧文書 **{total_replaced:,}件** が置換対象だぽん。{failure_text}"
+                f"旧文書 **{total_replaced:,}件** を"
+                f"{'置換対象として確認した' if dry_run else '安全に置換した'}ぽん。{failure_text}"
             )
         )

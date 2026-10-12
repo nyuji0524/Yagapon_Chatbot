@@ -84,6 +84,29 @@ async def test_recovery_keeps_failed_429_chunk_for_later(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_recovery_batch_stops_after_rate_limit(monkeypatch, tmp_path):
+    candidates = [
+        RecoverableRecording(tmp_path / "one", {}),
+        RecoverableRecording(tmp_path / "two", {}),
+    ]
+    recover = AsyncMock()
+
+    async def trip_after_first(*_args):
+        voice._transcription_rate_limiter.trip(retry_after=60)
+
+    recover.side_effect = trip_after_first
+    monkeypatch.setattr(voice, "find_recoverable_recordings", lambda: candidates)
+    monkeypatch.setattr(voice, "_recover_recording", recover)
+    voice._transcription_rate_limiter.reset()
+    try:
+        await voice.recover_incomplete_recordings(SimpleNamespace())
+    finally:
+        voice._transcription_rate_limiter.reset()
+
+    assert recover.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_stop_is_idempotent_for_concurrent_leave_paths():
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.CHAT)
 
