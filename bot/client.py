@@ -101,6 +101,8 @@ class YagaPon(discord.Bot):
         """Give the non-privileged committee base role when the template is enabled."""
         from bot.commands.committee_server import MEMBER_ROLE
 
+        if member.bot:
+            return
         role = discord.utils.get(member.guild.roles, name=MEMBER_ROLE)
         if role is None or role in member.roles:
             return

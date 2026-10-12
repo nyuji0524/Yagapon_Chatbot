@@ -251,18 +251,31 @@ async def _ensure_text(guild, name: str, category, *, topic: str, overwrites=Non
 
 
 async def _ensure_forum(guild, name: str, category, *, topic: str, tags, overwrites=None):
-    channel = _find_named(guild.forum_channels, name)
+    channel = _find_named(guild.forum_channels, name) or _find_named(guild.text_channels, name)
     if channel:
         return channel, False
-    channel = await guild.create_forum_channel(
-        name,
-        category=category,
-        topic=topic,
-        available_tags=[discord.ForumTag(name=tag) for tag in tags],
-        overwrites=overwrites,
-        default_auto_archive_duration=10080,
-        reason="28thサーバー初期構築",
-    )
+    try:
+        channel = await guild.create_forum_channel(
+            name,
+            category=category,
+            topic=topic,
+            available_tags=[discord.ForumTag(name=tag) for tag in tags],
+            overwrites=overwrites,
+            default_auto_archive_duration=10080,
+            reason="28thサーバー初期構築",
+        )
+    except discord.HTTPException as exc:
+        if getattr(exc, "code", None) != 50024:
+            raise
+        log.warning("Forum unavailable; using thread-first text channel guild=%s name=%s", guild.id, name)
+        channel = await guild.create_text_channel(
+            name,
+            category=category,
+            topic=f"【スレッド専用】{topic}",
+            overwrites=overwrites,
+            default_auto_archive_duration=10080,
+            reason="コミュニティ機能未有効のためスレッド専用チャンネルとして作成",
+        )
     return channel, True
 
 
@@ -303,7 +316,7 @@ def _private_overwrites(guild: discord.Guild, allowed_roles: Iterable[discord.Ro
 async def _post_once(channel: discord.TextChannel, marker: str, *, content=None, embed=None, view=None):
     async for message in channel.history(limit=50):
         if message.author.id == channel.guild.me.id and marker in (message.content or ""):
-            if view:
+            if view or content or embed:
                 await message.edit(content=content, embed=embed, view=view)
             return message, False
     message = await channel.send(content=content, embed=embed, view=view, silent=True)
@@ -363,7 +376,12 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         read_only=True,
     )
     counts["channels"] += int(created)
-    request_overwrites = _private_overwrites(guild, [])
+    approver_roles = [role for role in guild.roles if role.permissions.manage_roles]
+    approver_roles.extend(
+        position_roles[name]
+        for name in ("委員長", "副委員長", "執行部", "局長")
+    )
+    request_overwrites = _private_overwrites(guild, approver_roles)
     requests, created = await _ensure_text(
         guild,
         ROLE_REQUEST_CHANNEL,
@@ -372,6 +390,21 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         overwrites=request_overwrites,
     )
     counts["channels"] += int(created)
+    await requests.edit(overwrites=request_overwrites, reason="役職申請の閲覧権限を同期")
+
+    if "COMMUNITY" not in guild.features:
+        try:
+            await guild.edit(
+                community=True,
+                rules_channel=intro,
+                public_updates_channel=announcements,
+                default_notifications=discord.NotificationLevel.only_mentions,
+                verification_level=discord.VerificationLevel.low,
+                explicit_content_filter=discord.ContentFilter.all_members,
+                reason="フォーラム形式で案件を整理するためコミュニティ機能を有効化",
+            )
+        except discord.HTTPException:
+            log.warning("Could not enable community features guild=%s; forums will fall back", guild.id)
 
     general, created = await _ensure_category(guild, "01｜全体")
     counts["categories"] += int(created)
