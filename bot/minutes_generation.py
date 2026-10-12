@@ -52,7 +52,7 @@ def split_transcript(transcript: str, max_chars: int | None = None) -> list[str]
     return chunks
 
 
-def _minutes_instruction(title: str, glossary_text: str) -> str:
+def _minutes_instruction(title: str, glossary_text: str, speaker_roster: str) -> str:
     instruction = (
         "文字起こしまたは区間メモから、事実を補わず詳細な議事録を作成してください。\n"
         "発言量が多くても、少数の話題だけに偏らず全区間の重要事項を反映してください。\n\n"
@@ -63,8 +63,14 @@ def _minutes_instruction(title: str, glossary_text: str) -> str:
         "- 参加者: Speakerラベルを列挙\n\n"
         "## 議題\n"
         "- 議論されたトピックを漏れなく列挙\n\n"
-        "## 議論内容\n"
-        "- 時系列と論点が分かるよう、Speakerラベル付きで詳しく記載\n\n"
+        "## 話題別まとめ\n"
+        "- 話題ごとに見出しを作り、背景、主な意見、対立点、結論、次の対応をまとめる\n"
+        "- 各記述にはSpeakerラベルを残し、別の話題を一つに混ぜない\n"
+        "- 時系列上の方針変更がある場合は、変更前→変更後と理由を記載\n\n"
+        "## 話者対応（推定を含む）\n"
+        "- Speakerラベルごとに、実名候補、役職、確度（高/中/低）、根拠を記載\n"
+        "- 自己紹介、名前での呼びかけ、担当を示す発言など、文字起こし中の根拠がある場合だけ候補を出す\n"
+        "- 根拠がなければ『不明』とし、声質だけで実名を推測しない\n\n"
         "## 決定事項\n"
         "- 決定と、決定に至った条件・理由を記載\n\n"
         "## アクションアイテム\n"
@@ -72,12 +78,18 @@ def _minutes_instruction(title: str, glossary_text: str) -> str:
         "## 未決事項・確認事項\n"
         "- 結論が出ていない論点、曖昧な担当や期限\n\n"
         "## 注意\n"
-        "- Speaker 1等のラベルから実名を推測しない\n"
+        "- 実名候補があってもSpeakerラベルを置き換えず、議事録本文では併記する\n"
         "- 聞き取れない箇所や根拠のない日時・担当者は不明と記載する\n"
         "- 決定事項と単なる提案を混同しない\n\n"
     )
     if glossary_text:
         instruction += f"## 用語辞書（表記修正の参考）\n{glossary_text}\n\n"
+    if speaker_roster:
+        instruction += (
+            "## 登録メンバー・役職（話者候補の照合専用）\n"
+            "この一覧にいることだけを根拠に話者を決めず、発言内容の根拠と照合してください。\n"
+            f"{speaker_roster}\n\n"
+        )
     return instruction
 
 
@@ -184,6 +196,7 @@ async def generate_minutes(
     *,
     title: str = "",
     glossary_text: str = "",
+    speaker_roster: str = "",
     checkpoint_dir: Path | None = None,
 ) -> str:
     """Use map/reduce generation so long meetings do not collapse into a weak summary."""
@@ -192,7 +205,7 @@ async def generate_minutes(
     if not chunks:
         return ""
 
-    instruction = _minutes_instruction(title, glossary_text)
+    instruction = _minutes_instruction(title, glossary_text, speaker_roster)
     if len(chunks) == 1:
         return await _generate(
             client,

@@ -6,12 +6,17 @@ import io
 
 import discord
 
+from bot.authorization import require_guild_admin
+
 
 def register(bot):
     group = bot.create_group("report", "レポート生成だぽん！")
 
     @group.command(name="weekly", description="週次レポートを生成するぽん！")
+    @discord.default_permissions(administrator=True)
     async def report_weekly(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         await ctx.defer()
 
         from bot.reports import generate_weekly_report
@@ -35,7 +40,10 @@ def register(bot):
             await ctx.followup.send(f"📁 Google Driveにも保存したぽん！\n{drive_url}", silent=True)
 
     @group.command(name="monthly", description="月間報告書を生成するぽん！")
+    @discord.default_permissions(administrator=True)
     async def report_monthly(ctx: discord.ApplicationContext):
+        if not await require_guild_admin(ctx):
+            return
         await ctx.defer()
         await ctx.followup.send("月間報告書を生成中だぽん... (少し時間がかかるぽん) ⏳", silent=True)
 

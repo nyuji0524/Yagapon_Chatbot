@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -63,6 +64,8 @@ class VoiceSession:
         self._knowledge_pull_request_url: str | None = None
         self._knowledge_outbox_path: Path | None = None
         self._speaker_labels: dict[int, str] = {}
+        self._diarized_speaker_labels: dict[str, str] = {}
+        self._diarization_chunk_sequence = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
         self._last_audio_len: dict[int, int] = {}  # user_id -> 文字起こし済みPCMバイト数
@@ -76,8 +79,51 @@ class VoiceSession:
     def _speaker_label(self, user_id: int) -> str:
         """Return a stable anonymous label for this recording session."""
         if user_id not in self._speaker_labels:
-            self._speaker_labels[user_id] = f"Speaker {len(self._speaker_labels) + 1}"
+            self._speaker_labels[user_id] = self._next_speaker_label()
         return self._speaker_labels[user_id]
+
+    def _next_speaker_label(self) -> str:
+        used = set(self._speaker_labels.values()) | set(self._diarized_speaker_labels.values())
+        number = 1
+        while f"Speaker {number}" in used:
+            number += 1
+        return f"Speaker {number}"
+
+    def _format_transcribed_text(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        diarized: bool,
+        chunk_id: int | None = None,
+    ) -> str:
+        """Map chunk-local diarization labels to non-colliding session labels.
+
+        STT providers restart ``Speaker 1`` numbering for every request.  The
+        chunk identifier therefore has to be part of the mapping key; reusing
+        only the local number would silently merge different people who spoke
+        in different five-minute chunks.
+        """
+        if not diarized:
+            return f"[{self._speaker_label(user_id)}]: {text}"
+        pattern = re.compile(
+            r"(?im)^\s*\[?(?:speaker|spk)[ _-]?(\d+)\]?\s*:\s*"
+        )
+        matches = list(pattern.finditer(text))
+        if not matches:
+            return f"[{self._speaker_label(user_id)}]: {text}"
+
+        if chunk_id is None:
+            self._diarization_chunk_sequence += 1
+            chunk_id = self._diarization_chunk_sequence
+
+        def replace(match: re.Match) -> str:
+            key = f"{user_id}:{chunk_id}:{int(match.group(1))}"
+            if key not in self._diarized_speaker_labels:
+                self._diarized_speaker_labels[key] = self._next_speaker_label()
+            return f"[{self._diarized_speaker_labels[key]}]: "
+
+        return pattern.sub(replace, text).strip()
 
     async def add_reference_from_message(self, message: discord.Message):
         """Discordメッセージから参考資料を収集（テキスト+添付ファイル）"""
@@ -220,7 +266,11 @@ class VoiceSession:
             if len(audio_bytes) < 1000:
                 self._last_audio_len[user_id] = next_offset
                 continue
-            speaker = self._speaker_label(user_id)
+            speaker = (
+                f"stream-{user_id}"
+                if self.mode == VoiceMode.LISTEN
+                else self._speaker_label(user_id)
+            )
             audio_chunks[user_id] = (speaker, audio_bytes)
             next_offsets[user_id] = next_offset
 
@@ -231,13 +281,14 @@ class VoiceSession:
         if self.mode == VoiceMode.LISTEN:
             for user_id, (name, new_audio) in audio_chunks.items():
                 log.info(f"Transcribing {len(new_audio)} bytes from {name}")
-                text = await self._transcribe_audio(new_audio, name)
+                text = await self._transcribe_audio(new_audio, name, diarization=True)
                 if text is None:
                     continue
                 self._last_audio_len[user_id] = next_offsets[user_id]
                 if text.strip():
-                    await self._append_transcript(f"[{name}]: {text}")
-                    log.info(f"Transcribed: [{name}]: {text[:50]}...")
+                    formatted = self._format_transcribed_text(user_id, text, diarized=True)
+                    await self._append_transcript(formatted)
+                    log.info("Transcribed stream=%s: %s...", user_id, formatted[:50])
                 await self._checkpoint_state()
             return
 
@@ -507,6 +558,8 @@ class VoiceSession:
             speaker_labels=self._speaker_labels,
             transcript_path=self._transcript_path,
             status=status,
+            diarized_speaker_labels=self._diarized_speaker_labels,
+            diarization_chunk_sequence=self._diarization_chunk_sequence,
             **extra,
         )
 
@@ -606,14 +659,19 @@ class VoiceSession:
                 return
             progressed = False
             for user_id, (audio_bytes, next_offset) in chunks.items():
-                speaker = self._speaker_label(user_id)
-                text = await self._transcribe_audio(audio_bytes, speaker)
+                diarized = self.mode == VoiceMode.LISTEN
+                speaker = f"stream-{user_id}" if diarized else self._speaker_label(user_id)
+                text = await self._transcribe_audio(
+                    audio_bytes, speaker, diarization=diarized
+                )
                 if text is None:
                     continue
                 self._last_audio_len[user_id] = next_offset
                 progressed = True
                 if text.strip():
-                    await self._append_transcript(f"[{speaker}]: {text}")
+                    await self._append_transcript(
+                        self._format_transcribed_text(user_id, text, diarized=diarized)
+                    )
                 await self._checkpoint_state()
             if not progressed:
                 self._transcription_failed = True
@@ -633,7 +691,13 @@ class VoiceSession:
             wf.writeframes(pcm_data)
         return buf.getvalue()
 
-    async def _transcribe_audio(self, audio_bytes: bytes, speaker_name: str) -> str | None:
+    async def _transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        speaker_name: str,
+        *,
+        diarization: bool = False,
+    ) -> str | None:
         """Gemini Audio APIで音声を文字起こし"""
         if len(audio_bytes) < 1000:  # ほぼ無音
             return ""
@@ -665,6 +729,7 @@ class VoiceSession:
                     mime_type="audio/wav",
                     display_name=f"vc-{speaker_name}",
                     custom_vocabulary=vocabulary,
+                    diarization=diarization,
                     # Short interactive modes can create many requests. Reserve
                     # the dedicated STT quota for long-form listen/minutes mode.
                     prefer_dedicated=self.mode == VoiceMode.LISTEN,
@@ -716,14 +781,18 @@ class VoiceSession:
 
         # 語録を含める
         glossary_text = ""
+        speaker_roster = ""
         if self.bot and hasattr(self.bot, "config"):
             glossary_text = self.bot.config.get_glossary_text(self.guild_id)
+        if self.bot and hasattr(self.bot, "_build_members_info"):
+            speaker_roster = self.bot._build_members_info(self.guild_id)
 
         client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
         return await generate_minutes(
             client,
             transcript_text,
             glossary_text=glossary_text,
+            speaker_roster=speaker_roster,
             checkpoint_dir=(
                 self.recording_sink.session_dir / "minutes-checkpoints"
                 if self.recording_sink
@@ -830,6 +899,13 @@ async def _recover_recording(bot, candidate) -> None:
     session._speaker_labels = {
         int(key): str(value) for key, value in (metadata.get("speaker_labels") or {}).items()
     }
+    session._diarized_speaker_labels = {
+        str(key): str(value)
+        for key, value in (metadata.get("diarized_speaker_labels") or {}).items()
+    }
+    session._diarization_chunk_sequence = int(
+        metadata.get("diarization_chunk_sequence") or 0
+    )
     transcript_path_value = str(metadata.get("transcript_path") or "")
     session._transcript_path = Path(transcript_path_value) if transcript_path_value else None
     existing = load_transcript_content(session._transcript_path)

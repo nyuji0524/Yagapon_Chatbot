@@ -11,6 +11,7 @@ import os
 import discord
 
 from bot.ai_models import fast_model, generation_config
+from bot.authorization import require_registered_member
 from bot.voice import VoiceMode, get_session, join_voice, leave_voice
 
 log = logging.getLogger("yagapon.commands.voice")
@@ -28,6 +29,8 @@ def register(bot):
         ],
     )
     async def join_cmd(ctx: discord.ApplicationContext, mode: str):
+        if not await require_registered_member(ctx, bot.config):
+            return
         if get_session(ctx.guild_id):
             await ctx.respond(
                 "すでに録音中だぽん。先に `/leave` で議事録の保存を完了してねぽん！",
@@ -59,6 +62,8 @@ def register(bot):
 
     @bot.slash_command(name="leave", description="ボイスチャンネルから退出するぽん！")
     async def leave_cmd(ctx: discord.ApplicationContext):
+        if not await require_registered_member(ctx, bot.config):
+            return
         await ctx.defer()
 
         # セッション情報を退出前に取得

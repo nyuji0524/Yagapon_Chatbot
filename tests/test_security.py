@@ -4,7 +4,12 @@ import pytest
 from fastapi import HTTPException
 
 from api.security import require_api_token
-from bot.authorization import can_manage_member, is_guild_admin, require_guild_admin
+from bot.authorization import (
+    can_manage_member,
+    is_guild_admin,
+    require_guild_admin,
+    require_registered_member,
+)
 
 
 @pytest.mark.asyncio
@@ -30,7 +35,7 @@ async def test_api_token_requires_exact_bearer_token(monkeypatch):
 
 class FakeContext:
     def __init__(self, *, administrator: bool):
-        self.guild = object()
+        self.guild = SimpleNamespace(id=1)
         self.author = SimpleNamespace(
             id=10,
             guild_permissions=SimpleNamespace(administrator=administrator),
@@ -61,3 +66,28 @@ def test_admin_can_manage_another_member():
     context = FakeContext(administrator=True)
 
     assert can_manage_member(context, SimpleNamespace(id=11)) is True
+
+
+@pytest.mark.asyncio
+async def test_registered_member_gate_rejects_unregistered_user():
+    context = FakeContext(administrator=False)
+    config = SimpleNamespace(
+        get_corpus=lambda _guild_id: "stores/test",
+        get_members=lambda _guild_id: {"11": {"name": "別メンバー"}},
+    )
+
+    assert await require_registered_member(context, config) is False
+    assert "登録メンバー専用" in context.responses[0][0]
+
+
+@pytest.mark.asyncio
+async def test_registered_member_gate_allows_member_and_admin():
+    config = SimpleNamespace(
+        get_corpus=lambda _guild_id: "stores/test",
+        get_members=lambda _guild_id: {"10": {"name": "本人"}},
+    )
+    assert await require_registered_member(FakeContext(administrator=False), config) is True
+
+    admin = FakeContext(administrator=True)
+    config.get_members = lambda _guild_id: {"11": {"name": "別メンバー"}}
+    assert await require_registered_member(admin, config) is True

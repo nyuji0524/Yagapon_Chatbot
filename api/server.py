@@ -10,7 +10,7 @@ def create_app(bot) -> FastAPI:
     app.state.bot = bot
     app.state.backfill_jobs = {}
     app.state.backfill_tasks = set()
-    app.state.catalog = CatalogStore()
+    app.state.catalog = getattr(bot, "catalog", None) or CatalogStore()
 
     from api.catalog_routes import router as catalog_router
     from api.operations import router as operations_router
