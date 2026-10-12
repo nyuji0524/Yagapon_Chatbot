@@ -17,7 +17,7 @@ from uuid import uuid4
 import discord
 
 from bot.ai_retry import new_genai_client
-from bot.meeting_time import display_meeting_date
+from bot.meeting_time import display_meeting_date, meeting_datetime
 from bot.minutes_generation import generate_minutes
 from bot.recording import (
     PCM_CHANNELS,
@@ -394,9 +394,7 @@ class RecordingReplayManager:
                 session.recording_sink = ReadOnlyReplaySink(
                     artifact, job.target_guild_id, job.id
                 )
-                session.started_at = datetime.fromisoformat(
-                    artifact.started_at.replace("Z", "+00:00")
-                ) if artifact.started_at else datetime.now(timezone.utc)
+                session.started_at = meeting_datetime(artifact.started_at or None)
                 await session._drain_recording()
                 await session._persist_transcript()
                 if session._transcription_failed or not session.transcript_text.strip():

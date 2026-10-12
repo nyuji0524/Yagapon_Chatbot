@@ -84,6 +84,7 @@ async def transcribe_audio(
     loop = asyncio.get_running_loop()
     uploaded = None
     uploaded_voiceprints = []
+    reference_voiceprints = []
     try:
         async def upload():
             return await loop.run_in_executor(
@@ -184,6 +185,9 @@ async def transcribe_audio(
                         ),
                         operation_name="voiceprint_upload",
                     )
+                    # Register immediately so a sibling upload failure cannot
+                    # orphan an already-created remote Files API resource.
+                    uploaded_voiceprints.append(sample)
                     return index, name, sample
 
             results = await asyncio.gather(
@@ -193,13 +197,13 @@ async def transcribe_audio(
                 )
             )
             for index, name, sample in results:
-                uploaded_voiceprints.append(sample)
+                reference_voiceprints.append(sample)
                 voiceprint_labels[index] = name
 
         async def create_fallback_transcription():
-            if uploaded_voiceprints:
-                contents = [_voiceprint_prompt(len(uploaded_voiceprints), custom_vocabulary)]
-                for index, sample in enumerate(uploaded_voiceprints, start=1):
+            if reference_voiceprints:
+                contents = [_voiceprint_prompt(len(reference_voiceprints), custom_vocabulary)]
+                for index, sample in enumerate(reference_voiceprints, start=1):
                     contents.extend([
                         f"登録声紋 Registered {index}:",
                         types.Part.from_uri(file_uri=sample.uri, mime_type="audio/wav"),

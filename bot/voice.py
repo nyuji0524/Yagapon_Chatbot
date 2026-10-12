@@ -121,14 +121,14 @@ class VoiceSession:
         if not diarized:
             return f"[{self._speaker_label(user_id)}]: {text}"
         pattern = re.compile(
-            r"(?im)^\s*\[?(?:speaker|spk)[ _-]?(\d+)\]?\s*:\s*"
+            r"(?im)^\s*\[?(?:speaker|spk)[ _-]?(\d+)\]?\s*[:：]\s*"
         )
         matches = list(pattern.finditer(text))
         registered = set(self._registered_voiceprints())
         named_pattern = None
         if registered:
             alternatives = "|".join(re.escape(name) for name in sorted(registered, key=len, reverse=True))
-            named_pattern = re.compile(rf"(?im)^\s*\[?({alternatives})\]?\s*:\s*")
+            named_pattern = re.compile(rf"(?im)^\s*\[?({alternatives})\]?\s*[:：]\s*")
         named_matches = list(named_pattern.finditer(text)) if named_pattern else []
         if not matches and not named_matches:
             return f"[{self._speaker_label(user_id)}]: {text}"

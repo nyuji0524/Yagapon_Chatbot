@@ -347,6 +347,19 @@ def test_listen_mode_preserves_only_registered_voiceprint_names(monkeypatch):
     assert result == "[中山]: 登録者です\n[Speaker 1]: 未登録者です"
 
 
+def test_listen_mode_accepts_full_width_colons_in_speaker_labels():
+    session = VoiceSession(SimpleNamespace(config=SimpleNamespace()), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session._voiceprint_paths = {"中山": "/data/voiceprints/1.wav"}
+
+    result = session._format_transcribed_text(
+        42,
+        "中山： 登録者です\nSpeaker 1： 未登録者です",
+        diarized=True,
+    )
+
+    assert result == "[中山]: 登録者です\n[Speaker 1]: 未登録者です"
+
+
 @pytest.mark.asyncio
 async def test_uploaded_minutes_retries_without_diarization(monkeypatch):
     generated = AsyncMock(return_value=SimpleNamespace(text="# 会議"))
