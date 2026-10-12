@@ -292,8 +292,10 @@ class RecordingReplayManager:
         artifact = find_recording_artifact(session_id)
         if retranscribe and artifact.raw_bytes <= 0:
             raise ValueError("raw audio is no longer available")
-        if not retranscribe and artifact.transcript_path is None and artifact.raw_bytes <= 0:
-            raise ValueError("neither transcript nor raw audio is available")
+        if not retranscribe and artifact.transcript_path is None:
+            raise ValueError(
+                "saved transcript is unavailable; retry explicitly with retranscribe=true"
+            )
         now = datetime.now(timezone.utc).isoformat()
         job = ReplayJob(
             id=f"replay-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}",
@@ -306,18 +308,53 @@ class RecordingReplayManager:
             updated_at=now,
         )
         self.jobs[job.id] = job
+        self._persist_job(job)
         task = asyncio.create_task(self._run(job, artifact, target_channel), name=job.id)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job
 
     def get(self, job_id: str) -> ReplayJob | None:
-        return self.jobs.get(job_id)
+        in_memory = self.jobs.get(job_id)
+        if in_memory:
+            return in_memory
+        if not re.fullmatch(r"replay-[A-Za-z0-9_.-]{1,120}", job_id):
+            return None
+        path = replay_root() / job_id / "job.json"
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            job = ReplayJob(**stored)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if job.status in {"queued", "running"}:
+            job.status = "interrupted"
+            job.stage = "interrupted"
+            job.error_type = "ProcessRestarted"
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist_job(job)
+        self.jobs[job.id] = job
+        return job
+
+    @staticmethod
+    def _persist_job(job: ReplayJob) -> None:
+        work_dir = replay_root() / job.id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        metadata = work_dir / "job.json"
+        temporary = metadata.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(job.storage_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, metadata)
+
+    def _stage(self, job: ReplayJob, stage: str) -> None:
+        job.stage = stage
+        job.updated_at = datetime.now(timezone.utc).isoformat()
+        self._persist_job(job)
 
     async def _run(self, job: ReplayJob, artifact: RecordingArtifact, target_channel) -> None:
         job.status = "running"
-        job.stage = "preparing"
-        job.updated_at = datetime.now(timezone.utc).isoformat()
+        self._stage(job, "preparing")
         work_dir = replay_root() / job.id
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -329,7 +366,7 @@ class RecordingReplayManager:
             )
             transcript = ""
             if artifact.transcript_path and not job.retranscribe:
-                job.stage = "loading_transcript"
+                self._stage(job, "loading_transcript")
                 transcript = await asyncio.to_thread(load_transcript_content, artifact.transcript_path)
                 archived = await asyncio.to_thread(
                     save_external_transcript,
@@ -341,7 +378,7 @@ class RecordingReplayManager:
                 )
                 job.transcript_path = str(archived or "")
             else:
-                job.stage = "transcribing"
+                self._stage(job, "transcribing")
                 from bot.voice import VoiceMode, VoiceSession
 
                 session = VoiceSession(
@@ -368,7 +405,7 @@ class RecordingReplayManager:
                 raise RuntimeError("recording transcript is empty")
             (work_dir / "transcript.md").write_text(transcript, encoding="utf-8")
 
-            job.stage = "generating_minutes"
+            self._stage(job, "generating_minutes")
             minutes = await generate_minutes(
                 new_genai_client(os.environ.get("GOOGLE_API_KEY", "")),
                 transcript,
@@ -383,7 +420,7 @@ class RecordingReplayManager:
             minutes_path.write_text(minutes, encoding="utf-8")
             job.minutes_path = str(minutes_path)
 
-            job.stage = "publishing"
+            self._stage(job, "publishing")
             from bot.commands.voice_cmd import _summarize_minutes
             from bot.gdrive import upload_minutes, upload_transcript
 
@@ -422,7 +459,7 @@ class RecordingReplayManager:
             await target_channel.send(**kwargs)
 
             job.status = "completed"
-            job.stage = "completed"
+            self._stage(job, "completed")
             self.bot.operations.record_event(
                 "recording_replay", "minutes", "success",
                 guild_id=job.target_guild_id, item_key=job.id,
@@ -453,7 +490,4 @@ class RecordingReplayManager:
                 log.exception("Could not notify replay failure job=%s", job.id)
         finally:
             job.updated_at = datetime.now(timezone.utc).isoformat()
-            metadata = work_dir / "job.json"
-            temporary = metadata.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(job.storage_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(temporary, metadata)
+            self._persist_job(job)

@@ -20,7 +20,8 @@ class ReplayRequest(BaseModel):
 
 
 class ReplayLongestRequest(BaseModel):
-    target_guild_name: str = Field(min_length=1, max_length=100)
+    target_guild_name: str | None = Field(default=None, max_length=100)
+    target_guild_id: int | None = None
     target_channel_id: int | None = None
     retranscribe: bool = False
 
@@ -121,6 +122,7 @@ async def start_longest_recording_replay(
         selected = max(candidates, key=lambda item: item.transcript_bytes)
     guild = _target_guild(bot, ReplayRequest(
         session_id=selected.session_id,
+        target_guild_id=payload.target_guild_id,
         target_guild_name=payload.target_guild_name,
     ))
     channel = _target_channel(guild, payload.target_channel_id)

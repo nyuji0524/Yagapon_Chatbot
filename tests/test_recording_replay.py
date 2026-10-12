@@ -128,3 +128,23 @@ async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, m
     assert channel.send.await_count == 2
     assert generated.await_args.kwargs["speaker_roster"] == "中山 | IT局長"
     bot.operations.record_event.assert_called_once()
+
+    restored = RecordingReplayManager(bot).get(job.id)
+    assert restored is not None
+    assert restored.status == "completed"
+
+
+def test_replay_requires_explicit_retranscribe_when_only_pcm_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setenv("YAGAPON_REPLAY_DIR", str(tmp_path / "replays"))
+    _recording(tmp_path, raw=True, transcript=False)
+    bot = SimpleNamespace()
+    channel = SimpleNamespace(id=50, guild=SimpleNamespace(id=999))
+
+    with pytest.raises(ValueError, match="retranscribe=true"):
+        RecordingReplayManager(bot).start(
+            session_id="session-long",
+            target_channel=channel,
+            retranscribe=False,
+        )
