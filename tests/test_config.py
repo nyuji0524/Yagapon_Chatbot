@@ -17,6 +17,16 @@ async def test_config_is_saved_and_reloaded(tmp_path):
     assert not path.with_suffix(".json.tmp").exists()
 
 
+@pytest.mark.asyncio
+async def test_minutes_channel_is_saved_as_an_integer(tmp_path):
+    path = tmp_path / "server_config.json"
+    config = ConfigManager(path)
+
+    await config.set_minutes_channel(1, 123456789)
+
+    assert ConfigManager(path).get_minutes_channel(1) == 123456789
+
+
 def test_corrupt_config_stops_startup_instead_of_being_overwritten(tmp_path):
     path = tmp_path / "server_config.json"
     path.write_text("{broken", encoding="utf-8")

@@ -163,10 +163,15 @@ class YagaPon(discord.Bot):
                 return
 
             if minutes and has_minutes:
-                # 通知先の優先順位: システムチャンネル → 最初の送信可能チャンネル
+                # 通知先の優先順位: 設定済み議事録CH → システムCH → 最初の送信可能CH
                 notify_ch = None
+                configured_channel_id = self.config.get_minutes_channel(member.guild.id)
+                if configured_channel_id:
+                    configured_channel = member.guild.get_channel(configured_channel_id)
+                    if configured_channel and configured_channel.permissions_for(member.guild.me).send_messages:
+                        notify_ch = configured_channel
                 if member.guild.system_channel:
-                    notify_ch = member.guild.system_channel
+                    notify_ch = notify_ch or member.guild.system_channel
                 if not notify_ch:
                     for ch in member.guild.text_channels:
                         if ch.permissions_for(member.guild.me).send_messages:

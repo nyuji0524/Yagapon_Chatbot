@@ -37,12 +37,18 @@ def _find_named(items, name: str):
     return discord.utils.get(items, name=name)
 
 
-async def _replace_role_group(member: discord.Member, role: discord.Role, role_names: Iterable[str]) -> None:
+async def _replace_role_group(
+    member: discord.Member,
+    role: discord.Role,
+    role_names: Iterable[str],
+    *,
+    reason: str = "本人によるロール選択",
+) -> None:
     removable = [current for current in member.roles if current.name in role_names and current.id != role.id]
     if removable:
-        await member.remove_roles(*removable, reason="本人によるロール選択")
+        await member.remove_roles(*removable, reason=reason)
     if role not in member.roles:
-        await member.add_roles(role, reason="本人によるロール選択")
+        await member.add_roles(role, reason=reason)
 
 
 async def _respond_ephemeral(interaction: discord.Interaction, message: str) -> None:
@@ -126,6 +132,9 @@ class PositionSelect(discord.ui.Select):
         if not guild or not isinstance(member, discord.Member) or role is None or request_channel is None:
             await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
             return
+        if role in member.roles:
+            await _respond_ephemeral(interaction, f"**{role.name}** は既に付いているぽん！")
+            return
         embed = discord.Embed(
             title="役職ロール申請",
             description=f"{member.mention} が **{role.name}** を申請しています。",
@@ -178,7 +187,12 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
         return
     if approve:
         try:
-            await _replace_role_group(member, role, POSITION_ROLES)
+            await _replace_role_group(
+                member,
+                role,
+                POSITION_ROLES,
+                reason=f"{interaction.user} による役職承認",
+            )
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロール順を確認してほしいぽん。")
             return
@@ -346,6 +360,8 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
         position_roles[name], created = await _ensure_role(guild, name, color=0xF39C12)
         counts["roles"] += int(created)
 
+    if not guild.chunked:
+        await guild.chunk()
     for member in guild.members:
         if not member.bot and member_role not in member.roles:
             await member.add_roles(member_role, reason="28thサーバー初期構築")
@@ -578,10 +594,6 @@ async def bootstrap_committee_server(guild: discord.Guild) -> dict[str, int]:
     _message, created = await _post_once(bot_guide, ROLE_PANEL_MARKER, content=bot_text)
     counts["messages"] += int(created)
 
-    try:
-        await guild.edit(system_channel=minutes_channel, reason="議事録通知先を設定")
-    except discord.HTTPException:
-        log.warning("Could not set system channel guild=%s", guild.id)
     return counts
 
 
@@ -620,6 +632,9 @@ def register(bot):
                 ephemeral=True,
             )
             return
+        minutes_channel = _find_named(ctx.guild.text_channels, "議事録")
+        if minutes_channel:
+            await bot.config.set_minutes_channel(ctx.guild.id, minutes_channel.id)
         await ctx.followup.send(
             "✅ 委員会サーバーを整備したぽん！\n"
             f"新規: ロール {counts['roles']} / カテゴリ {counts['categories']} / "
