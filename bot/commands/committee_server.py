@@ -686,10 +686,15 @@ def register(bot):
                 )
             )
             return
-        except Exception:
+        except Exception as exc:
             log.exception("Unexpected committee setup error guild=%s", ctx.guild_id)
+            detail = " ".join(str(exc).split())[:240] or "詳細なし"
             await progress_message.edit(
-                content="❌ 予期しないエラーで停止したぽん。ログに記録したので、管理者に確認してほしいぽん。"
+                content=(
+                    "❌ 予期しないエラーで停止したぽん。"
+                    f" `{type(exc).__name__}: {detail}`\n"
+                    "既存設定は保持されているぽん。"
+                )
             )
             return
         minutes_channel = _find_named(ctx.guild.text_channels, "議事録")
