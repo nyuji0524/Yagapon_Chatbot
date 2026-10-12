@@ -1,9 +1,11 @@
 """Read-only Google Shared Drive change reader."""
 
 import io
+import os
 from dataclasses import dataclass
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from bot.google_credentials import load_google_credentials
@@ -28,6 +30,10 @@ class DriveDocument:
     removed: bool = False
 
 
+class DriveChangeTokenExpired(RuntimeError):
+    pass
+
+
 class DriveReader:
     def __init__(self, credentials_path: str | None, drive_id: str, folder_id: str | None = None):
         if credentials_path:
@@ -39,6 +45,8 @@ class DriveReader:
         self._service = build("drive", "v3", credentials=credentials, cache_discovery=False)
         self.drive_id = drive_id
         self.folder_id = folder_id
+        self.recursive = os.environ.get("YAGAPON_DRIVE_RECURSIVE", "true").lower() in {"1", "true", "yes", "on"}
+        self._scope_cache: dict[str, bool] = {}
 
     def check_access(self) -> dict:
         """Fail fast with a small read before starting an expensive full sync."""
@@ -60,14 +68,14 @@ class DriveReader:
         }
 
     def get_start_page_token(self) -> str:
-        response = self._service.changes().getStartPageToken(driveId=self.drive_id).execute()
+        response = self._service.changes().getStartPageToken(driveId=self.drive_id).execute(num_retries=5)
         return response["startPageToken"]
 
     def list_all(self) -> list[DriveDocument]:
         documents = []
         page_token = None
         query = "trashed = false"
-        if self.folder_id:
+        if self.folder_id and not self.recursive:
             query += f" and '{self.folder_id}' in parents"
         while True:
             response = self._service.files().list(
@@ -79,8 +87,9 @@ class DriveReader:
                 pageSize=1000,
                 pageToken=page_token,
                 fields="nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,parents,trashed)",
-            ).execute()
-            documents.extend(self._to_document(item) for item in response.get("files", []))
+            ).execute(num_retries=5)
+            batch = [self._to_document(item) for item in response.get("files", [])]
+            documents.extend(doc for doc in batch if self._is_in_scope(doc))
             page_token = response.get("nextPageToken")
             if not page_token:
                 return documents
@@ -90,18 +99,23 @@ class DriveReader:
         current_token = page_token
         new_start_token = page_token
         while current_token:
-            response = self._service.changes().list(
-                pageToken=current_token,
-                driveId=self.drive_id,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-                includeRemoved=True,
-                pageSize=1000,
-                fields=(
-                    "nextPageToken,newStartPageToken,changes(removed,fileId,"
-                    "file(id,name,mimeType,modifiedTime,webViewLink,parents,trashed))"
-                ),
-            ).execute()
+            try:
+                response = self._service.changes().list(
+                    pageToken=current_token,
+                    driveId=self.drive_id,
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True,
+                    includeRemoved=True,
+                    pageSize=1000,
+                    fields=(
+                        "nextPageToken,newStartPageToken,changes(removed,fileId,"
+                        "file(id,name,mimeType,modifiedTime,webViewLink,parents,trashed))"
+                    ),
+                ).execute(num_retries=5)
+            except HttpError as exc:
+                if exc.resp.status == 410:
+                    raise DriveChangeTokenExpired("Drive change token expired") from exc
+                raise
             for change in response.get("changes", []):
                 file_data = change.get("file")
                 if change.get("removed") or not file_data or file_data.get("trashed"):
@@ -118,7 +132,7 @@ class DriveReader:
                     )
                     continue
                 document = self._to_document(file_data)
-                if not self.folder_id or self.folder_id in document.parents:
+                if self._is_in_scope(document):
                     documents.append(document)
             current_token = response.get("nextPageToken")
             new_start_token = response.get("newStartPageToken") or new_start_token
@@ -139,8 +153,40 @@ class DriveReader:
         downloader = MediaIoBaseDownload(output, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            _, done = downloader.next_chunk(num_retries=5)
         return output.getvalue().decode("utf-8", errors="replace")
+
+    def _is_in_scope(self, document: DriveDocument) -> bool:
+        if not self.folder_id:
+            return True
+        if self.folder_id in document.parents:
+            return True
+        if not self.recursive:
+            return False
+        return any(self._parent_in_scope(parent_id, set()) for parent_id in document.parents)
+
+    def _parent_in_scope(self, parent_id: str, visited: set[str]) -> bool:
+        if parent_id == self.folder_id:
+            return True
+        if parent_id in visited:
+            return False
+        cached = self._scope_cache.get(parent_id)
+        if cached is not None:
+            return cached
+        visited.add(parent_id)
+        try:
+            item = self._service.files().get(
+                fileId=parent_id, fields="id,parents", supportsAllDrives=True
+            ).execute(num_retries=5)
+        except HttpError:
+            self._scope_cache[parent_id] = False
+            return False
+        result = any(
+            self._parent_in_scope(ancestor_id, visited)
+            for ancestor_id in (item.get("parents") or [])
+        )
+        self._scope_cache[parent_id] = result
+        return result
 
     @staticmethod
     def _to_document(item: dict) -> DriveDocument:

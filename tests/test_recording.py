@@ -2,7 +2,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from bot.recording import PersistentPCMSink, cleanup_old_recordings
+from bot.recording import (
+    PersistentPCMSink,
+    cleanup_old_recordings,
+    find_recoverable_recordings,
+    load_transcript_content,
+)
 
 
 def test_persistent_sink_reads_only_new_bounded_pcm(tmp_path):
@@ -107,3 +112,45 @@ def test_cleanup_of_recording_metadata_keeps_separate_transcript(tmp_path, monke
     assert cleanup_old_recordings(retention_days=7) == 1
     assert not session.exists()
     assert transcript.read_text(encoding="utf-8") == "文字起こし"
+
+
+def test_recording_checkpoint_can_be_resumed(tmp_path):
+    session_dir = tmp_path / "recordings" / "1" / "session-1"
+    sink = PersistentPCMSink(1, "会議", "listen", session_dir=session_dir)
+    sink.write(b"audio", SimpleNamespace(id=42))
+    transcript = sink.save_transcript("[Speaker 1]: 保存済み")
+    sink.checkpoint(
+        offsets={42: 5},
+        speaker_labels={42: "Speaker 1"},
+        transcript_path=transcript,
+        status="shutdown_pending",
+    )
+    sink.cleanup()
+
+    resumed = PersistentPCMSink(1, "会議", "listen", session_dir=session_dir, resume=True)
+    metadata = resumed.read_metadata()
+
+    assert metadata["offsets"] == {"42": 5}
+    assert metadata["speaker_labels"] == {"42": "Speaker 1"}
+    assert resumed.total_bytes == 5
+    assert load_transcript_content(transcript) == "[Speaker 1]: 保存済み"
+
+
+def test_find_recoverable_recordings_skips_terminal_and_future_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path))
+    now = datetime.now(timezone.utc)
+    for name, status, retry_at in (
+        ("recover", "shutdown_pending", None),
+        ("done", "delivered_audio_deleted", None),
+        ("later", "recovery_retry", (now + timedelta(hours=1)).isoformat()),
+    ):
+        session = tmp_path / "1" / name
+        session.mkdir(parents=True)
+        (session / "user-1.pcm").write_bytes(b"audio")
+        (session / "metadata.json").write_text(
+            json.dumps({"status": status, "updated_at": now.isoformat(), "next_retry_at": retry_at})
+        )
+
+    candidates = find_recoverable_recordings(now=now)
+
+    assert [item.session_dir.name for item in candidates] == ["recover"]

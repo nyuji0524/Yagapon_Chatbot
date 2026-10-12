@@ -95,6 +95,12 @@ fi
 
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" config --quiet
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon
+data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
+data_path=${data_path:-/var/lib/yagapon}
+docker run --rm \
+  --env-file /etc/yagapon/yagapon.env \
+  --volume "$data_path:/data" \
+  "$image" python -m bot.preflight
 systemctl restart yagapon
 
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
@@ -112,6 +118,11 @@ for _ in $(seq 1 30); do
     && systemctl is-active --quiet yagapon \
     && curl --fail --silent --show-error "http://127.0.0.1:${host_port}/health" >/dev/null; then
     trap - ERR
+    install -d -m 0750 /var/lib/yagapon/releases
+    printf '{"image":"%s","deployed_at":"%s","container":"%s"}\n' \
+      "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$container_id" \
+      > /var/lib/yagapon/releases/current.json
+    find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     docker image prune --force --filter 'until=168h' >/dev/null
     echo "Deployment healthy: $image (container: $container_id)"
     exit 0

@@ -131,7 +131,13 @@ def main():
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("YAGAPON_KNOWLEDGE_ROOT", "/knowledge")))
     parser.add_argument("--guild-id", type=int, default=int(os.environ.get("YAGAPON_KNOWLEDGE_GUILD_ID", "0")))
     parser.add_argument("--state", type=Path, default=Path(os.environ.get("YAGAPON_KNOWLEDGE_INDEX_STATE", "/data/knowledge-index-state.json")))
-    parser.add_argument("--statuses", default=os.environ.get("YAGAPON_KNOWLEDGE_INDEX_STATUSES", "approved,verified,current"))
+    parser.add_argument(
+        "--statuses",
+        default=os.environ.get(
+            "YAGAPON_KNOWLEDGE_INDEX_STATUSES",
+            "active,historical,approved,verified,current",
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--watch-interval", type=int, default=0)
     args = parser.parse_args()

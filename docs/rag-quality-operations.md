@@ -36,7 +36,7 @@ Discord会話とKnowledge文書には数値の`festival`を付与する。「26t
 | `source_url` | DiscordまたはKnowledge原文への導線 |
 
 Discordの会話は`status=raw`、`authority=conversation`とする。Knowledgeリポジトリは
-`approved,verified,current`だけを自動索引し、`authority=curated`として完全一致検索で
+`active,historical,approved,verified,current`を自動索引し、`authority=curated`として完全一致検索で
 会話記録より優先する。draftやneeds-reviewを回答根拠へ自動昇格させない。
 
 ## 検索と回答
@@ -74,15 +74,17 @@ Discord回答の最後に次を表示する。音声読み上げでは評価案�
 ```bash
 python -m rag_eval \
   --base-url http://127.0.0.1:8000 \
-  --token "$YAGAPON_API_TOKEN" \
   --guild-id "$YAGAPON_KNOWLEDGE_GUILD_ID" \
   --cases docs/rag-eval-cases.yaml \
+  --min-pass-rate 0.8 \
   --output data/rag-eval-report.json
 ```
 
 サンプルの`docs/rag-eval-cases.example.yaml`を複製し、正答に必ず含む語、禁止語、
 期待年度、出典必須、情報なし質問を実データに合わせて定義する。モデル変更・全backfill・
 Knowledge大量更新の前後で同じ質問セットを実行して比較する。
+GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のときだけ
+手動または毎週実行される。URL/Guild IDはVariables、API tokenはSecretに保存する。
 
 ## 差分同期
 

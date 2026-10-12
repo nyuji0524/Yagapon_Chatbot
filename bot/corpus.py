@@ -893,6 +893,7 @@ class CorpusManager:
         after=None,
         progress_callback=None,
         replace_existing: bool = True,
+        dry_run: bool = False,
     ) -> BackfillResult:
         """履歴を再現可能な文書へ変換し、成功後に同範囲の旧文書を置換する。"""
         result = BackfillResult()
@@ -915,6 +916,10 @@ class CorpusManager:
                 await progress_callback(result.messages_seen)
 
         documents = self._build_knowledge_documents(channel, messages)
+        if dry_run:
+            result.documents_uploaded = len(documents)
+            result.documents_replaced = len(existing) if documents else 0
+            return result
         uploaded_names: list[str] = []
         for document in documents:
             uploaded = await self._upload_document(

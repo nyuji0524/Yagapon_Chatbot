@@ -39,6 +39,12 @@ def register(bot):
         default=30,
     )
     @discord.option(
+        "dry_run",
+        description="更新せず対象件数だけ確認する",
+        type=bool,
+        default=False,
+    )
+    @discord.option(
         "channel",
         description="特定チャンネルのみ取り込む場合に指定",
         type=discord.TextChannel,
@@ -49,6 +55,7 @@ def register(bot):
         ctx: discord.ApplicationContext,
         mode: str = "incremental",
         days: int = 30,
+        dry_run: bool = False,
         channel: discord.TextChannel = None,
     ):
         if not await require_guild_admin(ctx):
@@ -104,8 +111,9 @@ def register(bot):
                         after=after,
                         progress_callback=progress,
                         replace_existing=True,
+                        dry_run=dry_run,
                     )
-                    if result.latest_message_id and result.latest_message_at:
+                    if not dry_run and result.latest_message_id and result.latest_message_at:
                         await bot.config.set_backfill_cursor(
                             ctx.guild_id,
                             ch.id,
@@ -130,7 +138,8 @@ def register(bot):
         failure_text = f"\n⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}" if failures else ""
         await status_msg.edit(
             content=(
-                f"✅ 取り込み完了: **{total_messages:,}件 / {total_documents:,}文書**\n"
-                f"旧文書 **{total_replaced:,}件** を安全に置換したぽん。{failure_text}"
+                f"✅ {'事前確認' if dry_run else '取り込み'}完了: "
+                f"**{total_messages:,}件 / {total_documents:,}文書**\n"
+                f"旧文書 **{total_replaced:,}件** が置換対象だぽん。{failure_text}"
             )
         )
