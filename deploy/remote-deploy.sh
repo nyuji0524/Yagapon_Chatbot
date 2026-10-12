@@ -65,6 +65,13 @@ systemctl daemon-reload
 registry=${image%%/*}
 gcloud auth configure-docker "$registry" --quiet
 
+# Release images are content-addressed by commit SHA, so tagged images accumulate
+# on the small VM disk. Reclaim only unused images/build cache older than a week
+# before pulling the next release. Volumes (including /var/lib/yagapon) are never
+# pruned here because they contain recordings, transcripts, and replay state.
+docker image prune --all --force --filter 'until=168h' >/dev/null
+docker builder prune --force --filter 'until=168h' >/dev/null
+
 oauth_secret=$(sed -n 's/^YAGAPON_GOOGLE_OAUTH_SECRET=//p' "$deploy_env" | tail -1)
 oauth_project=$(sed -n 's/^YAGAPON_GCP_PROJECT_ID=//p' "$deploy_env" | tail -1)
 if [[ -n "$oauth_secret" ]]; then
