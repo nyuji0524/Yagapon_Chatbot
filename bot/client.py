@@ -9,6 +9,7 @@ from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
+from bot.recording_replay import RecordingReplayManager
 from bot.voice import VoiceMode
 from knowledge_catalog.store import CatalogStore, normalize_label
 
@@ -30,6 +31,7 @@ class YagaPon(discord.Bot):
         self.corpus = CorpusManager()
         self.operations = OperationalStore()
         self.catalog = CatalogStore()
+        self.recording_replays = RecordingReplayManager(self)
         self._recording_recovery_task: asyncio.Task | None = None
 
         # コマンド登録
@@ -42,6 +44,7 @@ class YagaPon(discord.Bot):
             meigen,
             member,
             minutes,
+            recording,
             report,
             reset,
             setup,
@@ -58,6 +61,7 @@ class YagaPon(discord.Bot):
         meigen.register(self)
         voice_cmd.register(self)
         report.register(self)
+        recording.register(self)
         reset.register(self)
         corpus_cmd.register(self)
         voiceprint.register(self)

@@ -15,6 +15,7 @@ services:
       YAGAPON_VOICEPRINT_DIR: /data/voiceprints
       YAGAPON_RECORDING_DIR: /data/recordings
       YAGAPON_TRANSCRIPT_DIR: /data/transcripts
+      YAGAPON_REPLAY_DIR: /data/replays
       YAGAPON_KNOWLEDGE_OUTBOX: /data/knowledge-outbox
       GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     ports:

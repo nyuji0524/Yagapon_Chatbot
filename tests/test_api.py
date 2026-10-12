@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.server import create_app
 from bot.corpus import BackfillResult, RagAnswer
+from bot.recording_replay import RecordingArtifact, ReplayJob
 
 
 class FakeConfig:
@@ -38,14 +39,20 @@ def make_client():
     channel = SimpleNamespace(
         id=20,
         name="general",
-        permissions_for=lambda member: SimpleNamespace(read_message_history=True),
+        permissions_for=lambda member: SimpleNamespace(
+            read_message_history=True,
+            send_messages=True,
+        ),
     )
     guild = SimpleNamespace(
         id=1,
+        name="毛蟹のサーバー",
         me=SimpleNamespace(),
+        system_channel=channel,
         text_channels=[channel],
         get_channel=lambda channel_id: channel if channel_id == 20 else None,
     )
+    channel.guild = guild
     corpus = SimpleNamespace(
         query=AsyncMock(return_value="回答"),
         query_with_trace=AsyncMock(return_value=RagAnswer(
@@ -68,7 +75,7 @@ def make_client():
     bot = SimpleNamespace(
         is_closed=lambda: False,
         user="YagaPon",
-        guilds=[],
+        guilds=[guild],
         config=FakeConfig(),
         corpus=corpus,
         get_guild=lambda guild_id: guild if guild_id == 1 else None,
@@ -77,6 +84,17 @@ def make_client():
             summary=Mock(return_value={"window_hours": 24, "events": []}),
             recent_events=Mock(return_value=[]),
             pending_dead_letters=Mock(return_value=[]),
+        ),
+        recording_replays=SimpleNamespace(
+            start=Mock(return_value=ReplayJob(
+                id="replay-test",
+                source_session_id="session-long",
+                source_guild_id=2,
+                target_guild_id=1,
+                target_channel_id=20,
+                retranscribe=False,
+            )),
+            get=Mock(return_value=None),
         ),
     )
     return TestClient(create_app(bot)), bot
@@ -215,3 +233,76 @@ def test_operations_api_requires_token(monkeypatch):
     assert response.status_code == 200
     assert response.json()["window_hours"] == 24
     bot.operations.summary.assert_called_once_with(24)
+
+
+def test_recording_replay_api_is_authenticated_and_targets_named_guild(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+    headers = {"Authorization": "Bearer secret"}
+    artifact = SimpleNamespace(session_id="session-long")
+    monkeypatch.setattr("api.recordings.find_recording_artifact", lambda _id: artifact)
+
+    assert client.post(
+        "/admin/recordings/replay",
+        json={"session_id": "session-long", "target_guild_name": "毛蟹のサーバー"},
+    ).status_code == 401
+    response = client.post(
+        "/admin/recordings/replay",
+        headers=headers,
+        json={"session_id": "session-long", "target_guild_name": "毛蟹のサーバー"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["id"] == "replay-test"
+    bot.recording_replays.start.assert_called_once_with(
+        artifact=artifact,
+        target_channel=bot.guilds[0].system_channel,
+        retranscribe=False,
+    )
+
+
+def test_recording_replay_api_can_select_longest_transcript(monkeypatch, tmp_path):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    artifact = RecordingArtifact(
+        session_id="longest-session",
+        source_guild_id=2,
+        channel_name="長時間会議",
+        mode="listen",
+        status="transcript_archived",
+        started_at="2026-10-01",
+        raw_bytes=0,
+        estimated_seconds=0,
+        transcript_path=tmp_path / "transcript.md",
+        transcript_bytes=100_000,
+        session_dir=tmp_path / "source",
+    )
+    short_pcm = RecordingArtifact(
+        session_id="short-pcm-session",
+        source_guild_id=2,
+        channel_name="短い会議",
+        mode="listen",
+        status="transcription_failed",
+        started_at="2026-10-02",
+        raw_bytes=10_000_000,
+        estimated_seconds=60,
+        transcript_path=tmp_path / "short.md",
+        transcript_bytes=1_000,
+        session_dir=tmp_path / "short-source",
+    )
+    monkeypatch.setattr(
+        "api.recordings.list_recording_artifacts", lambda: [short_pcm, artifact]
+    )
+    client, bot = make_client()
+
+    response = client.post(
+        "/admin/recordings/replay-longest",
+        headers={"Authorization": "Bearer secret"},
+        json={"target_guild_name": "毛蟹のサーバー", "retranscribe": False},
+    )
+
+    assert response.status_code == 202
+    bot.recording_replays.start.assert_called_once_with(
+        artifact=artifact,
+        target_channel=bot.guilds[0].system_channel,
+        retranscribe=False,
+    )

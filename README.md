@@ -66,6 +66,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/ignore` | 現在のチャンネルを学習対象から除外 |
 | `/join <mode>` | VCに参加（listen/meeting/chat） |
 | `/leave` | VCから退出（議事録生成） |
+| `/recording list` | 再生可能な保存録音・文字起こしを確認（Bot所有者のみ） |
+| `/recording replay <session_id>` | `/leave` 相当の議事録生成を元データ非破壊で再実行 |
 | `/member sync` | サーバーメンバーをロールから自動登録 |
 | `/member roles` | 役職・担当・学年のロールを分類 |
 | `/member register <name> [@user]` | 呼び名を設定 |
@@ -158,6 +160,7 @@ YAGAPON_CATALOG_PASSES=2
 YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 YAGAPON_RECORDING_DIR=/data/recordings
 YAGAPON_TRANSCRIPT_DIR=/data/transcripts
+YAGAPON_REPLAY_DIR=/data/replays
 YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
 YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_BRANCH=main
@@ -193,6 +196,8 @@ docker compose up --build
 ```
 
 コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMを逐次保存し、メモリ量を録音時間に依存させない。逐語文字起こしは議事録とは別に`data/transcripts/`とGoogle Docsへ保存する。正常配信後は生PCMを即時削除し、文字起こし失敗や容量上限に達した録音だけを復旧用に保持する。配信済み録音のメタデータは既定7日で削除するが、独立保存した文字起こしは削除しない。
+
+`/recording replay`は、保存済み文字起こし、または障害復旧用に残っているPCMを使い、元の録音やオフセットを更新せずに長時間議事録を再生成する。結果は実行先Discordチャンネルと、設定済みの場合はGoogle Driveへ出力する。テスト出力はKnowledgeに自動投稿しない。
 
 VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`が設定されている場合は、privateなKnowledgeリポジトリの`draft`資料として専用ブランチへ1コミットし、Draft PRを作る。詳細なAI議事録は`YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true`の場合だけ含める。GitHub送信に失敗してもoutboxを削除しない。
 
