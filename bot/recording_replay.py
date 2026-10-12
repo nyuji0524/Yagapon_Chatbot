@@ -142,6 +142,8 @@ def list_recording_artifacts() -> list[RecordingArtifact]:
     if transcript_archive.exists():
         for path in transcript_archive.glob("*/*.md"):
             try:
+                if path.stem.startswith("replay-"):
+                    continue
                 guild_id = int(path.parent.name)
                 key = (guild_id, path.stem)
                 if key in known or path.stat().st_size <= 0:
@@ -345,7 +347,11 @@ class RecordingReplayManager:
                 session = VoiceSession(
                     self.bot,
                     artifact.source_guild_id,
-                    SimpleNamespace(name=f"テスト再生 - {artifact.channel_name}"),
+                    SimpleNamespace(
+                        id=0,
+                        name=f"テスト再生 - {artifact.channel_name}",
+                        guild=SimpleNamespace(id=artifact.source_guild_id),
+                    ),
                     VoiceMode.LISTEN,
                 )
                 session.recording_sink = ReadOnlyReplaySink(

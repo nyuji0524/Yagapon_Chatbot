@@ -85,6 +85,16 @@ def test_recording_inventory_keeps_orphaned_permanent_transcript(tmp_path, monke
     assert artifact.status == "transcript_archived"
 
 
+def test_recording_inventory_excludes_previous_replay_transcripts(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    transcript = tmp_path / "transcripts" / "321" / "replay-old-job.md"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("# 文字起こし\n\n---\n\nテスト", encoding="utf-8")
+
+    assert list_recording_artifacts() == []
+
+
 @pytest.mark.asyncio
 async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))

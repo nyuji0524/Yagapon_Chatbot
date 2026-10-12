@@ -112,14 +112,21 @@ async def start_longest_recording_replay(
     if not candidates:
         kind = "raw recording" if payload.retranscribe else "transcript"
         raise HTTPException(status_code=404, detail=f"no replayable {kind} found")
+    if payload.retranscribe:
+        selected = max(
+            candidates,
+            key=lambda item: (item.estimated_seconds, item.raw_bytes),
+        )
+    else:
+        selected = max(candidates, key=lambda item: item.transcript_bytes)
     guild = _target_guild(bot, ReplayRequest(
-        session_id=candidates[0].session_id,
+        session_id=selected.session_id,
         target_guild_name=payload.target_guild_name,
     ))
     channel = _target_channel(guild, payload.target_channel_id)
     try:
         job = bot.recording_replays.start(
-            session_id=candidates[0].session_id,
+            session_id=selected.session_id,
             target_channel=channel,
             retranscribe=payload.retranscribe,
         )

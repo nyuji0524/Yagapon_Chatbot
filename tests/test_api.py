@@ -274,7 +274,22 @@ def test_recording_replay_api_can_select_longest_transcript(monkeypatch, tmp_pat
         transcript_bytes=100_000,
         session_dir=tmp_path / "source",
     )
-    monkeypatch.setattr("api.recordings.list_recording_artifacts", lambda: [artifact])
+    short_pcm = RecordingArtifact(
+        session_id="short-pcm-session",
+        source_guild_id=2,
+        channel_name="短い会議",
+        mode="listen",
+        status="transcription_failed",
+        started_at="2026-10-02",
+        raw_bytes=10_000_000,
+        estimated_seconds=60,
+        transcript_path=tmp_path / "short.md",
+        transcript_bytes=1_000,
+        session_dir=tmp_path / "short-source",
+    )
+    monkeypatch.setattr(
+        "api.recordings.list_recording_artifacts", lambda: [short_pcm, artifact]
+    )
     client, bot = make_client()
 
     response = client.post(
