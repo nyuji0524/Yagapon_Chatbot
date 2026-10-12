@@ -149,3 +149,78 @@ async def test_transcription_can_reserve_dedicated_quota_for_listen_mode():
     create.assert_not_awaited()
     prompt = fallback.await_args.kwargs["contents"][0]
     assert "矢上祭" in prompt
+
+
+@pytest.mark.asyncio
+async def test_transcription_uses_enrolled_voiceprints_for_speaker_names(tmp_path):
+    sample = tmp_path / "member.wav"
+    sample.write_bytes(b"RIFF" + b"voice" * 300)
+    meeting = SimpleNamespace(name="files/meeting", uri="gs://test/meeting.wav")
+    reference = SimpleNamespace(name="files/reference", uri="gs://test/reference.wav")
+    upload = Mock(side_effect=[meeting, reference])
+    create = AsyncMock()
+    fallback = AsyncMock(
+        return_value=SimpleNamespace(text="Registered 1： 提案します\nSpeaker 1: 賛成です")
+    )
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=upload, delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=create),
+            models=SimpleNamespace(generate_content=fallback),
+        ),
+    )
+
+    result = await transcribe_audio(
+        client,
+        b"RIFFmeeting",
+        mime_type="audio/wav",
+        display_name="meeting.wav",
+        diarization=True,
+        voiceprint_paths={"中山": str(sample)},
+    )
+
+    assert result == "中山： 提案します\nSpeaker 1: 賛成です"
+    create.assert_not_awaited()
+    contents = fallback.await_args.kwargs["contents"]
+    assert "登録声紋" in contents[0]
+    assert "Registered 1" in contents[1]
+    assert upload.call_count == 2
+    assert client.files.delete.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_successful_voiceprint_upload_is_deleted_when_sibling_upload_fails(tmp_path):
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+    first.write_bytes(b"RIFF" + b"first" * 300)
+    second.write_bytes(b"RIFF" + b"second" * 300)
+    meeting = SimpleNamespace(name="files/meeting", uri="gs://test/meeting.wav")
+    reference = SimpleNamespace(name="files/reference", uri="gs://test/reference.wav")
+
+    def upload(*, file, config):
+        if not isinstance(file, str):
+            return meeting
+        if file == str(first):
+            return reference
+        raise ValueError("upload failed")
+
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(side_effect=upload), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=AsyncMock()),
+            models=SimpleNamespace(generate_content=AsyncMock()),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="upload failed"):
+        await transcribe_audio(
+            client,
+            b"RIFFmeeting",
+            mime_type="audio/wav",
+            display_name="meeting.wav",
+            diarization=True,
+            voiceprint_paths={"一人目": str(first), "二人目": str(second)},
+        )
+
+    deleted = {call.kwargs["name"] for call in client.files.delete.call_args_list}
+    assert deleted == {"files/meeting", "files/reference"}

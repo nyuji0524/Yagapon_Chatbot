@@ -103,6 +103,9 @@ def get_voiceprints_with_names(config, guild_id: int) -> dict[str, str]:
             member_info = members.get(uid, {})
             # nickname > name > User ID の優先順
             name = member_info.get("nickname") or member_info.get("name") or f"User {uid}"
+            name = " ".join(str(name).split())[:80] or f"User {uid}"
+            if name in result:
+                name = f"{name} ({uid})"
             result[name] = os.path.join(guild_dir, f)
     return result
 

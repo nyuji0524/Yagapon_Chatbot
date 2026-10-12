@@ -28,13 +28,20 @@ async def test_transcript_is_uploaded_as_a_separate_document():
     uploader = AsyncMock(return_value="https://docs.example/transcript")
 
     with patch("bot.gdrive.upload_to_drive", uploader):
-        result = await upload_transcript(config, 1, "[Speaker 1]: 発言", "全体会議")
+        result = await upload_transcript(
+            config,
+            1,
+            "[Speaker 1]: 発言",
+            "全体会議",
+            meeting_at="2026-10-12T00:00:00+09:00",
+        )
 
     assert result == "https://docs.example/transcript"
     args = uploader.await_args.args
     assert args[0] == "https://drive.google.com/drive/folders/folder_123"
-    assert args[1].startswith("文字起こし_全体会議_")
+    assert args[1] == "261012全体会議"
     assert args[2] == "[Speaker 1]: 発言"
+    assert uploader.await_args.kwargs["subfolder_name"] == "文字起こし"
 
 
 def test_drive_writer_creates_document_and_inserts_content():
@@ -52,7 +59,20 @@ def test_drive_writer_creates_document_and_inserts_content():
     create = writer.drive.files().create.call_args.kwargs
     assert create["body"]["parents"] == ["folder-1"]
     update = writer.docs.documents().batchUpdate.call_args.kwargs
-    assert update["body"]["requests"][0]["insertText"]["text"] == "本文"
+    assert update["body"]["requests"][0]["insertText"]["text"] == "本文\n"
+    assert any("updateTextStyle" in request for request in update["body"]["requests"])
+
+
+def test_drive_writer_reuses_transcript_folder():
+    writer = DriveWriter.__new__(DriveWriter)
+    writer.drive = MagicMock()
+    writer.drive.files().list.return_value = execute_result(
+        {"files": [{"id": "transcripts", "name": "文字起こし"}]}
+    )
+
+    assert writer.get_or_create_folder("root", "文字起こし") == "transcripts"
+    assert writer.drive.files().list.call_args.kwargs["corpora"] == "allDrives"
+    writer.drive.files().create.assert_not_called()
 
 
 def test_drive_writer_removes_empty_document_when_insert_fails():

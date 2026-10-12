@@ -266,8 +266,8 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
     assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
     assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
     prompt = generated.await_args.kwargs["contents"]
-    assert "## 話題別まとめ" in prompt
-    assert "声質だけで実名を推測しない" in prompt
+    assert "## 今日の議題" in prompt
+    assert "Speakerラベルから実名を推測しない" in prompt
 
 
 @pytest.mark.asyncio
@@ -332,6 +332,32 @@ def test_listen_mode_does_not_merge_chunk_local_speaker_numbers():
 
     assert first == "[Speaker 1]: 最初の話者"
     assert second == "[Speaker 2]: 次のチャンクの話者"
+
+
+def test_listen_mode_preserves_only_registered_voiceprint_names(monkeypatch):
+    session = VoiceSession(SimpleNamespace(config=SimpleNamespace()), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session._voiceprint_paths = {"中山": "/data/voiceprints/1.wav"}
+
+    result = session._format_transcribed_text(
+        42,
+        "中山: 登録者です\nSpeaker 1: 未登録者です",
+        diarized=True,
+    )
+
+    assert result == "[中山]: 登録者です\n[Speaker 1]: 未登録者です"
+
+
+def test_listen_mode_accepts_full_width_colons_in_speaker_labels():
+    session = VoiceSession(SimpleNamespace(config=SimpleNamespace()), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session._voiceprint_paths = {"中山": "/data/voiceprints/1.wav"}
+
+    result = session._format_transcribed_text(
+        42,
+        "中山： 登録者です\nSpeaker 1： 未登録者です",
+        diarized=True,
+    )
+
+    assert result == "[中山]: 登録者です\n[Speaker 1]: 未登録者です"
 
 
 @pytest.mark.asyncio
