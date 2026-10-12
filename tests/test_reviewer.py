@@ -80,6 +80,35 @@ def test_non_blocking_review_is_lgtm_and_uses_imho_nits_labels():
     assert "[🟩nits]" in payload["comments"][1]["body"]
 
 
+def test_review_payload_does_not_duplicate_model_supplied_severity_labels():
+    result = ReviewResult(
+        summary="確認しましたぽん。",
+        findings=[
+            Finding(
+                path="app.py",
+                line=11,
+                severity="minor",
+                title="[🟦imho] [imho] 境界値テストを追加する",
+                body="ゼロ件も確認すると安全だぽん。",
+            ),
+            Finding(
+                path="app.py",
+                line=12,
+                severity="trivial",
+                title="[🟩nits] [nits] 名前を揃える",
+                body="命名規則を揃えると読みやすいぽん。",
+            ),
+        ],
+    )
+
+    payload = build_review_payload(result, "abc123", "<!-- marker -->")
+
+    assert payload["comments"][0]["body"].count("[🟦imho]") == 1
+    assert "[imho]" not in payload["comments"][0]["body"]
+    assert payload["comments"][1]["body"].count("[🟩nits]") == 1
+    assert "[nits]" not in payload["comments"][1]["body"]
+
+
 def test_up_to_ten_nits_can_be_posted_inline():
     findings = [
         Finding(path="app.py", line=line, severity="trivial", title=f"nit {line}", body="説明")

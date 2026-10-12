@@ -44,6 +44,11 @@ non-blocking structural improvements. Trivial findings are [🟩nits] for local 
 validation tests. Omit claims whose evidence is insufficient. Respond in clear, friendly, concise
 Japanese and naturally end explanatory sentences with 「ぽん」。"""
 
+SEVERITY_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:\[(?:🟥\s*blocker|🟧\s*must|🟦\s*imho|🟩\s*nits|blocker|must|imho|nits)\]\s*)+",
+    re.IGNORECASE,
+)
+
 
 class Finding(BaseModel):
     path: str
@@ -170,6 +175,7 @@ def review_request(profile: str, context: str) -> str:
         + "追加行に対する具体的な指摘はfindingsへ入れてください。\n"
         "critical/majorはマージ前に直す問題、minorは[🟦imho]としての任意改善、"
         "trivialは[🟩nits]としての短い改善提案にしてください。\n"
+        "findingのtitleには重要度ラベルを含めないでください。ラベルは投稿処理が付与します。\n"
         "summaryは最重要点を先に、わかりやすい日本語と自然な『ぽん』語尾でまとめてください。\n\n"
         + context
     )
@@ -209,13 +215,14 @@ def build_review_payload(result: ReviewResult, head_sha: str, marker: str) -> di
     comments = []
     for finding in result.findings:
         counts[finding.severity] += 1
+        title = _without_severity_prefix(finding.title)
         comments.append(
             {
                 "path": finding.path,
                 "line": finding.line,
                 "side": "RIGHT",
                 "body": (
-                    f"**{severity_labels[finding.severity]} {finding.title}**\n\n"
+                    f"**{severity_labels[finding.severity]} {title}**\n\n"
                     f"{_ensure_pon(finding.body)}"
                 ),
             }
@@ -249,6 +256,12 @@ def _ensure_pon(text: str) -> str:
     if re.search(r"ぽん[。！!？?]*$", stripped):
         return stripped
     return f"{stripped}\n\n確認してほしいぽん。"
+
+
+def _without_severity_prefix(title: str) -> str:
+    """Remove model-supplied severity tags; the renderer adds exactly one."""
+    normalized = SEVERITY_PREFIX_PATTERN.sub("", title).strip()
+    return normalized or "確認事項"
 
 
 def run_review(
