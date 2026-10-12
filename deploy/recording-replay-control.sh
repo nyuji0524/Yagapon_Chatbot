@@ -6,13 +6,17 @@ target_guild_name=${2:-}
 target_channel_id=${3:-}
 retranscribe=${4:-false}
 job_id=${5:-${2:-}}
+target_guild_id=${6:-}
 
 case "$action" in
   replay-longest|status) ;;
   *) echo "Unsupported action" >&2; exit 2 ;;
 esac
 if [[ "$action" == replay-longest ]]; then
-  [[ -n "$target_guild_name" ]] || { echo "Target guild name is required" >&2; exit 2; }
+  [[ -n "$target_guild_name" || -n "$target_guild_id" ]] \
+    || { echo "Target guild name or id is required" >&2; exit 2; }
+  [[ -z "$target_guild_id" || "$target_guild_id" =~ ^[0-9]+$ ]] \
+    || { echo "Invalid guild id" >&2; exit 2; }
   [[ -z "$target_channel_id" || "$target_channel_id" =~ ^[0-9]+$ ]] \
     || { echo "Invalid channel id" >&2; exit 2; }
   [[ "$retranscribe" == true || "$retranscribe" == false ]] \
@@ -32,6 +36,7 @@ deploy_env=/etc/yagapon/deploy.env
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" exec -T \
   --env CONTROL_ACTION="$action" \
   --env CONTROL_TARGET_GUILD_NAME="$target_guild_name" \
+  --env CONTROL_TARGET_GUILD_ID="$target_guild_id" \
   --env CONTROL_TARGET_CHANNEL_ID="$target_channel_id" \
   --env CONTROL_RETRANSCRIBE="$retranscribe" \
   --env CONTROL_JOB_ID="$job_id" \
@@ -68,10 +73,12 @@ def request(path, payload=None):
 if action == "replay-longest":
     channel = os.environ.get("CONTROL_TARGET_CHANNEL_ID", "")
     target_guild = os.environ.get("CONTROL_TARGET_GUILD_NAME", "")
-    if not target_guild:
-        raise SystemExit("YAGAPON_RECORDING_TEST_GUILD_NAME is not configured")
+    target_guild_id = os.environ.get("CONTROL_TARGET_GUILD_ID", "")
+    if not target_guild and not target_guild_id:
+        raise SystemExit("A target Discord guild is not configured")
     result = request("/admin/recordings/replay-longest", {
         "target_guild_name": target_guild,
+        "target_guild_id": int(target_guild_id) if target_guild_id else None,
         "target_channel_id": int(channel) if channel else None,
         "retranscribe": os.environ.get("CONTROL_RETRANSCRIBE") == "true",
     })
