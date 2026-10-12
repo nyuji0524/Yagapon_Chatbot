@@ -239,6 +239,8 @@ def test_recording_replay_api_is_authenticated_and_targets_named_guild(monkeypat
     monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
     client, bot = make_client()
     headers = {"Authorization": "Bearer secret"}
+    artifact = SimpleNamespace(session_id="session-long")
+    monkeypatch.setattr("api.recordings.find_recording_artifact", lambda _id: artifact)
 
     assert client.post(
         "/admin/recordings/replay",
@@ -253,7 +255,7 @@ def test_recording_replay_api_is_authenticated_and_targets_named_guild(monkeypat
     assert response.status_code == 202
     assert response.json()["id"] == "replay-test"
     bot.recording_replays.start.assert_called_once_with(
-        session_id="session-long",
+        artifact=artifact,
         target_channel=bot.guilds[0].system_channel,
         retranscribe=False,
     )
@@ -300,7 +302,7 @@ def test_recording_replay_api_can_select_longest_transcript(monkeypatch, tmp_pat
 
     assert response.status_code == 202
     bot.recording_replays.start.assert_called_once_with(
-        session_id="longest-session",
+        artifact=artifact,
         target_channel=bot.guilds[0].system_channel,
         retranscribe=False,
     )

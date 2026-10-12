@@ -34,9 +34,10 @@ def register(bot):
     async def recording_list(ctx: discord.ApplicationContext):
         if not await _require_operator(ctx, bot):
             return
+        await ctx.defer(ephemeral=True)
         artifacts = await asyncio.to_thread(list_recording_artifacts)
         if not artifacts:
-            await ctx.respond("再生可能な録音または文字起こしはありません。", ephemeral=True)
+            await ctx.followup.send("再生可能な録音または文字起こしはありません。", ephemeral=True)
             return
         lines = []
         for item in artifacts[:15]:
@@ -53,7 +54,7 @@ def register(bot):
             if sum(len(line) for line in lines) + len(candidate) > 1700:
                 break
             lines.append(candidate)
-        await ctx.respond(
+        await ctx.followup.send(
             "**再生可能な録音（長い順）**\n" + "\n".join(lines),
             ephemeral=True,
         )
@@ -74,17 +75,18 @@ def register(bot):
     ):
         if not await _require_operator(ctx, bot):
             return
+        await ctx.defer(ephemeral=True)
         try:
             artifact = await asyncio.to_thread(find_recording_artifact, session_id)
             job = bot.recording_replays.start(
-                session_id=artifact.session_id,
+                artifact=artifact,
                 target_channel=ctx.channel,
                 retranscribe=retranscribe,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
-            await ctx.respond(f"開始できません: {exc}", ephemeral=True)
+            await ctx.followup.send(f"開始できません: {exc}", ephemeral=True)
             return
-        await ctx.respond(
+        await ctx.followup.send(
             f"テスト議事録ジョブ `{job.id}` を開始しました。"
             "完了後にこのチャンネルへ議事録と生文字起こしを投稿します。",
             ephemeral=True,

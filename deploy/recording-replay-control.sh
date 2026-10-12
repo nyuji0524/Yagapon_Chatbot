@@ -5,7 +5,7 @@ action=${1:-replay-longest}
 target_guild_name=${2:-}
 target_channel_id=${3:-}
 retranscribe=${4:-false}
-job_id=${5:-}
+job_id=${5:-${2:-}}
 
 case "$action" in
   replay-longest|status) ;;

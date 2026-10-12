@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from api.security import require_api_token
-from bot.recording_replay import list_recording_artifacts
+from bot.recording_replay import find_recording_artifact, list_recording_artifacts
 
 router = APIRouter(dependencies=[Depends(require_api_token)])
 
@@ -86,8 +86,12 @@ async def start_recording_replay(payload: ReplayRequest, request: Request):
     guild = _target_guild(bot, payload)
     channel = _target_channel(guild, payload.target_channel_id)
     try:
+        artifact = await asyncio.to_thread(
+            find_recording_artifact,
+            payload.session_id,
+        )
         job = bot.recording_replays.start(
-            session_id=payload.session_id,
+            artifact=artifact,
             target_channel=channel,
             retranscribe=payload.retranscribe,
         )
@@ -128,7 +132,7 @@ async def start_longest_recording_replay(
     channel = _target_channel(guild, payload.target_channel_id)
     try:
         job = bot.recording_replays.start(
-            session_id=selected.session_id,
+            artifact=selected,
             target_channel=channel,
             retranscribe=payload.retranscribe,
         )

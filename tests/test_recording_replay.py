@@ -117,9 +117,10 @@ async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, m
     )
     channel = SimpleNamespace(id=50, guild=SimpleNamespace(id=999), send=AsyncMock())
     manager = RecordingReplayManager(bot)
+    artifact = find_recording_artifact("session-long")
 
     job = manager.start(
-        session_id="session-long", target_channel=channel, retranscribe=False
+        artifact=artifact, target_channel=channel, retranscribe=False
     )
     await asyncio.gather(*list(manager._tasks))
 
@@ -144,7 +145,7 @@ def test_replay_requires_explicit_retranscribe_when_only_pcm_exists(tmp_path, mo
 
     with pytest.raises(ValueError, match="retranscribe=true"):
         RecordingReplayManager(bot).start(
-            session_id="session-long",
+            artifact=find_recording_artifact("session-long"),
             target_channel=channel,
             retranscribe=False,
         )

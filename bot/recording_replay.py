@@ -283,13 +283,12 @@ class RecordingReplayManager:
     def start(
         self,
         *,
-        session_id: str,
+        artifact: RecordingArtifact,
         target_channel,
         retranscribe: bool,
     ) -> ReplayJob:
         if self.active():
             raise RuntimeError("another recording replay is already running")
-        artifact = find_recording_artifact(session_id)
         if retranscribe and artifact.raw_bytes <= 0:
             raise ValueError("raw audio is no longer available")
         if not retranscribe and artifact.transcript_path is None:
