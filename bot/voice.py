@@ -5,8 +5,10 @@ import io
 import logging
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 
 import discord
 from google import genai
@@ -15,7 +17,7 @@ from google.genai import types
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import RateLimitCircuitBreaker, RateLimitExceeded, new_genai_client
 from bot.minutes_generation import generate_minutes
-from bot.recording import PersistentPCMSink
+from bot.recording import PersistentPCMSink, find_recoverable_recordings, load_transcript_content
 from bot.transcription import transcribe_audio
 
 log = logging.getLogger("yagapon.voice")
@@ -59,6 +61,7 @@ class VoiceSession:
         self._transcription_failed = False
         self._transcript_path: Path | None = None
         self._knowledge_pull_request_url: str | None = None
+        self._knowledge_outbox_path: Path | None = None
         self._speaker_labels: dict[int, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
@@ -162,6 +165,7 @@ class VoiceSession:
                     self.channel.name,
                     self.mode.value,
                     session_dir=self.recording_sink.session_dir,
+                    resume=True,
                 )
                 self.voice_client.start_recording(
                     self.recording_sink,
@@ -234,15 +238,13 @@ class VoiceSession:
                 if text.strip():
                     await self._append_transcript(f"[{name}]: {text}")
                     log.info(f"Transcribed: [{name}]: {text[:50]}...")
+                await self._checkpoint_state()
             return
 
         # chat/meetingモード: 専用STTで文字起こし後、回答モデルへ渡す
         result = await self._generate_response_from_audio(audio_chunks, next_offsets)
         if result:
             transcript_text, response = result
-            # 議事録用に文字起こしを蓄積
-            if transcript_text:
-                await self._append_transcript(transcript_text)
             if response:
                 await self.speak(response)
                 self._conversation_history.append({"role": "assistant", "text": response})
@@ -270,10 +272,15 @@ class VoiceSession:
                 if text.strip():
                     chunk_texts.append({"speaker": name, "text": text})
             if not chunk_texts:
+                await self._checkpoint_state()
                 return None
 
-            response_text = await self._generate_realtime_response(chunk_texts)
             transcript_text = "\n".join(f"[{item['speaker']}]: {item['text']}" for item in chunk_texts)
+            # Persist transcription before optional response generation. A response
+            # model outage must never discard already successful STT work.
+            await self._append_transcript(transcript_text)
+            await self._checkpoint_state()
+            response_text = await self._generate_realtime_response(chunk_texts)
             t1 = time.monotonic()
             log.info("Transcription and response generated in %.1fs", t1 - t0)
             return transcript_text, response_text or ""
@@ -471,6 +478,11 @@ class VoiceSession:
         )
         if result:
             self._knowledge_pull_request_url = result.pull_request_url
+            self._knowledge_outbox_path = result.outbox_dir
+            await self._checkpoint_state(
+                knowledge_outbox=str(result.outbox_dir),
+                knowledge_pull_request_url=result.pull_request_url or "",
+            )
         return self._knowledge_pull_request_url
 
     async def _append_transcript(self, text: str) -> None:
@@ -485,6 +497,18 @@ class VoiceSession:
             self.transcript_text,
         )
         return self._transcript_path
+
+    async def _checkpoint_state(self, *, status: str = "processing", **extra) -> None:
+        if not self.recording_sink or not hasattr(self.recording_sink, "checkpoint"):
+            return
+        await asyncio.to_thread(
+            self.recording_sink.checkpoint,
+            offsets=self._last_audio_len,
+            speaker_labels=self._speaker_labels,
+            transcript_path=self._transcript_path,
+            status=status,
+            **extra,
+        )
 
     def mark_delivered(
         self,
@@ -590,6 +614,7 @@ class VoiceSession:
                 progressed = True
                 if text.strip():
                     await self._append_transcript(f"[{speaker}]: {text}")
+                await self._checkpoint_state()
             if not progressed:
                 self._transcription_failed = True
                 self.recording_sink.mark("transcription_failed")
@@ -650,6 +675,18 @@ class VoiceSession:
             return text
         except RateLimitExceeded as exc:
             cooldown = _transcription_rate_limiter.trip(retry_after=exc.retry_after)
+            if self.bot and hasattr(self.bot, "operations"):
+                self.bot.operations.record_event(
+                    "transcription",
+                    "rate_limit",
+                    "deferred",
+                    guild_id=self.guild_id,
+                    item_key=(self.recording_sink.session_dir.name if self.recording_sink else None),
+                    details={
+                        "cooldown_seconds": round(cooldown),
+                        "failure_count": _transcription_rate_limiter.failure_count,
+                    },
+                )
             log.warning(
                 "Transcription rate limit exhausted speaker=%s cooldown=%.0fs failures=%s diagnostic=%s",
                 speaker_name,
@@ -763,3 +800,122 @@ async def leave_voice(guild_id: int) -> str | None:
 
 def get_session(guild_id: int) -> VoiceSession | None:
     return _sessions.get(guild_id)
+
+
+async def checkpoint_voice_sessions_for_shutdown() -> None:
+    """Persist active offsets before the process is stopped or replaced."""
+    for session in list(_sessions.values()):
+        try:
+            await session._persist_transcript()
+            await session._checkpoint_state(status="shutdown_pending")
+        except Exception:
+            log.exception("Failed to checkpoint voice session guild=%s", session.guild_id)
+
+
+async def _recover_recording(bot, candidate) -> None:
+    metadata = candidate.metadata
+    guild_id = int(metadata["guild_id"])
+    try:
+        mode = VoiceMode(str(metadata.get("mode") or VoiceMode.LISTEN.value))
+    except ValueError:
+        mode = VoiceMode.LISTEN
+    channel = SimpleNamespace(name=str(metadata.get("channel_name") or "recovered-session"))
+    session = VoiceSession(bot, guild_id, channel, mode)
+    session.recording_sink = PersistentPCMSink(
+        guild_id, channel.name, mode.value, session_dir=candidate.session_dir, resume=True
+    )
+    session._last_audio_len = {
+        int(key): int(value) for key, value in (metadata.get("offsets") or {}).items()
+    }
+    session._speaker_labels = {
+        int(key): str(value) for key, value in (metadata.get("speaker_labels") or {}).items()
+    }
+    transcript_path_value = str(metadata.get("transcript_path") or "")
+    session._transcript_path = Path(transcript_path_value) if transcript_path_value else None
+    existing = load_transcript_content(session._transcript_path)
+    session.transcript = existing.splitlines() if existing else []
+
+    attempts = int(metadata.get("recovery_attempts") or 0) + 1
+    started = datetime.now(timezone.utc)
+    session.recording_sink.mark("recovery_processing", recovery_attempts=attempts)
+    try:
+        await session._drain_recording()
+        await session._persist_transcript()
+        if session._transcription_failed:
+            raise RuntimeError("transcription remains rate limited or unavailable")
+        minutes = None
+        if mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
+            minutes = await session._generate_minutes()
+        await session.publish_knowledge(minutes=minutes)
+        session.recording_sink.mark(
+            "recovered", recovery_attempts=attempts,
+            recovered_at=datetime.now(timezone.utc).isoformat(),
+            transcript_path=str(session._transcript_path or ""),
+            knowledge_outbox=str(session._knowledge_outbox_path or ""),
+        )
+        session.mark_delivered()
+        bot.operations.resolve_dead_letter("voice_recovery", candidate.session_dir.name)
+        bot.operations.record_event(
+            "voice", "recovery", "success", guild_id=guild_id,
+            item_key=candidate.session_dir.name,
+            duration_ms=int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
+            details={"attempts": attempts},
+        )
+    except Exception as exc:
+        maximum = int(os.environ.get("YAGAPON_RECORDING_RECOVERY_MAX_ATTEMPTS", "8"))
+        if attempts >= maximum:
+            session.recording_sink.mark(
+                "recovery_dead_letter", recovery_attempts=attempts, error=type(exc).__name__
+            )
+            bot.operations.dead_letter(
+                "voice_recovery", candidate.session_dir.name,
+                attempts=attempts, error_type=type(exc).__name__,
+                details={"guild_id": guild_id, "session_dir": str(candidate.session_dir)},
+            )
+        else:
+            delay = min(6 * 3600, 60 * (2 ** (attempts - 1)))
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            session.recording_sink.mark(
+                "recovery_retry", recovery_attempts=attempts,
+                next_retry_at=retry_at.isoformat(), error=type(exc).__name__,
+            )
+        bot.operations.record_event(
+            "voice", "recovery", "failed", guild_id=guild_id,
+            item_key=candidate.session_dir.name,
+            details={"attempts": attempts, "error_type": type(exc).__name__},
+        )
+        log.exception("Recording recovery failed session=%s", candidate.session_dir.name)
+
+
+async def recover_incomplete_recordings(bot) -> None:
+    """Resume interrupted transcription jobs without advancing failed offsets."""
+    batch_size = int(os.environ.get("YAGAPON_RECORDING_RECOVERY_BATCH_SIZE", "3"))
+    candidates = await asyncio.to_thread(find_recoverable_recordings)
+    active_directories = {
+        session.recording_sink.session_dir.resolve()
+        for session in _sessions.values()
+        if session.recording_sink is not None
+    }
+    due = [
+        candidate for candidate in candidates
+        if candidate.session_dir.resolve() not in active_directories
+    ]
+    for candidate in due[: max(1, batch_size)]:
+        await _recover_recording(bot, candidate)
+        # A single exhausted STT quota applies to every session. Do not burn
+        # recovery attempts for the remainder of this batch during cooldown.
+        if _transcription_rate_limiter.remaining() > 0:
+            break
+
+
+async def recording_recovery_loop(bot) -> None:
+    """Continuously retry due recordings; a 429 does not require a bot restart."""
+    interval = max(60, int(os.environ.get("YAGAPON_RECORDING_RECOVERY_INTERVAL_SECONDS", "300")))
+    while True:
+        try:
+            await recover_incomplete_recordings(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Recording recovery scan failed")
+        await asyncio.sleep(interval)

@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -18,6 +19,32 @@ PCM_SAMPLE_WIDTH = 2
 DEFAULT_MAX_RECORDING_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_FREE_SPACE_RESERVE_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 7
+RECOVERABLE_STATUSES = {
+    "processing",
+    "recording",
+    "recorded",
+    "shutdown_pending",
+    "leave_failed",
+    "automatic_leave_failed",
+    "transcription_failed",
+    "minutes_generation_failed",
+    "recovery_retry",
+    "recovery_processing",
+}
+TERMINAL_STATUSES = {
+    "delivered",
+    "delivered_audio_deleted",
+    "delivered_recording_retained",
+    "completed_without_minutes",
+    "recovered",
+    "recovery_dead_letter",
+}
+
+
+@dataclass(frozen=True)
+class RecoverableRecording:
+    session_dir: Path
+    metadata: dict
 
 
 def recording_root() -> Path:
@@ -58,6 +85,7 @@ class PersistentPCMSink(Sink):
         *,
         session_dir: Path | None = None,
         max_bytes: int | None = None,
+        resume: bool = False,
     ):
         super().__init__()
         started_at = datetime.now(timezone.utc)
@@ -80,9 +108,16 @@ class PersistentPCMSink(Sink):
         self._lock = threading.RLock()
         self._files: dict[int, object] = {}
         self._total_bytes = sum(path.stat().st_size for path in self.session_dir.glob("user-*.pcm"))
-        self._limit_reached = False
+        existing_metadata = self.read_metadata() if resume else {}
+        self._limit_reached = bool(existing_metadata.get("storage_limit_reached"))
         self._closed = False
-        self._write_metadata("recording", started_at=started_at.isoformat())
+        if resume:
+            self._write_metadata(
+                str(existing_metadata.get("status") or "recorded"),
+                recovery_resumed_at=started_at.isoformat(),
+            )
+        else:
+            self._write_metadata("recording", started_at=started_at.isoformat())
 
     @staticmethod
     def _user_id(user) -> int | None:
@@ -121,6 +156,15 @@ class PersistentPCMSink(Sink):
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, path)
+
+    def read_metadata(self) -> dict:
+        path = self.session_dir / "metadata.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     def write(self, data, user) -> None:
         pcm_data = getattr(data, "pcm", data)
@@ -211,6 +255,24 @@ class PersistentPCMSink(Sink):
         with self._lock:
             self._write_metadata(status, total_bytes=self._total_bytes, **extra)
 
+    def checkpoint(
+        self,
+        *,
+        offsets: dict[int, int],
+        speaker_labels: dict[int, str],
+        transcript_path: Path | None = None,
+        status: str = "processing",
+        **extra,
+    ) -> None:
+        """Atomically persist restart-safe progress without transcript contents."""
+        self.mark(
+            status,
+            offsets={str(key): int(value) for key, value in offsets.items()},
+            speaker_labels={str(key): value for key, value in speaker_labels.items()},
+            transcript_path=str(transcript_path or ""),
+            **extra,
+        )
+
     def save_transcript(self, content: str) -> Path | None:
         """Atomically persist a transcript outside the raw recording lifecycle."""
         if not content.strip():
@@ -275,3 +337,41 @@ def cleanup_old_recordings(*, now: datetime | None = None, retention_days: int |
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             continue
     return removed
+
+
+def load_transcript_content(path: Path | None) -> str:
+    """Read only the body of the separately archived transcript."""
+    if path is None or not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    marker = "\n---\n\n"
+    return text.split(marker, 1)[1].strip() if marker in text else text.strip()
+
+
+def find_recoverable_recordings(*, now: datetime | None = None) -> list[RecoverableRecording]:
+    """Find interrupted sessions whose retry time has arrived and PCM remains."""
+    current = now or datetime.now(timezone.utc)
+    candidates = []
+    root = recording_root()
+    if not root.exists():
+        return candidates
+    for metadata_path in root.glob("*/*/metadata.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            status = str(metadata.get("status") or "")
+            if status not in RECOVERABLE_STATUSES or status in TERMINAL_STATUSES:
+                continue
+            if not any(metadata_path.parent.glob("user-*.pcm")):
+                continue
+            retry_at = metadata.get("next_retry_at")
+            if retry_at:
+                parsed = datetime.fromisoformat(retry_at)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                if parsed > current:
+                    continue
+            candidates.append(RecoverableRecording(metadata_path.parent, metadata))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    candidates.sort(key=lambda item: str(item.metadata.get("started_at") or item.session_dir.name))
+    return candidates

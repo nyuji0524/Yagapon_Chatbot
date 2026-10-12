@@ -7,6 +7,7 @@ import discord
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
+from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.voice import VoiceMode
 
@@ -26,6 +27,8 @@ class YagaPon(discord.Bot):
 
         self.config = ConfigManager()
         self.corpus = CorpusManager()
+        self.operations = OperationalStore()
+        self._recording_recovery_task: asyncio.Task | None = None
 
         # コマンド登録
         from bot.commands import (
@@ -65,6 +68,13 @@ class YagaPon(discord.Bot):
         removed = await asyncio.to_thread(cleanup_old_recordings)
         if removed:
             log.info("Removed %s expired delivered recording(s)", removed)
+        if self._recording_recovery_task is None or self._recording_recovery_task.done():
+            from bot.voice import recording_recovery_loop
+
+            self._recording_recovery_task = asyncio.create_task(
+                recording_recovery_loop(self),
+                name="recording-recovery",
+            )
         log.info(f"おしゃべりやがぽん起動: {self.user}")
 
     async def on_guild_join(self, guild: discord.Guild):
@@ -418,6 +428,15 @@ class YagaPon(discord.Bot):
 
     async def close(self):
         log.info("Shutting down, flushing buffers...")
+        from bot.voice import checkpoint_voice_sessions_for_shutdown
+
+        await checkpoint_voice_sessions_for_shutdown()
+        if self._recording_recovery_task and not self._recording_recovery_task.done():
+            self._recording_recovery_task.cancel()
+            try:
+                await self._recording_recovery_task
+            except asyncio.CancelledError:
+                pass
         await self.corpus.shutdown()
         await super().close()
 

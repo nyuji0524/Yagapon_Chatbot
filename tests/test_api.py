@@ -73,6 +73,11 @@ def make_client():
         corpus=corpus,
         get_guild=lambda guild_id: guild if guild_id == 1 else None,
         _build_members_info=lambda guild_id: "メンバー情報",
+        operations=SimpleNamespace(
+            summary=Mock(return_value={"window_hours": 24, "events": []}),
+            recent_events=Mock(return_value=[]),
+            pending_dead_letters=Mock(return_value=[]),
+        ),
     )
     return TestClient(create_app(bot)), bot
 
@@ -195,3 +200,18 @@ def test_rag_dashboard_html_contains_no_embedded_token():
     assert response.status_code == 200
     assert "API token（保存しません）" in response.text
     assert "localStorage" not in response.text
+
+
+def test_operations_api_requires_token(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+
+    assert client.get("/admin/operations/summary").status_code == 401
+    response = client.get(
+        "/admin/operations/summary",
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["window_hours"] == 24
+    bot.operations.summary.assert_called_once_with(24)

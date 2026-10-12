@@ -1,11 +1,13 @@
 """Generate local Knowledge draft files from a Google Shared Drive."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from knowledge_sync.draft import (
@@ -14,7 +16,7 @@ from knowledge_sync.draft import (
     stable_filename,
     structure_source,
 )
-from knowledge_sync.drive import DriveReader
+from knowledge_sync.drive import DriveChangeTokenExpired, DriveReader
 
 log = logging.getLogger("yagapon.knowledge_sync")
 
@@ -30,6 +32,18 @@ def save_state(path: Path, state: dict):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+@contextmanager
+def sync_lock(state_path: Path):
+    lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another Drive sync is already running") from exc
+        yield
 
 
 def sync_once(args) -> dict:
@@ -49,7 +63,16 @@ def sync_once(args) -> dict:
         documents = reader.list_all()
         new_page_token = reader.get_start_page_token()
     elif state.get("page_token"):
-        documents, new_page_token = reader.list_changes(state["page_token"])
+        try:
+            documents, new_page_token = reader.list_changes(state["page_token"])
+        except DriveChangeTokenExpired:
+            log.warning("Drive change token expired; running full reconciliation")
+            documents = reader.list_all()
+            new_page_token = reader.get_start_page_token()
+            current_ids = {document.file_id for document in documents}
+            for file_id, file_state in state.get("files", {}).items():
+                if file_id not in current_ids:
+                    file_state["removed"] = True
     else:
         state["page_token"] = reader.get_start_page_token()
         save_state(state_path, state)
@@ -112,7 +135,9 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     while True:
         try:
-            print(json.dumps(sync_once(args), ensure_ascii=False), flush=True)
+            state_path = Path(os.environ.get("YAGAPON_DRIVE_SYNC_STATE", "/data/drive-sync-state.json"))
+            with sync_lock(state_path):
+                print(json.dumps(sync_once(args), ensure_ascii=False), flush=True)
         except Exception:
             if not args.watch_interval:
                 raise

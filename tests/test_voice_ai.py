@@ -6,6 +6,7 @@ import pytest
 
 from bot import voice
 from bot.commands.minutes import _generate_minutes_from_file
+from bot.recording import PersistentPCMSink, RecoverableRecording
 from bot.voice import VoiceMode, VoiceSession
 
 
@@ -46,6 +47,63 @@ async def test_voice_offsets_advance_only_after_successful_transcription():
 
     assert 10 not in session._last_audio_len
     assert session._last_audio_len[20] == 200
+
+
+@pytest.mark.asyncio
+async def test_successful_transcription_checkpoints_offsets():
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.CHAT)
+    session.recording_sink = SimpleNamespace(checkpoint=Mock(), save_transcript=Mock(return_value=None))
+    session._transcribe_audio = AsyncMock(return_value="成功")
+    session._generate_realtime_response = AsyncMock(return_value=None)
+
+    await session._generate_response_from_audio({20: ("Speaker 1", b"b")}, {20: 200})
+
+    session.recording_sink.checkpoint.assert_called_once()
+    assert session.recording_sink.checkpoint.call_args.kwargs["offsets"] == {20: 200}
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_failed_429_chunk_for_later(monkeypatch, tmp_path):
+    session_dir = tmp_path / "recordings" / "1" / "session"
+    sink = PersistentPCMSink(1, "meeting", "chat", session_dir=session_dir, max_bytes=100_000)
+    sink.write(b"x" * 2000, 42)
+    sink.cleanup()
+    candidate = RecoverableRecording(session_dir, sink.read_metadata())
+    operations = SimpleNamespace(
+        record_event=Mock(), dead_letter=Mock(), resolve_dead_letter=Mock()
+    )
+    bot = SimpleNamespace(operations=operations)
+    monkeypatch.setattr(VoiceSession, "_transcribe_audio", AsyncMock(return_value=None))
+
+    await voice._recover_recording(bot, candidate)
+
+    metadata = sink.read_metadata()
+    assert metadata["status"] == "recovery_retry"
+    assert metadata.get("offsets", {}) == {}
+    assert (session_dir / "user-42.pcm").exists()
+
+
+@pytest.mark.asyncio
+async def test_recovery_batch_stops_after_rate_limit(monkeypatch, tmp_path):
+    candidates = [
+        RecoverableRecording(tmp_path / "one", {}),
+        RecoverableRecording(tmp_path / "two", {}),
+    ]
+    recover = AsyncMock()
+
+    async def trip_after_first(*_args):
+        voice._transcription_rate_limiter.trip(retry_after=60)
+
+    recover.side_effect = trip_after_first
+    monkeypatch.setattr(voice, "find_recoverable_recordings", lambda: candidates)
+    monkeypatch.setattr(voice, "_recover_recording", recover)
+    voice._transcription_rate_limiter.reset()
+    try:
+        await voice.recover_incomplete_recordings(SimpleNamespace())
+    finally:
+        voice._transcription_rate_limiter.reset()
+
+    assert recover.await_count == 1
 
 
 @pytest.mark.asyncio

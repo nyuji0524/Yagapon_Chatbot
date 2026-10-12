@@ -36,6 +36,7 @@ class BackfillRequest(BaseModel):
     channel_id: int | None = None
     mode: Literal["incremental", "rebuild"] = "incremental"
     days: int | None = Field(default=30, ge=1, le=3650)
+    dry_run: bool = False
 
 
 @router.get("/health")
@@ -119,6 +120,8 @@ async def backfill(request: Request, body: BackfillRequest):
         "finished_at": None,
     }
     request.app.state.backfill_jobs[job_id] = job
+    if hasattr(bot.operations, "start_job"):
+        bot.operations.start_job("backfill", guild_id=body.guild_id, job_id=job_id, progress=job)
 
     async def run():
         try:
@@ -134,22 +137,24 @@ async def backfill(request: Request, body: BackfillRequest):
                         corpus,
                         after=after,
                         replace_existing=True,
+                        dry_run=body.dry_run,
                     )
                     job["messages_indexed"] += result.messages_indexed
                     job["documents_uploaded"] += result.documents_uploaded
                     job["documents_replaced"] += result.documents_replaced
                     if result.latest_message_id and result.latest_message_at:
-                        await bot.config.set_backfill_cursor(
-                            body.guild_id,
-                            ch.id,
-                            result.latest_message_id,
-                            result.latest_message_at,
-                        )
+                        if not body.dry_run:
+                            await bot.config.set_backfill_cursor(
+                                body.guild_id, ch.id,
+                                result.latest_message_id, result.latest_message_at,
+                            )
                 except Exception as exc:
                     job["failures"].append({"channel_id": ch.id, "channel_name": ch.name, "error": str(exc)})
                     log.exception("API backfill failed for channel %s", ch.id)
                 finally:
                     job["channels_completed"] += 1
+                    if hasattr(bot.operations, "update_job"):
+                        bot.operations.update_job(job_id, "running", job)
             job["status"] = "failed" if job["failures"] else "completed"
         except asyncio.CancelledError:
             job["status"] = "cancelled"
@@ -160,6 +165,8 @@ async def backfill(request: Request, body: BackfillRequest):
             log.exception("API backfill job failed: %s", job_id)
         finally:
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
+            if hasattr(bot.operations, "update_job"):
+                bot.operations.update_job(job_id, job["status"], job)
             bot.corpus.finish_backfill(body.guild_id)
 
     task = asyncio.create_task(run())
@@ -177,6 +184,8 @@ async def backfill(request: Request, body: BackfillRequest):
 @router.get("/backfill/{job_id}", dependencies=[Depends(require_api_token)])
 async def backfill_status(request: Request, job_id: str):
     job = request.app.state.backfill_jobs.get(job_id)
+    if not job and hasattr(request.app.state.bot.operations, "get_job"):
+        job = request.app.state.bot.operations.get_job(job_id)
     if not job:
         raise HTTPException(404, "Backfill job not found")
     return job

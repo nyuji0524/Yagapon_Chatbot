@@ -233,7 +233,9 @@ class RagStore:
                 1 for term in clean_terms if term.casefold() in body.casefold()
             )
             authority_bonus = 20 if row["authority"] == "curated" else 0
-            status_bonus = 10 if row["status"] in {"approved", "verified", "current"} else 0
+            status_bonus = 10 if row["status"] in {
+                "active", "historical", "approved", "verified", "current"
+            } else 0
             hits.append(LexicalHit(
                 document_key=row["document_key"],
                 channel_name=row["channel_name"] or "",
