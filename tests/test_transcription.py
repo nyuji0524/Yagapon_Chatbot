@@ -160,7 +160,7 @@ async def test_transcription_uses_enrolled_voiceprints_for_speaker_names(tmp_pat
     upload = Mock(side_effect=[meeting, reference])
     create = AsyncMock()
     fallback = AsyncMock(
-        return_value=SimpleNamespace(text="Registered 1: 提案します\nSpeaker 1: 賛成です")
+        return_value=SimpleNamespace(text="Registered 1： 提案します\nSpeaker 1: 賛成です")
     )
     client = SimpleNamespace(
         files=SimpleNamespace(upload=upload, delete=Mock()),
@@ -179,7 +179,7 @@ async def test_transcription_uses_enrolled_voiceprints_for_speaker_names(tmp_pat
         voiceprint_paths={"中山": str(sample)},
     )
 
-    assert result == "中山: 提案します\nSpeaker 1: 賛成です"
+    assert result == "中山： 提案します\nSpeaker 1: 賛成です"
     create.assert_not_awaited()
     contents = fallback.await_args.kwargs["contents"]
     assert "登録声紋" in contents[0]

@@ -71,6 +71,7 @@ def test_drive_writer_reuses_transcript_folder():
     )
 
     assert writer.get_or_create_folder("root", "文字起こし") == "transcripts"
+    assert writer.drive.files().list.call_args.kwargs["corpora"] == "allDrives"
     writer.drive.files().create.assert_not_called()
 
 

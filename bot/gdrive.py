@@ -157,6 +157,7 @@ class DriveWriter:
             .list(
                 q=query,
                 spaces="drive",
+                corpora="allDrives",
                 fields="files(id,name)",
                 pageSize=10,
                 supportsAllDrives=True,

@@ -60,7 +60,7 @@ def _voiceprint_prompt(reference_count: int, custom_vocabulary: list[str] | None
 
 def _replace_registered_labels(text: str, labels: dict[int, str]) -> str:
     """Replace opaque model labels with configured display names only at turn starts."""
-    pattern = re.compile(r"(?im)^(\s*\[?)registered[ _-]?(\d+)(\]?\s*:)")
+    pattern = re.compile(r"(?im)^(\s*\[?)registered[ _-]?(\d+)(\]?\s*[:：])")
 
     def replace(match: re.Match) -> str:
         label = labels.get(int(match.group(2)))
@@ -160,28 +160,39 @@ async def transcribe_audio(
 
         voiceprint_labels: dict[int, str] = {}
         if use_voiceprints:
+            valid_voiceprints = []
             for name, path_value in list(voiceprint_paths.items())[:16]:
                 path = Path(path_value)
                 if not path.is_file() or path.stat().st_size <= 1000:
                     continue
-                index = len(uploaded_voiceprints) + 1
+                valid_voiceprints.append((name, path))
 
-                async def upload_voiceprint(sample_path=path, sample_index=index):
-                    return await loop.run_in_executor(
-                        None,
-                        lambda: client.files.upload(
-                            file=str(sample_path),
-                            config={
-                                "mime_type": "audio/wav",
-                                "display_name": f"voiceprint-{sample_index}",
-                            },
+            upload_slots = asyncio.Semaphore(4)
+
+            async def upload_voiceprint(index: int, name: str, path: Path):
+                async with upload_slots:
+                    sample = await retry_rate_limit(
+                        lambda: loop.run_in_executor(
+                            None,
+                            lambda: client.files.upload(
+                                file=str(path),
+                                config={
+                                    "mime_type": "audio/wav",
+                                    "display_name": f"voiceprint-{index}",
+                                },
+                            ),
                         ),
+                        operation_name="voiceprint_upload",
                     )
+                    return index, name, sample
 
-                sample = await retry_rate_limit(
-                    upload_voiceprint,
-                    operation_name="voiceprint_upload",
+            results = await asyncio.gather(
+                *(
+                    upload_voiceprint(index, name, path)
+                    for index, (name, path) in enumerate(valid_voiceprints, start=1)
                 )
+            )
+            for index, name, sample in results:
                 uploaded_voiceprints.append(sample)
                 voiceprint_labels[index] = name
 
