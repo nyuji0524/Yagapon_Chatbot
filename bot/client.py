@@ -112,8 +112,18 @@ class YagaPon(discord.Bot):
                 log.exception("Automatic voice leave failed for guild %s", member.guild.id)
                 return
 
+            from bot.gdrive import upload_transcript
+
+            transcript_url = await upload_transcript(
+                self.config,
+                member.guild.id,
+                session.transcript_text,
+                session.channel.name,
+            )
+
             if not minutes:
-                session.mark_delivered()
+                await session.publish_knowledge()
+                session.mark_delivered(transcript_url=transcript_url)
                 return
 
             if minutes and has_minutes:
@@ -133,26 +143,55 @@ class YagaPon(discord.Bot):
 
                     drive_url = await upload_minutes(self.config, member.guild.id, minutes, session.channel.name)
                     summary = await _summarize_minutes(minutes)
+                    knowledge_url = await session.publish_knowledge(
+                        summary=summary,
+                        minutes=minutes,
+                    )
 
                     embed = discord.Embed(
                         title=f"📝 議事録（自動生成） - {session.channel.name}",
                         description=summary[:4096],
                         color=discord.Color.blue(),
                     )
-                    file = None
                     if drive_url:
                         embed.add_field(name="📄 全文", value=f"[Google Docsで見る]({drive_url})", inline=False)
-                    else:
-                        import io
+                    if transcript_url:
+                        embed.add_field(
+                            name="📜 逐語文字起こし",
+                            value=f"[Google Docsで見る]({transcript_url})",
+                            inline=False,
+                        )
+                    if knowledge_url:
+                        embed.add_field(
+                            name="🗂️ Knowledge",
+                            value=f"[Draft PRを確認する]({knowledge_url})",
+                            inline=False,
+                        )
 
-                        file = discord.File(
-                            io.BytesIO(minutes.encode("utf-8")),
-                            filename=f"議事録_{session.channel.name}.md",
+                    import io
+
+                    files = []
+                    if not drive_url:
+                        files.append(
+                            discord.File(
+                                io.BytesIO(minutes.encode("utf-8")),
+                                filename=f"議事録_{session.channel.name}.md",
+                            )
                         )
                         embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
+                    if session.transcript_text and not transcript_url:
+                        files.append(
+                            discord.File(
+                                io.BytesIO(session.transcript_text.encode("utf-8")),
+                                filename=f"文字起こし_{session.channel.name}.md",
+                            )
+                        )
 
-                    await notify_ch.send(embed=embed, file=file, silent=True)
-                    session.mark_delivered(drive_url=drive_url)
+                    send_kwargs = {"embed": embed, "silent": True}
+                    if files:
+                        send_kwargs["files"] = files
+                    await notify_ch.send(**send_kwargs)
+                    session.mark_delivered(drive_url=drive_url, transcript_url=transcript_url)
 
     async def on_message(self, message: discord.Message):
         if message.author == self.user or message.author.bot:

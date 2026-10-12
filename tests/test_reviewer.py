@@ -3,6 +3,8 @@ from reviewer.review import (
     ReviewResult,
     added_lines_from_patch,
     build_review_payload,
+    review_instruction,
+    review_request,
     validate_findings,
 )
 
@@ -43,5 +45,58 @@ def test_review_payload_contains_inline_comment_and_idempotency_marker():
     assert payload["commit_id"] == "abc123"
     assert payload["event"] == "COMMENT"
     assert payload["comments"][0]["line"] == 11
-    assert "Critical" in payload["comments"][0]["body"]
+    assert "[🟥blocker]" in payload["comments"][0]["body"]
+    assert "確認してほしいぽん。" in payload["comments"][0]["body"]
+    assert "[tl;dr]" in payload["body"]
+    assert "⛔" in payload["body"]
     assert "<!-- marker -->" in payload["body"]
+
+
+def test_non_blocking_review_is_lgtm_and_uses_imho_nits_labels():
+    result = ReviewResult(
+        summary="全体として安全ですぽん。",
+        findings=[
+            Finding(
+                path="app.py",
+                line=11,
+                severity="minor",
+                title="境界値テストもあると安心",
+                body="ゼロ件の場合も追加すると回帰を防げるぽん。",
+            ),
+            Finding(
+                path="app.py",
+                line=12,
+                severity="trivial",
+                title="名前を揃える",
+                body="既存の命名規則に合わせると読みやすいぽん。",
+            ),
+        ],
+    )
+
+    payload = build_review_payload(result, "abc123", "<!-- marker -->")
+
+    assert "✅ LGTM" in payload["body"]
+    assert "[🟦imho]" in payload["comments"][0]["body"]
+    assert "[🟩nits]" in payload["comments"][1]["body"]
+
+
+def test_up_to_ten_nits_can_be_posted_inline():
+    findings = [
+        Finding(path="app.py", line=line, severity="trivial", title=f"nit {line}", body="説明")
+        for line in range(1, 13)
+    ]
+
+    result = validate_findings(findings, {"app.py": set(range(1, 13))})
+
+    assert len(result) == 10
+
+
+def test_knowledge_profile_reviews_structure_instead_of_content_truth():
+    instruction = review_instruction("knowledge-structure")
+    request = review_request("knowledge-structure", "PR context")
+
+    assert "not whether meeting statements" in instruction
+    assert "front matter" in instruction
+    assert "内容の真偽" in request
+    assert "正本の配置" in request
+    assert request.endswith("PR context")

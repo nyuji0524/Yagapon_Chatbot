@@ -88,18 +88,33 @@ def register(bot):
             )
             return
 
+        # 逐語文字起こしは議事録とは別のGoogle Docとして保存する。
+        from bot.gdrive import upload_minutes, upload_transcript
+
+        transcript_url = await upload_transcript(
+            bot.config,
+            ctx.guild_id,
+            session.transcript_text,
+            channel_name,
+        )
+
         if not minutes:
-            session.mark_delivered()
-            await ctx.followup.send("退出したぽん！👋", silent=True)
+            knowledge_url = await session.publish_knowledge()
+            session.mark_delivered(transcript_url=transcript_url)
+            message = "退出したぽん！👋"
+            if transcript_url:
+                message += f"\n📜 [文字起こしをGoogle Docsで見る]({transcript_url})"
+            if knowledge_url:
+                message += f"\n🗂️ [KnowledgeのDraft PR]({knowledge_url})"
+            await ctx.followup.send(message, silent=True)
             return
 
-        # まずGoogle Docsに全文保存
-        from bot.gdrive import upload_minutes
-
+        # 議事録と逐語文字起こしをそれぞれ保存
         drive_url = await upload_minutes(bot.config, ctx.guild_id, minutes, channel_name)
 
         # Geminiで要約を生成
         summary = await _summarize_minutes(minutes)
+        knowledge_url = await session.publish_knowledge(summary=summary, minutes=minutes)
 
         # Discordには要約 + Google Docsリンクを送信
         embed = discord.Embed(
@@ -113,18 +128,41 @@ def register(bot):
         else:
             # Drive保存失敗時はファイル添付でフォールバック
             embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
-
-        if drive_url:
-            await ctx.channel.send(embed=embed, silent=True)
-        else:
-            import io
-
-            file = discord.File(
-                io.BytesIO(minutes.encode("utf-8")),
-                filename=f"議事録_{channel_name}.md",
+        if transcript_url:
+            embed.add_field(
+                name="📜 逐語文字起こし",
+                value=f"[Google Docsで見る]({transcript_url})",
+                inline=False,
             )
-            await ctx.channel.send(embed=embed, file=file, silent=True)
-        session.mark_delivered(drive_url=drive_url)
+        if knowledge_url:
+            embed.add_field(
+                name="🗂️ Knowledge",
+                value=f"[Draft PRを確認する]({knowledge_url})",
+                inline=False,
+            )
+
+        import io
+
+        files = []
+        if not drive_url:
+            files.append(
+                discord.File(
+                    io.BytesIO(minutes.encode("utf-8")),
+                    filename=f"議事録_{channel_name}.md",
+                )
+            )
+        if session.transcript_text and not transcript_url:
+            files.append(
+                discord.File(
+                    io.BytesIO(session.transcript_text.encode("utf-8")),
+                    filename=f"文字起こし_{channel_name}.md",
+                )
+            )
+        send_kwargs = {"embed": embed, "silent": True}
+        if files:
+            send_kwargs["files"] = files
+        await ctx.channel.send(**send_kwargs)
+        session.mark_delivered(drive_url=drive_url, transcript_url=transcript_url)
 
 
 async def _summarize_minutes(minutes: str) -> str:

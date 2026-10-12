@@ -116,6 +116,7 @@ async def test_drain_recording_processes_bounded_chunks_until_caught_up():
             ]
         ),
         mark=Mock(),
+        save_transcript=Mock(return_value=None),
     )
     session._transcribe_audio = AsyncMock(side_effect=["最初", "次"])
 
@@ -128,7 +129,12 @@ async def test_drain_recording_processes_bounded_chunks_until_caught_up():
 
 def test_failed_transcription_recording_is_retained_after_notification():
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
-    session.recording_sink = SimpleNamespace(limit_reached=False, mark=Mock())
+    session.recording_sink = SimpleNamespace(
+        limit_reached=False,
+        total_bytes=100,
+        mark=Mock(),
+        delete_audio=Mock(),
+    )
     session._transcription_failed = True
 
     session.mark_delivered(drive_url="https://docs.example/minutes")
@@ -136,9 +142,49 @@ def test_failed_transcription_recording_is_retained_after_notification():
     session.recording_sink.mark.assert_called_once_with(
         "delivered_recording_retained",
         drive_url="https://docs.example/minutes",
+        transcript_url="",
+        transcript_path="",
         transcription_failed=True,
         storage_limit_reached=False,
+        transcript_saved=False,
     )
+    session.recording_sink.delete_audio.assert_not_called()
+
+
+def test_successful_delivery_deletes_audio_after_transcript_is_saved(tmp_path):
+    transcript_path = tmp_path / "transcript.md"
+    transcript_path.write_text("文字起こし", encoding="utf-8")
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session._transcript_path = transcript_path
+    session.recording_sink = SimpleNamespace(
+        session_dir=tmp_path / "session",
+        limit_reached=False,
+        total_bytes=100,
+        mark=Mock(),
+        delete_audio=Mock(return_value=1),
+    )
+
+    session.mark_delivered(
+        drive_url="https://docs.example/minutes",
+        transcript_url="https://docs.example/transcript",
+    )
+
+    session.recording_sink.mark.assert_called_once_with(
+        "delivered_audio_deleted",
+        drive_url="https://docs.example/minutes",
+        transcript_url="https://docs.example/transcript",
+        transcript_path=str(transcript_path),
+    )
+    session.recording_sink.delete_audio.assert_called_once_with()
+
+
+def test_listen_mode_uses_five_minute_large_chunks():
+    listen = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    chat = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.CHAT)
+
+    assert voice.REALTIME_INTERVAL_LISTEN == 300
+    assert listen._transcription_chunk_bytes() == 50 * 1024 * 1024
+    assert chat._transcription_chunk_bytes() == 5 * 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -177,6 +223,7 @@ async def test_voice_assigns_stable_anonymous_speaker_labels():
             ]
         ),
         mark=Mock(),
+        save_transcript=Mock(return_value=None),
     )
     session._transcribe_audio = AsyncMock(side_effect=["Bです", "Aです", "Aの続き"])
 

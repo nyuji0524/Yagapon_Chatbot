@@ -139,6 +139,7 @@ YAGAPON_RAG_MODEL=gemini-3.8-flash
 YAGAPON_RESPONSE_MODEL=gemini-3.8-flash
 YAGAPON_FAST_MODEL=gemini-3.1-flash-lite
 YAGAPON_TRANSCRIBE_MODEL=gemini-3.5-transcribe
+YAGAPON_TRANSCRIBE_FALLBACK_MODEL=gemini-3.8-flash
 YAGAPON_AUDIO_MODEL=gemini-3.8-flash
 YAGAPON_DAILY_QUERY_LIMIT=400
 YAGAPON_RAG_DB_PATH=/data/rag.sqlite3
@@ -156,6 +157,12 @@ YAGAPON_CATALOG_MODEL=gemini-3.1-flash-lite
 YAGAPON_CATALOG_PASSES=2
 YAGAPON_VOICEPRINT_DIR=/data/voiceprints
 YAGAPON_RECORDING_DIR=/data/recordings
+YAGAPON_TRANSCRIPT_DIR=/data/transcripts
+YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
+YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_KNOWLEDGE_BASE_BRANCH=main
+YAGAPON_KNOWLEDGE_GITHUB_TOKEN=
+YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=false
 YAGAPON_MAX_RECORDING_BYTES=4294967296
 YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
 YAGAPON_RECORDING_RETENTION_DAYS=7
@@ -185,7 +192,9 @@ mkdir -p data
 docker compose up --build
 ```
 
-コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMを逐次保存し、メモリ量を録音時間に依存させない。正常に議事録を配信した録音は既定7日で自動削除し、文字起こし失敗や容量上限に達した録音は復旧用に保持する。
+コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMを逐次保存し、メモリ量を録音時間に依存させない。逐語文字起こしは議事録とは別に`data/transcripts/`とGoogle Docsへ保存する。正常配信後は生PCMを即時削除し、文字起こし失敗や容量上限に達した録音だけを復旧用に保持する。配信済み録音のメタデータは既定7日で削除するが、独立保存した文字起こしは削除しない。
+
+VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`が設定されている場合は、privateなKnowledgeリポジトリの`draft`資料として専用ブランチへ1コミットし、Draft PRを作る。詳細なAI議事録は`YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true`の場合だけ含める。GitHub送信に失敗してもoutboxを削除しない。
 
 バックグラウンド起動：
 

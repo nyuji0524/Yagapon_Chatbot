@@ -29,7 +29,7 @@ COPY rag_eval ./rag_eval
 COPY main.py ./
 
 RUN useradd --create-home --uid 10001 yagapon \
-    && mkdir -p /data/voiceprints /data/recordings \
+    && mkdir -p /data/voiceprints /data/recordings /data/transcripts /data/knowledge-outbox \
     && chown -R yagapon:yagapon /app /data
 
 USER yagapon

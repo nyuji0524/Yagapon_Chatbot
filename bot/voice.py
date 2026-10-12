@@ -5,15 +5,15 @@ import io
 import logging
 import os
 import tempfile
-import time
 from enum import Enum
+from pathlib import Path
 
 import discord
 from google import genai
 from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, response_model
-from bot.ai_retry import RateLimitExceeded, new_genai_client
+from bot.ai_retry import RateLimitCircuitBreaker, RateLimitExceeded, new_genai_client
 from bot.minutes_generation import generate_minutes
 from bot.recording import PersistentPCMSink
 from bot.transcription import transcribe_audio
@@ -23,9 +23,11 @@ log = logging.getLogger("yagapon.voice")
 # リアルタイム処理の間隔（秒）
 REALTIME_INTERVAL_CHAT = 5  # chatモード: 短い間隔で即応答
 REALTIME_INTERVAL_MEETING = 15  # meetingモード: 会議の邪魔にならないよう長め
-REALTIME_INTERVAL_LISTEN = 30  # listenモード: 文字起こし蓄積用
-TRANSCRIPTION_CHUNK_BYTES = 5 * 1024 * 1024
+REALTIME_INTERVAL_LISTEN = 300  # listenモード: 専用STTの日次リクエスト枠を温存
+TRANSCRIPTION_CHUNK_BYTES_REALTIME = 5 * 1024 * 1024
+TRANSCRIPTION_CHUNK_BYTES_LISTEN = 50 * 1024 * 1024
 TRANSCRIPTION_TIMEOUT_SECONDS = 180
+_transcription_rate_limiter = RateLimitCircuitBreaker()
 
 
 class VoiceMode(Enum):
@@ -55,8 +57,8 @@ class VoiceSession:
         self._stop_error: BaseException | None = None
         self._delivery_claimed = False
         self._transcription_failed = False
-        self._transcription_backoff_until = 0.0
-        self._transcription_rate_limit_failures = 0
+        self._transcript_path: Path | None = None
+        self._knowledge_pull_request_url: str | None = None
         self._speaker_labels: dict[int, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
@@ -198,7 +200,7 @@ class VoiceSession:
             current_audio = await asyncio.to_thread(
                 self.recording_sink.read_chunks,
                 self._last_audio_len,
-                chunk_bytes=TRANSCRIPTION_CHUNK_BYTES,
+                chunk_bytes=self._transcription_chunk_bytes(),
             )
         except Exception as e:
             log.error(f"Sink read error: {e}")
@@ -230,7 +232,7 @@ class VoiceSession:
                     continue
                 self._last_audio_len[user_id] = next_offsets[user_id]
                 if text.strip():
-                    self.transcript.append(f"[{name}]: {text}")
+                    await self._append_transcript(f"[{name}]: {text}")
                     log.info(f"Transcribed: [{name}]: {text[:50]}...")
             return
 
@@ -240,7 +242,7 @@ class VoiceSession:
             transcript_text, response = result
             # 議事録用に文字起こしを蓄積
             if transcript_text:
-                self.transcript.append(transcript_text)
+                await self._append_transcript(transcript_text)
             if response:
                 await self.speak(response)
                 self._conversation_history.append({"role": "assistant", "text": response})
@@ -435,17 +437,91 @@ class VoiceSession:
         self._delivery_claimed = True
         return True
 
-    def mark_delivered(self, *, drive_url: str | None = None) -> None:
+    @property
+    def transcript_text(self) -> str:
+        return "\n".join(self.transcript)
+
+    @property
+    def transcript_path(self) -> Path | None:
+        return self._transcript_path
+
+    @property
+    def knowledge_pull_request_url(self) -> str | None:
+        return self._knowledge_pull_request_url
+
+    async def publish_knowledge(
+        self,
+        *,
+        summary: str | None = None,
+        minutes: str | None = None,
+    ) -> str | None:
+        """Queue the transcript and optional derived documents for Knowledge review."""
+        if not self.recording_sink or not self.transcript_text.strip():
+            return None
+        from bot.knowledge_publish import publish_meeting_knowledge
+
+        result = await publish_meeting_knowledge(
+            session_id=self.recording_sink.session_dir.name,
+            guild_id=self.guild_id,
+            channel_name=self.channel.name,
+            mode=self.mode.value,
+            transcript=self.transcript_text,
+            summary=summary,
+            minutes=minutes,
+        )
+        if result:
+            self._knowledge_pull_request_url = result.pull_request_url
+        return self._knowledge_pull_request_url
+
+    async def _append_transcript(self, text: str) -> None:
+        self.transcript.append(text)
+        await self._persist_transcript()
+
+    async def _persist_transcript(self) -> Path | None:
+        if not self.recording_sink or not self.transcript:
+            return self._transcript_path
+        self._transcript_path = await asyncio.to_thread(
+            self.recording_sink.save_transcript,
+            self.transcript_text,
+        )
+        return self._transcript_path
+
+    def mark_delivered(
+        self,
+        *,
+        drive_url: str | None = None,
+        transcript_url: str | None = None,
+    ) -> None:
         if self.recording_sink:
-            if self._transcription_failed or self.recording_sink.limit_reached:
+            transcript_saved = bool(self._transcript_path and self._transcript_path.exists())
+            has_recording = self.recording_sink.total_bytes > 0
+            if (
+                self._transcription_failed
+                or self.recording_sink.limit_reached
+                or (has_recording and not transcript_saved)
+            ):
                 self.recording_sink.mark(
                     "delivered_recording_retained",
                     drive_url=drive_url or "",
+                    transcript_url=transcript_url or "",
+                    transcript_path=str(self._transcript_path or ""),
                     transcription_failed=self._transcription_failed,
                     storage_limit_reached=self.recording_sink.limit_reached,
+                    transcript_saved=transcript_saved,
                 )
             else:
-                self.recording_sink.mark("delivered", drive_url=drive_url or "")
+                self.recording_sink.mark(
+                    "delivered_audio_deleted",
+                    drive_url=drive_url or "",
+                    transcript_url=transcript_url or "",
+                    transcript_path=str(self._transcript_path or ""),
+                )
+                deleted = self.recording_sink.delete_audio()
+                log.info(
+                    "Deleted raw recording after transcript preservation session=%s files=%s",
+                    self.recording_sink.session_dir.name,
+                    deleted,
+                )
 
     async def _stop_once(self) -> str | None:
         self.is_active = False
@@ -471,9 +547,20 @@ class VoiceSession:
 
         if self.recording_sink:
             await self._drain_recording()
+            await self._persist_transcript()
 
         if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
-            minutes = await self._generate_minutes()
+            try:
+                minutes = await self._generate_minutes()
+            except Exception as exc:
+                log.exception("Minutes generation failed; preserving transcript for delivery")
+                if self.recording_sink:
+                    self.recording_sink.mark(
+                        "minutes_generation_failed",
+                        error=type(exc).__name__,
+                        transcript_path=str(self._transcript_path or ""),
+                    )
+                return None
             if self.recording_sink and not self._transcription_failed:
                 self.recording_sink.mark("minutes_generated")
             return minutes
@@ -489,7 +576,7 @@ class VoiceSession:
             chunks = await asyncio.to_thread(
                 self.recording_sink.read_chunks,
                 self._last_audio_len,
-                chunk_bytes=TRANSCRIPTION_CHUNK_BYTES,
+                chunk_bytes=self._transcription_chunk_bytes(),
             )
             if not chunks:
                 return
@@ -502,7 +589,7 @@ class VoiceSession:
                 self._last_audio_len[user_id] = next_offset
                 progressed = True
                 if text.strip():
-                    self.transcript.append(f"[{speaker}]: {text}")
+                    await self._append_transcript(f"[{speaker}]: {text}")
             if not progressed:
                 self._transcription_failed = True
                 self.recording_sink.mark("transcription_failed")
@@ -526,12 +613,12 @@ class VoiceSession:
         if len(audio_bytes) < 1000:  # ほぼ無音
             return ""
 
-        now = time.monotonic()
-        if now < self._transcription_backoff_until:
-            log.info(
+        cooldown_remaining = _transcription_rate_limiter.remaining()
+        if cooldown_remaining > 0:
+            log.debug(
                 "Skipping transcription during rate-limit cooldown speaker=%s remaining=%.1fs",
                 speaker_name,
-                self._transcription_backoff_until - now,
+                cooldown_remaining,
             )
             return None
 
@@ -553,26 +640,32 @@ class VoiceSession:
                     mime_type="audio/wav",
                     display_name=f"vc-{speaker_name}",
                     custom_vocabulary=vocabulary,
+                    # Short interactive modes can create many requests. Reserve
+                    # the dedicated STT quota for long-form listen/minutes mode.
+                    prefer_dedicated=self.mode == VoiceMode.LISTEN,
                 ),
                 timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
             )
-            self._transcription_rate_limit_failures = 0
-            self._transcription_backoff_until = 0.0
+            _transcription_rate_limiter.reset()
             return text
-        except RateLimitExceeded:
-            self._transcription_rate_limit_failures += 1
-            cooldown = min(1800.0, 300.0 * (2 ** (self._transcription_rate_limit_failures - 1)))
-            self._transcription_backoff_until = time.monotonic() + cooldown
+        except RateLimitExceeded as exc:
+            cooldown = _transcription_rate_limiter.trip(retry_after=exc.retry_after)
             log.warning(
-                "Transcription rate limit exhausted speaker=%s cooldown=%.0fs failures=%s",
+                "Transcription rate limit exhausted speaker=%s cooldown=%.0fs failures=%s diagnostic=%s",
                 speaker_name,
                 cooldown,
-                self._transcription_rate_limit_failures,
+                _transcription_rate_limiter.failure_count,
+                exc.diagnostic,
             )
             return None
         except Exception as e:
             log.error("Transcription error for %s: %r", speaker_name, e)
             return None
+
+    def _transcription_chunk_bytes(self) -> int:
+        if self.mode == VoiceMode.LISTEN:
+            return TRANSCRIPTION_CHUNK_BYTES_LISTEN
+        return TRANSCRIPTION_CHUNK_BYTES_REALTIME
 
     async def _generate_minutes(self) -> str:
         """蓄積済みの文字起こしから議事録を生成（長時間でも対応可能）"""
@@ -594,6 +687,11 @@ class VoiceSession:
             client,
             transcript_text,
             glossary_text=glossary_text,
+            checkpoint_dir=(
+                self.recording_sink.session_dir / "minutes-checkpoints"
+                if self.recording_sink
+                else None
+            ),
         )
 
     async def speak(self, text: str):

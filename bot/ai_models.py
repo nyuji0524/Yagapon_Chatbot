@@ -26,6 +26,11 @@ def transcribe_model() -> str:
     return os.environ.get("YAGAPON_TRANSCRIBE_MODEL", "gemini-3.5-transcribe")
 
 
+def transcribe_fallback_model() -> str:
+    """Dedicated STT quota exhaustion and realtime voice fallback."""
+    return os.environ.get("YAGAPON_TRANSCRIBE_FALLBACK_MODEL", "gemini-3.8-flash")
+
+
 def audio_analysis_model() -> str:
     """音声サンプルの音質確認専用。本人識別の権限根拠には使用しない。"""
     return os.environ.get("YAGAPON_AUDIO_MODEL", "gemini-3.8-flash")

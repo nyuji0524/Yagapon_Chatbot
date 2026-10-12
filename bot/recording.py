@@ -30,6 +30,14 @@ def recording_root() -> Path:
     return config_path.parent / "recordings"
 
 
+def transcript_root() -> Path:
+    """Permanent transcript archive, intentionally separate from raw audio."""
+    configured = os.environ.get("YAGAPON_TRANSCRIPT_DIR")
+    if configured:
+        return Path(configured)
+    return recording_root().parent / "transcripts"
+
+
 class RecordingLimitExceeded(RuntimeError):
     """Raised once a session reaches its configured durable storage limit."""
 
@@ -203,6 +211,43 @@ class PersistentPCMSink(Sink):
         with self._lock:
             self._write_metadata(status, total_bytes=self._total_bytes, **extra)
 
+    def save_transcript(self, content: str) -> Path | None:
+        """Atomically persist a transcript outside the raw recording lifecycle."""
+        if not content.strip():
+            return None
+        destination = transcript_root() / str(self.guild_id) / f"{self.session_dir.name}.md"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        document = (
+            f"# 文字起こし - {self.channel_name}\n\n"
+            f"- セッション: `{self.session_dir.name}`\n"
+            f"- モード: `{self.mode}`\n\n"
+            "---\n\n"
+            f"{content.rstrip()}\n"
+        )
+        temporary = destination.with_suffix(".md.tmp")
+        temporary.write_text(document, encoding="utf-8")
+        os.replace(temporary, destination)
+        return destination
+
+    def delete_audio(self) -> int:
+        """Delete raw PCM after the transcript has been durably preserved."""
+        with self._lock:
+            for file in self._files.values():
+                try:
+                    file.flush()
+                    os.fsync(file.fileno())
+                finally:
+                    file.close()
+            self._files.clear()
+            deleted = 0
+            for path in self.session_dir.glob("user-*.pcm"):
+                try:
+                    path.unlink()
+                    deleted += 1
+                except FileNotFoundError:
+                    continue
+            return deleted
+
 
 def cleanup_old_recordings(*, now: datetime | None = None, retention_days: int | None = None) -> int:
     """Remove completed recordings after the retention window; preserve failures."""
@@ -224,7 +269,7 @@ def cleanup_old_recordings(*, now: datetime | None = None, retention_days: int |
             updated_at = datetime.fromisoformat(metadata["updated_at"])
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=timezone.utc)
-            if status == "delivered" and updated_at < cutoff:
+            if status in {"delivered", "delivered_audio_deleted"} and updated_at < cutoff:
                 shutil.rmtree(metadata_path.parent)
                 removed += 1
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
