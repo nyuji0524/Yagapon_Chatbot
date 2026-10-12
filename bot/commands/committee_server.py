@@ -255,7 +255,10 @@ async def _ensure_category(guild: discord.Guild, name: str, *, overwrites=None):
     category = _find_named(guild.categories, name)
     if category:
         return category, False
-    return await guild.create_category(name, overwrites=overwrites, reason="28thサーバー初期構築"), True
+    kwargs = {"reason": "28thサーバー初期構築"}
+    if overwrites is not None:
+        kwargs["overwrites"] = overwrites
+    return await guild.create_category(name, **kwargs), True
 
 
 async def _ensure_text(guild, name: str, category, *, topic: str, overwrites=None, read_only=False):
@@ -266,14 +269,15 @@ async def _ensure_text(guild, name: str, category, *, topic: str, overwrites=Non
         overwrites = dict(overwrites or {})
         overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
         overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True)
-    channel = await guild.create_text_channel(
-        name,
-        category=category,
-        topic=topic,
-        overwrites=overwrites,
-        default_auto_archive_duration=10080,
-        reason="28thサーバー初期構築",
-    )
+    kwargs = {
+        "category": category,
+        "topic": topic,
+        "default_auto_archive_duration": 10080,
+        "reason": "28thサーバー初期構築",
+    }
+    if overwrites is not None:
+        kwargs["overwrites"] = overwrites
+    channel = await guild.create_text_channel(name, **kwargs)
     return channel, True
 
 
@@ -282,27 +286,29 @@ async def _ensure_forum(guild, name: str, category, *, topic: str, tags, overwri
     if channel:
         return channel, False
     try:
-        channel = await guild.create_forum_channel(
-            name,
-            category=category,
-            topic=topic,
-            available_tags=[discord.ForumTag(name=tag) for tag in tags],
-            overwrites=overwrites,
-            default_auto_archive_duration=10080,
-            reason="28thサーバー初期構築",
-        )
+        kwargs = {
+            "category": category,
+            "topic": topic,
+            "available_tags": [discord.ForumTag(name=tag) for tag in tags],
+            "default_auto_archive_duration": 10080,
+            "reason": "28thサーバー初期構築",
+        }
+        if overwrites is not None:
+            kwargs["overwrites"] = overwrites
+        channel = await guild.create_forum_channel(name, **kwargs)
     except discord.HTTPException as exc:
         if getattr(exc, "code", None) != 50024:
             raise
         log.warning("Forum unavailable; using thread-first text channel guild=%s name=%s", guild.id, name)
-        channel = await guild.create_text_channel(
-            name,
-            category=category,
-            topic=f"【スレッド専用】{topic}",
-            overwrites=overwrites,
-            default_auto_archive_duration=10080,
-            reason="コミュニティ機能未有効のためスレッド専用チャンネルとして作成",
-        )
+        kwargs = {
+            "category": category,
+            "topic": f"【スレッド専用】{topic}",
+            "default_auto_archive_duration": 10080,
+            "reason": "コミュニティ機能未有効のためスレッド専用チャンネルとして作成",
+        }
+        if overwrites is not None:
+            kwargs["overwrites"] = overwrites
+        channel = await guild.create_text_channel(name, **kwargs)
     return channel, True
 
 
@@ -310,12 +316,10 @@ async def _ensure_voice(guild, name: str, category, *, overwrites=None):
     channel = _find_named(guild.voice_channels, name)
     if channel:
         return channel, False
-    return await guild.create_voice_channel(
-        name,
-        category=category,
-        overwrites=overwrites,
-        reason="28thサーバー初期構築",
-    ), True
+    kwargs = {"category": category, "reason": "28thサーバー初期構築"}
+    if overwrites is not None:
+        kwargs["overwrites"] = overwrites
+    return await guild.create_voice_channel(name, **kwargs), True
 
 
 def _private_overwrites(guild: discord.Guild, allowed_roles: Iterable[discord.Role]):

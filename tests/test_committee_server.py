@@ -10,6 +10,10 @@ from bot.commands.committee_server import (
     POSITION_ROLES,
     SelfRolePanelView,
     _embed_field_id,
+    _ensure_category,
+    _ensure_forum,
+    _ensure_text,
+    _ensure_voice,
     _replace_role_group,
 )
 
@@ -52,3 +56,28 @@ async def test_replace_role_group_removes_old_role_and_adds_selected():
     await _replace_role_group(member, selected, ("IT局", "総務局"))
 
     member.edit.assert_awaited_once_with(roles=[unrelated, selected], reason="本人によるロール選択")
+
+
+@pytest.mark.asyncio
+async def test_channel_creators_omit_none_overwrites():
+    category = object()
+    guild = SimpleNamespace(
+        categories=[],
+        text_channels=[],
+        forum_channels=[],
+        voice_channels=[],
+        create_category=AsyncMock(return_value=category),
+        create_text_channel=AsyncMock(return_value=object()),
+        create_forum_channel=AsyncMock(return_value=object()),
+        create_voice_channel=AsyncMock(return_value=object()),
+    )
+
+    await _ensure_category(guild, "category")
+    await _ensure_text(guild, "text", category, topic="topic")
+    await _ensure_forum(guild, "forum", category, topic="topic", tags=("tag",))
+    await _ensure_voice(guild, "voice", category)
+
+    assert "overwrites" not in guild.create_category.await_args.kwargs
+    assert "overwrites" not in guild.create_text_channel.await_args.kwargs
+    assert "overwrites" not in guild.create_forum_channel.await_args.kwargs
+    assert "overwrites" not in guild.create_voice_channel.await_args.kwargs
