@@ -13,6 +13,10 @@ on:
         description: Discord channel ID; empty selects a writable channel
         required: false
         type: string
+      target_guild_id:
+        description: Discord server ID; preferred over the configured server name
+        required: false
+        type: string
       retranscribe:
         description: Re-run STT from retained PCM instead of using the transcript
         required: false
@@ -41,6 +45,7 @@ jobs:
       GCE_ZONE: ${{ vars.GCE_ZONE }}
       CONTROL_ACTION: ${{ inputs.action }}
       CONTROL_TARGET_GUILD_NAME: ${{ secrets.YAGAPON_RECORDING_TEST_GUILD_NAME }}
+      CONTROL_TARGET_GUILD_ID: ${{ inputs.target_guild_id }}
       CONTROL_TARGET_CHANNEL_ID: ${{ inputs.target_channel_id }}
       CONTROL_RETRANSCRIBE: ${{ inputs.retranscribe }}
       CONTROL_JOB_ID: ${{ inputs.job_id }}
@@ -76,6 +81,7 @@ jobs:
         run: |
           action=$(printf '%q' "$CONTROL_ACTION")
           guild=$(printf '%q' "$CONTROL_TARGET_GUILD_NAME")
+          guild_id=$(printf '%q' "$CONTROL_TARGET_GUILD_ID")
           channel=$(printf '%q' "$CONTROL_TARGET_CHANNEL_ID")
           retranscribe=$(printf '%q' "$CONTROL_RETRANSCRIBE")
           job=$(printf '%q' "$CONTROL_JOB_ID")
@@ -83,4 +89,4 @@ jobs:
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            --command "sudo /bin/bash /tmp/recording-replay-control.sh $action $guild $channel $retranscribe $job"
+            --command "sudo /bin/bash /tmp/recording-replay-control.sh $action $guild $channel $retranscribe $job $guild_id"
