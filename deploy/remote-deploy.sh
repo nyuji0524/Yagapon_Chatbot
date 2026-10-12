@@ -118,10 +118,10 @@ for _ in $(seq 1 30); do
     && systemctl is-active --quiet yagapon \
     && curl --fail --silent --show-error "http://127.0.0.1:${host_port}/health" >/dev/null; then
     trap - ERR
-    install -d -m 0750 /var/lib/yagapon/releases
+    install -d -m 0750 "$data_path/releases"
     printf '{"image":"%s","deployed_at":"%s","container":"%s"}\n' \
       "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$container_id" \
-      > /var/lib/yagapon/releases/current.json
+      > "$data_path/releases/current.json"
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     docker image prune --force --filter 'until=168h' >/dev/null
     echo "Deployment healthy: $image (container: $container_id)"
