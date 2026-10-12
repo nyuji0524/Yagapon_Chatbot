@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: main
+      profile:
+        description: Review profile (code or knowledge-structure)
+        required: false
+        type: string
+        default: code
     secrets:
       GOOGLE_API_KEY:
         required: true
@@ -61,4 +66,5 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           YAGAPON_REVIEW_MODEL: ${{ inputs.model }}
           YAGAPON_REVIEW_THINKING: ${{ inputs.thinking_level }}
+          YAGAPON_REVIEW_PROFILE: ${{ inputs.profile }}
         run: python -m reviewer

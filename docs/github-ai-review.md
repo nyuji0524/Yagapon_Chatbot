@@ -23,6 +23,8 @@ Botの常駐API、push Webhook、Discord通知は使わない。レビューと�
 
 インラインコメントは追加行に最大30件、nitsは最大10件まで投稿する。レビューイベントは常に`COMMENT`とし、AI単独でApproveやRequest changesにはしない。説明は簡潔な日本語と自然な「ぽん」語尾で表示する。
 
+`profile: code`は通常のコードレビュー、`profile: knowledge-structure`はKnowledge専用レビューを行う。Knowledge専用レビューは内容の真偽や議事録の主張への賛否ではなく、front matter、分類、状態、年度境界、正本の配置、参照・出典、manifest、生成物、機密情報などの構造を確認する。
+
 ## 導入
 
 1. Organization secret `GOOGLE_API_KEY`を作成し、対象リポジトリだけに共有する。

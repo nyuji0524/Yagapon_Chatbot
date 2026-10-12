@@ -11,5 +11,7 @@ permissions:
 jobs:
   review:
     uses: nyuji0524/Yagapon_Chatbot/.github/workflows/ai-review.yml@main
+    with:
+      profile: code
     secrets:
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
