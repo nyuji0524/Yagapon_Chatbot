@@ -14,6 +14,7 @@ from bot.commands.committee_server import (
     _ensure_forum,
     _ensure_text,
     _ensure_voice,
+    _post_once,
     _replace_role_group,
 )
 
@@ -81,3 +82,38 @@ async def test_channel_creators_omit_none_overwrites():
     assert "overwrites" not in guild.create_text_channel.await_args.kwargs
     assert "overwrites" not in guild.create_forum_channel.await_args.kwargs
     assert "overwrites" not in guild.create_voice_channel.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_post_once_repins_an_existing_guide():
+    message = SimpleNamespace(
+        id=30,
+        author=SimpleNamespace(id=10),
+        content="yagapon-role-panel-v1",
+        pinned=False,
+        edit=AsyncMock(),
+        pin=AsyncMock(),
+    )
+
+    async def history(*, limit):
+        assert limit == 50
+        yield message
+
+    channel = SimpleNamespace(
+        id=20,
+        guild=SimpleNamespace(id=1, me=SimpleNamespace(id=10)),
+        history=history,
+        send=AsyncMock(),
+    )
+
+    result, created = await _post_once(
+        channel,
+        "yagapon-role-panel-v1",
+        content="updated guide",
+    )
+
+    assert result is message
+    assert created is False
+    message.edit.assert_awaited_once_with(content="updated guide", embed=None, view=None)
+    message.pin.assert_awaited_once_with(reason="28thサーバー案内")
+    channel.send.assert_not_awaited()
