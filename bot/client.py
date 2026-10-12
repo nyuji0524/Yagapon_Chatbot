@@ -37,6 +37,7 @@ class YagaPon(discord.Bot):
         # コマンド登録
         from bot.commands import (
             backfill,
+            committee_server,
             corpus_cmd,
             drive,
             glossary,
@@ -54,6 +55,8 @@ class YagaPon(discord.Bot):
         )
 
         setup.register(self)
+        committee_server.register_persistent_views(self)
+        committee_server.register(self)
         status.register(self)
         ignore.register(self)
         backfill.register(self)
@@ -93,6 +96,22 @@ class YagaPon(discord.Bot):
                     silent=True,
                 )
                 break
+
+    async def on_member_join(self, member: discord.Member):
+        """Give the non-privileged committee base role when the template is enabled."""
+        from bot.commands.committee_server import MEMBER_ROLE, ROLE_PANEL_CHANNEL
+
+        if member.bot:
+            return
+        if discord.utils.get(member.guild.text_channels, name=ROLE_PANEL_CHANNEL) is None:
+            return
+        role = discord.utils.get(member.guild.roles, name=MEMBER_ROLE)
+        if role is None or role in member.roles:
+            return
+        try:
+            await member.add_roles(role, reason="委員会サーバー自動参加ロール")
+        except discord.Forbidden:
+            log.warning("Could not add committee member role guild=%s member=%s", member.guild.id, member.id)
 
     async def on_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
@@ -144,10 +163,15 @@ class YagaPon(discord.Bot):
                 return
 
             if minutes and has_minutes:
-                # 通知先の優先順位: システムチャンネル → 最初の送信可能チャンネル
+                # 通知先の優先順位: 設定済み議事録CH → システムCH → 最初の送信可能CH
                 notify_ch = None
+                configured_channel_id = self.config.get_minutes_channel(member.guild.id)
+                if configured_channel_id:
+                    configured_channel = member.guild.get_channel(configured_channel_id)
+                    if configured_channel and configured_channel.permissions_for(member.guild.me).send_messages:
+                        notify_ch = configured_channel
                 if member.guild.system_channel:
-                    notify_ch = member.guild.system_channel
+                    notify_ch = notify_ch or member.guild.system_channel
                 if not notify_ch:
                     for ch in member.guild.text_channels:
                         if ch.permissions_for(member.guild.me).send_messages:

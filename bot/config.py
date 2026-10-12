@@ -187,6 +187,16 @@ class ConfigManager:
         self._guild(guild_id)["drive_folder_url"] = url
         await self._save()
 
+    # ------ notification channels ------
+
+    def get_minutes_channel(self, guild_id: int) -> int | None:
+        channel_id = self._guild(guild_id).get("minutes_channel_id")
+        return int(channel_id) if channel_id else None
+
+    async def set_minutes_channel(self, guild_id: int, channel_id: int):
+        self._guild(guild_id)["minutes_channel_id"] = str(channel_id)
+        await self._save()
+
     # ------ glossary ------
 
     def get_glossary(self, guild_id: int) -> dict:
