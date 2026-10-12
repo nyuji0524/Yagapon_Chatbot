@@ -37,6 +37,7 @@ class YagaPon(discord.Bot):
         # コマンド登録
         from bot.commands import (
             backfill,
+            committee_server,
             corpus_cmd,
             drive,
             glossary,
@@ -54,6 +55,8 @@ class YagaPon(discord.Bot):
         )
 
         setup.register(self)
+        committee_server.register_persistent_views(self)
+        committee_server.register(self)
         status.register(self)
         ignore.register(self)
         backfill.register(self)
@@ -93,6 +96,18 @@ class YagaPon(discord.Bot):
                     silent=True,
                 )
                 break
+
+    async def on_member_join(self, member: discord.Member):
+        """Give the non-privileged committee base role when the template is enabled."""
+        from bot.commands.committee_server import MEMBER_ROLE
+
+        role = discord.utils.get(member.guild.roles, name=MEMBER_ROLE)
+        if role is None or role in member.roles:
+            return
+        try:
+            await member.add_roles(role, reason="委員会サーバー自動参加ロール")
+        except discord.Forbidden:
+            log.warning("Could not add committee member role guild=%s member=%s", member.guild.id, member.id)
 
     async def on_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
