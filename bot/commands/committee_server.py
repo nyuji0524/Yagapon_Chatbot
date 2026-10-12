@@ -349,12 +349,29 @@ async def _post_once(channel: discord.TextChannel, marker: str, *, content=None,
         if message.author.id == channel.guild.me.id and marker in (message.content or ""):
             if view or content or embed:
                 await message.edit(content=content, embed=embed, view=view)
+            if not message.pinned:
+                try:
+                    await message.pin(reason="28thサーバー案内")
+                except discord.HTTPException as exc:
+                    log.warning(
+                        "Could not pin existing committee guide guild=%s channel=%s message=%s: %s",
+                        channel.guild.id,
+                        channel.id,
+                        message.id,
+                        exc,
+                    )
             return message, False
     message = await channel.send(content=content, embed=embed, view=view, silent=True)
     try:
         await message.pin(reason="28thサーバー案内")
-    except discord.HTTPException:
-        pass
+    except discord.HTTPException as exc:
+        log.warning(
+            "Could not pin new committee guide guild=%s channel=%s message=%s: %s",
+            channel.guild.id,
+            channel.id,
+            message.id,
+            exc,
+        )
     return message, True
 
 
