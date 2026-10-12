@@ -7,6 +7,7 @@ import asyncio
 import io
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -53,7 +54,8 @@ def register(bot):
         transcript_path = None
         transcript_url = None
         session_id = ""
-        doc_title = title or f"議事録_{file.filename}"
+        doc_title = title or f"議事録_{os.path.splitext(file.filename)[0]}"
+        checkpoint_dir = None
         try:
             # 音声ファイルをダウンロード
             audio_bytes = await file.read()
@@ -66,6 +68,12 @@ def register(bot):
                 audio_bytes, mime_type, file.filename,
             )
             if not transcript:
+                if hasattr(bot, "operations"):
+                    bot.operations.record_event(
+                        "minutes", "uploaded_audio", "failed",
+                        guild_id=ctx.guild_id,
+                        details={"error_type": "empty_transcript"},
+                    )
                 await ctx.followup.send("文字起こしの生成に失敗したぽん...", silent=True)
                 return
             session_id = (
@@ -87,15 +95,20 @@ def register(bot):
             transcript_url = await upload_transcript(
                 bot.config, ctx.guild_id, transcript, doc_title
             )
+            checkpoint_dir = (
+                transcript_path.parent / f"{session_id}-checkpoints"
+                if transcript_path else None
+            )
             minutes = await generate_minutes(
                 new_genai_client(os.environ.get("GOOGLE_API_KEY", "")),
                 transcript,
                 title=title,
                 glossary_text=glossary_text,
                 speaker_roster=bot._build_members_info(ctx.guild_id),
-                checkpoint_dir=(transcript_path.parent / f"{session_id}-checkpoints")
-                if transcript_path else None,
+                checkpoint_dir=checkpoint_dir,
             )
+            if not minutes or not minutes.strip():
+                raise RuntimeError("minutes generation returned empty content")
 
             # Google Docsに保存
             drive_url = await upload_minutes(bot.config, ctx.guild_id, minutes, doc_title)
@@ -168,6 +181,8 @@ def register(bot):
             if files:
                 kwargs["files"] = files
             await ctx.followup.send(**kwargs)
+            if checkpoint_dir:
+                await asyncio.to_thread(shutil.rmtree, checkpoint_dir, True)
 
         except Exception as e:
             log.exception("Minutes generation error")
