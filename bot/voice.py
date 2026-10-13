@@ -775,6 +775,7 @@ class VoiceSession:
             return False
         self.transcript = final_transcript
         self._last_audio_len = offsets
+        self._transcription_failed = False
         await self._persist_transcript()
         await self._checkpoint_state(status="final_reprocess_completed")
         return True

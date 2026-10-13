@@ -326,6 +326,7 @@ async def test_final_reprocess_replaces_incremental_transcript_only_after_full_s
     )
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(guild=guild), VoiceMode.LISTEN)
     session.transcript = ["[Discord確定: member-10]: 途中結果"]
+    session._transcription_failed = True
     session.recording_sink = SimpleNamespace(
         total_bytes=4000,
         read_chunks=Mock(
@@ -347,6 +348,7 @@ async def test_final_reprocess_replaces_incremental_transcript_only_after_full_s
         "[Discord確定: member-20]: 確定B",
     ]
     assert session._last_audio_len == {10: 5, 20: 6}
+    assert session._transcription_failed is False
     assert all(
         call.kwargs["prefer_dedicated"] is True
         and call.kwargs["diarization"] is False
