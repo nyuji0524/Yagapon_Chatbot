@@ -20,6 +20,7 @@ from bot.commands.committee_server import (
     _ensure_voice,
     _liaison_guide_embed,
     _nickname_block_reason,
+    _overwrite_signature,
     _post_once,
     _replace_role_group,
 )
@@ -46,6 +47,24 @@ def test_liaison_guide_explains_private_scope_and_pinned_location():
     assert "IT局・総務局・執行部" in embed.description
     assert "ほかの局からは表示されません" in embed.fields[1].value
     assert "ピン留め" in embed.footer.text
+
+
+def test_overwrite_signature_compares_ids_and_permission_bits():
+    first_target = discord.Object(id=10)
+    equivalent_target = discord.Object(id=10)
+    expected = {
+        first_target: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+    }
+    actual = {
+        equivalent_target: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+    }
+    extra = {
+        **actual,
+        discord.Object(id=20): discord.PermissionOverwrite(view_channel=True),
+    }
+
+    assert _overwrite_signature(actual) == _overwrite_signature(expected)
+    assert _overwrite_signature(extra) != _overwrite_signature(expected)
 
 
 @pytest.mark.asyncio

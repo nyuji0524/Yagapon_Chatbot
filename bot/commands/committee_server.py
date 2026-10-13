@@ -591,6 +591,15 @@ def _private_overwrites(guild: discord.Guild, allowed_roles: Iterable[discord.Ro
     return overwrites
 
 
+def _overwrite_signature(overwrites) -> dict[int, tuple[int, int]]:
+    """Compare Discord overwrites by target and permission bits, not object identity."""
+    return {
+        target.id: (allow.value, deny.value)
+        for target, overwrite in overwrites.items()
+        for allow, deny in (overwrite.pair(),)
+    }
+
+
 async def _post_once(channel: discord.TextChannel, marker: str, *, content=None, embed=None, view=None):
     async for message in channel.history(limit=50):
         if message.author.id == channel.guild.me.id and marker in (message.content or ""):
@@ -848,7 +857,7 @@ async def bootstrap_committee_server(
         if not created and (
             liaison_channel.category_id != coordination.id
             or liaison_channel.topic != liaison_topic
-            or liaison_channel.overwrites != liaison_overwrites
+            or _overwrite_signature(liaison_channel.overwrites) != _overwrite_signature(liaison_overwrites)
         ):
             await liaison_channel.edit(
                 category=coordination,
@@ -936,7 +945,7 @@ async def bootstrap_committee_server(
 
     await report("案内とロール選択パネルを掲示中")
     for liaison_channel, first_bureau, second_bureau in liaison_channels:
-        marker = f"yagapon-liaison-guide-v1:{liaison_channel.name}"
+        marker = f"yagapon-liaison-guide-v1:{first_bureau}-{second_bureau}"
         _message, created = await _post_once(
             liaison_channel,
             marker,
