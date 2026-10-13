@@ -8,8 +8,10 @@ from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
     LIAISON_CHANNELS,
+    OFFICER_POSITIONS,
     POSITION_ROLES,
     CommitteeGuideView,
+    PostRegistrationRoleView,
     RegistrationModal,
     SelfRolePanelView,
     _bot_guide_embed,
@@ -21,8 +23,11 @@ from bot.commands.committee_server import (
     _is_keio_email,
     _liaison_guide_embed,
     _overwrite_signature,
+    _position_role_names,
+    _position_role_summary,
     _post_once,
     _replace_role_group,
+    _roles_after_position_approval,
 )
 
 
@@ -76,8 +81,64 @@ async def test_persistent_role_panel_has_stable_custom_ids():
         "yagapon:committee:bureau:v1",
         "yagapon:committee:grade:v1",
         "yagapon:committee:registration:v1",
-        "yagapon:committee:position:v1",
     }
+
+
+@pytest.mark.asyncio
+async def test_post_registration_role_view_separates_project_leader_and_officer_claims():
+    view = PostRegistrationRoleView()
+
+    assert {item.custom_id for item in view.children} == {
+        "yagapon:committee:project-leader:v1",
+        "yagapon:committee:officer:v1",
+    }
+    officer_select = next(
+        item for item in view.children if item.custom_id == "yagapon:committee:officer:v1"
+    )
+    assert tuple(option.value for option in officer_select.options) == OFFICER_POSITIONS
+
+
+def test_project_leader_approval_preserves_existing_officer_roles():
+    project_leader = SimpleNamespace(id=1, name="企画長")
+    officer = SimpleNamespace(id=2, name="役員")
+    director = SimpleNamespace(id=3, name="局長")
+    general = SimpleNamespace(id=4, name="一般委員")
+
+    roles = _roles_after_position_approval(
+        [general, officer, director],
+        project_leader,
+    )
+
+    assert {role.name for role in roles} == {"企画長", "役員", "局長"}
+
+
+def test_officer_approval_preserves_project_leader_and_replaces_officer_title():
+    project_leader = SimpleNamespace(id=1, name="企画長")
+    officer = SimpleNamespace(id=2, name="役員")
+    deputy = SimpleNamespace(id=3, name="副局長")
+    director = SimpleNamespace(id=4, name="局長")
+
+    roles = _roles_after_position_approval(
+        [project_leader, officer, deputy],
+        director,
+        officer,
+    )
+
+    assert {role.name for role in roles} == {"企画長", "役員", "局長"}
+
+
+def test_position_role_summary_is_stable_for_combined_roles_and_empty_input():
+    roles = [
+        SimpleNamespace(name="企画長"),
+        SimpleNamespace(name="IT局"),
+        SimpleNamespace(name="役員"),
+        SimpleNamespace(name="局長"),
+    ]
+
+    assert _position_role_names(roles) == ["局長", "企画長", "役員"]
+    assert _position_role_summary(roles) == "局長, 企画長, 役員"
+    assert _position_role_names([]) == []
+    assert _position_role_summary([]) == "一般委員"
 
 
 @pytest.mark.asyncio
