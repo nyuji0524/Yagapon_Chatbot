@@ -96,7 +96,9 @@ def test_minutes_document_matches_reference_style_and_inserts_yagapon_image():
         == 19 / 255
         for request in first_requests
     )
-    image_request = calls[1].kwargs["body"]["requests"][0]["insertInlineImage"]
+    image_requests = calls[1].kwargs["body"]["requests"]
+    assert image_requests[0]["insertText"]["text"] == " "
+    image_request = image_requests[1]["insertInlineImage"]
     assert image_request["uri"].endswith("/assets/yagapon_minutes.png")
     assert image_request["objectSize"]["width"]["magnitude"] == 64
 

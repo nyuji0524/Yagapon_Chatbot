@@ -91,3 +91,5 @@ def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert "整理券機能" in terms
     assert "企画メンバー" in terms
     assert "整理券管理者" in terms
+
+    assert RagStore.query_terms("今日はこれについて教えてください") == []

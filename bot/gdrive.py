@@ -305,8 +305,14 @@ class DriveWriter:
                         body={
                             "requests": [
                                 {
-                                    "insertInlineImage": {
+                                    "insertText": {
                                         "location": {"index": image_index},
+                                        "text": " ",
+                                    }
+                                },
+                                {
+                                    "insertInlineImage": {
+                                        "location": {"index": image_index + 1},
                                         "uri": image_url,
                                         "objectSize": {
                                             "height": {"magnitude": 52, "unit": "PT"},

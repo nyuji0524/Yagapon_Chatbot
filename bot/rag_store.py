@@ -187,9 +187,10 @@ class RagStore:
         # specific for exact matching. Keep subjects such as ``ITラボ`` and
         # ``整理券管理者`` as lexical fallback terms.
         segments = re.split(
-            r"(?:について|として|では|には|から|まで|より|って|とは|の|は|が|を|に|で|と|も|へ)",
+            r"(?:について|として|では|には|から|まで|より|って|とは|の|は|が|を|に|で|(?<!こ)と|も|へ)",
             stripped,
         )
+        stop_terms = {"これら", "それら", "こちら", "そちら", "どちら", "お願い", "今回", "現在"}
         for segment in segments:
             segment = re.sub(
                 r"(?:どんなこと|どこ|いつ|だれ|誰|なぜ|どう|何|教えて|ください|"
@@ -197,10 +198,8 @@ class RagStore:
                 "",
                 segment,
             )
-            if 2 <= len(segment) <= 24:
+            if 3 <= len(segment) <= 24 and segment not in stop_terms:
                 terms.append(segment)
-        if 2 <= len(stripped) <= 40:
-            terms.append(stripped)
         unique = []
         seen = set()
         for term in terms:
