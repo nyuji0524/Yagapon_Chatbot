@@ -164,7 +164,8 @@ def _bot_guide_embed(guild: discord.Guild) -> discord.Embed:
 
 class CommitteeGuideView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
-        super().__init__(timeout=300)
+        # Link buttons are resolved by Discord and do not need a running timer.
+        super().__init__(timeout=None)
         for label, emoji, channel_name in (
             ("プロフィール設定", "🎫", ROLE_PANEL_CHANNEL),
             ("やがぽんに質問", "💬", "やがぽん"),
@@ -836,7 +837,10 @@ def register(bot):
                 ("ニックネーム管理", permissions.manage_nicknames),
                 ("チャンネル管理", permissions.manage_channels),
                 ("メッセージ管理", permissions.manage_messages),
-                ("メッセージのピン留め", permissions.pin_messages),
+                (
+                    "メッセージのピン留め",
+                    getattr(permissions, "pin_messages", permissions.manage_messages),
+                ),
             )
             if not allowed
         ]
