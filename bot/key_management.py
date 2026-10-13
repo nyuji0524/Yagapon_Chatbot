@@ -853,21 +853,24 @@ class KeyManagementManager:
         if bot_user_id is None:
             return
         cutoff = _now() - timedelta(seconds=self.notification_ttl_seconds)
-        async for message in channel.history(limit=500):
-            if message.author.id != bot_user_id or message.pinned or KEY_STATUS_MARKER in (message.content or ""):
-                continue
-            if message.created_at > cutoff:
-                continue
-            try:
-                await message.delete(reason="期限切れの鍵管理通知を整理")
-            except discord.NotFound:
-                continue
-            except discord.HTTPException:
-                log.warning(
-                    "Could not remove expired key notice guild=%s message=%s",
-                    guild.id,
-                    message.id,
-                )
+        try:
+            async for message in channel.history(limit=500):
+                if message.author.id != bot_user_id or message.pinned or KEY_STATUS_MARKER in (message.content or ""):
+                    continue
+                if message.created_at > cutoff:
+                    continue
+                try:
+                    await message.delete(reason="期限切れの鍵管理通知を整理")
+                except discord.NotFound:
+                    continue
+                except discord.HTTPException:
+                    log.warning(
+                        "Could not remove expired key notice guild=%s message=%s",
+                        guild.id,
+                        message.id,
+                    )
+        except discord.HTTPException:
+            log.warning("Could not read key report history for cleanup guild=%s", guild.id)
 
     async def perform_action(
         self,
