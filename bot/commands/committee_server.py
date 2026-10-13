@@ -27,6 +27,7 @@ POSITION_ROLES = ("一般委員", "企画長", "役員", "副局長", "局長", 
 ROLE_REQUEST_CHANNEL = "ロール申請"
 ROLE_PANEL_CHANNEL = "ロール選択"
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
+COMMITTEE_COLOR = 0xF2A900
 ProgressReporter = Callable[[str], Awaitable[None]]
 
 
@@ -64,6 +65,121 @@ async def _respond_ephemeral(interaction: discord.Interaction, message: str) -> 
         await interaction.followup.send(message, ephemeral=True)
     else:
         await interaction.response.send_message(message, ephemeral=True)
+
+
+def _named_channel(guild: discord.Guild, name: str):
+    return _find_named(guild.channels, name)
+
+
+def _channel_mention(guild: discord.Guild, name: str) -> str:
+    channel = _named_channel(guild, name)
+    return channel.mention if channel else f"#{name}"
+
+
+def _role_panel_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🎫 委員プロフィールを設定",
+        description=(
+            "下のメニューを上から順に設定してください。\n"
+            "選び直すと、同じ種類の古いロールは自動で置き換わります。"
+        ),
+        color=discord.Color(COMMITTEE_COLOR),
+    )
+    embed.add_field(name="⚡ すぐ反映", value="**所属局・学年・サーバー表示名**", inline=True)
+    embed.add_field(name="🛡️ 管理者が確認", value="**役職ロール**（申請後に承認）", inline=True)
+    embed.add_field(
+        name="困ったとき",
+        value="選択肢が足りない、変更できない場合はIT局へ連絡してください。",
+        inline=False,
+    )
+    embed.set_footer(text="個人情報ではなく、委員会で呼ばれたい名前を設定してください")
+    return embed
+
+
+def _intro_embed(guild: discord.Guild) -> discord.Embed:
+    embed = discord.Embed(
+        title="🏮 28th矢上祭実行委員会へようこそ",
+        description="このサーバーは、連絡・相談・会議記録を迷わず探せるように整理されています。",
+        color=discord.Color(COMMITTEE_COLOR),
+    )
+    embed.add_field(
+        name="1️⃣ 最初にプロフィールを設定",
+        value=f"{_channel_mention(guild, ROLE_PANEL_CHANNEL)} で **表示名 → 所属局 → 学年 → 役職** を設定します。",
+        inline=False,
+    )
+    embed.add_field(
+        name="2️⃣ 連絡と相談を使い分ける",
+        value=(
+            f"確定事項は {_channel_mention(guild, 'お知らせ')}、日常連絡は "
+            f"{_channel_mention(guild, '全体チャット')}、案件ごとの相談はフォーラムへ。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="3️⃣ 長い話題はスレッドへ",
+        value="1つの話題につき1スレッド。決まったことは先頭メッセージへ追記してください。",
+        inline=False,
+    )
+    embed.add_field(
+        name="4️⃣ 会議はやがぽんで記録",
+        value=(
+            f"VC参加後に `/join`、終了時に `/leave`。成果物は "
+            f"{_channel_mention(guild, '議事録')} にまとまります。"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="機密情報・個人情報は、必要なメンバーだけが見られるチャンネルへ")
+    return embed
+
+
+def _bot_guide_embed(guild: discord.Guild) -> discord.Embed:
+    embed = discord.Embed(
+        title="🤖 おしゃべりやがぽん ガイド",
+        description="検索・会議記録・委員プロフィールの設定をDiscord内で完結できます。",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="💬 質問・検索",
+        value=f"{_channel_mention(guild, 'やがぽん')} でやがぽんをメンションして質問",
+        inline=False,
+    )
+    embed.add_field(
+        name="🎙️ 会議を記録",
+        value="`/join` → 会議 → `/leave`\n話者精度を上げる場合は `/voiceprint register`",
+        inline=True,
+    )
+    embed.add_field(
+        name="🧭 自分の設定",
+        value=f"{_channel_mention(guild, ROLE_PANEL_CHANNEL)} で表示名・局・学年・役職を設定",
+        inline=True,
+    )
+    embed.add_field(
+        name="🛠️ 管理・診断",
+        value="`/guide` 使い方　`/status` 設定確認　`/backfill` 過去ログ取込み",
+        inline=False,
+    )
+    embed.set_footer(text="会議資料はVCチャットへ貼ると、議事録と一緒に追いやすくなります")
+    return embed
+
+
+class CommitteeGuideView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        for label, emoji, channel_name in (
+            ("プロフィール設定", "🎫", ROLE_PANEL_CHANNEL),
+            ("やがぽんに質問", "💬", "やがぽん"),
+            ("議事録を見る", "📝", "議事録"),
+        ):
+            channel = _named_channel(guild, channel_name)
+            if channel:
+                self.add_item(
+                    discord.ui.Button(
+                        label=label,
+                        emoji=emoji,
+                        style=discord.ButtonStyle.link,
+                        url=f"https://discord.com/channels/{guild.id}/{channel.id}",
+                    )
+                )
 
 
 class BureauSelect(discord.ui.Select):
@@ -155,12 +271,75 @@ class PositionSelect(discord.ui.Select):
         await _respond_ephemeral(interaction, f"📨 **{role.name}** を申請したぽん。管理者の承認を待ってねぽん！")
 
 
+class NicknameModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(
+            title="サーバー表示名を設定",
+            custom_id="yagapon:committee:nickname:modal:v1",
+        )
+        self.add_item(
+            discord.ui.InputText(
+                label="委員会で呼ばれたい名前",
+                placeholder="例：山田 太郎 / やまだ",
+                min_length=1,
+                max_length=32,
+                custom_id="display_name",
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
+        nickname = self.children[0].value.strip()
+        if not guild or not isinstance(member, discord.Member):
+            await _respond_ephemeral(interaction, "サーバー内で実行してほしいぽん。")
+            return
+        if not nickname:
+            await _respond_ephemeral(interaction, "表示名を入力してほしいぽん。")
+            return
+        if member.id == guild.owner_id:
+            await _respond_ephemeral(
+                interaction,
+                "サーバー所有者の表示名はBotから変更できないぽん。プロフィールから手動で変更してほしいぽん。",
+            )
+            return
+        me = guild.me
+        if not me or not me.guild_permissions.manage_nicknames:
+            await _respond_ephemeral(interaction, "やがぽんに「ニックネームの管理」権限が足りないぽん。管理者に連絡してほしいぽん。")
+            return
+        if member.top_role >= me.top_role:
+            await _respond_ephemeral(interaction, "ロール順位の都合で表示名を変更できないぽん。管理者に連絡してほしいぽん。")
+            return
+        try:
+            await member.edit(nick=nickname, reason="本人によるサーバー表示名設定")
+        except discord.Forbidden:
+            await _respond_ephemeral(interaction, "表示名を変更する権限が足りないぽん。管理者に連絡してほしいぽん。")
+            return
+        embed = discord.Embed(
+            title="✅ 表示名を更新しました",
+            description=f"このサーバーでは **{nickname}** と表示されます。",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Discordアカウント本体の名前は変わりません")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 class SelfRolePanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(BureauSelect())
         self.add_item(GradeSelect())
         self.add_item(PositionSelect())
+
+    @discord.ui.button(
+        label="サーバー表示名を設定",
+        emoji="✏️",
+        style=discord.ButtonStyle.primary,
+        row=3,
+        custom_id="yagapon:committee:nickname:v1",
+    )
+    async def nickname(self, _button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.send_modal(NicknameModal())
 
 
 def _embed_field_id(embed: discord.Embed, field_name: str) -> int | None:
@@ -609,44 +788,29 @@ async def bootstrap_committee_server(
         counts["channels"] += int(created)
 
     await report("案内とロール選択パネルを掲示中")
-    intro_text = (
-        f"`{ROLE_PANEL_MARKER}`\n"
-        "# 28th矢上祭実行委員会 Discord\n"
-        "1. #ロール選択 で所属局と学年を設定\n"
-        "2. 確定連絡はテキストチャンネル、案件・質問はフォーラムへ\n"
-        "3. 長くなる話題はスレッドに分け、結論を先頭メッセージへ追記\n"
-        "4. 会議ではVC参加後に `/join`、終了時に `/leave` で議事録を作成\n"
-        "5. 機密情報・個人情報は必要な権限のチャンネルだけに投稿してください"
+    _message, created = await _post_once(
+        intro,
+        ROLE_PANEL_MARKER,
+        content=f"`{ROLE_PANEL_MARKER}`",
+        embed=_intro_embed(guild),
+        view=CommitteeGuideView(guild),
     )
-    _message, created = await _post_once(intro, ROLE_PANEL_MARKER, content=intro_text)
     counts["messages"] += int(created)
-    panel_embed = discord.Embed(
-        title="所属ロールを設定",
-        description=(
-            "所属局と学年はすぐ反映されます。役職はチャンネル権限に関わるため管理者承認制です。\n"
-            "変更したい場合は、もう一度選び直してください。"
-        ),
-        color=discord.Color.blurple(),
-    )
     _message, created = await _post_once(
         panel,
         ROLE_PANEL_MARKER,
         content=f"`{ROLE_PANEL_MARKER}`",
-        embed=panel_embed,
+        embed=_role_panel_embed(),
         view=SelfRolePanelView(),
     )
     counts["messages"] += int(created)
-    bot_text = (
-        f"`{ROLE_PANEL_MARKER}`\n"
-        "# おしゃべりやがぽん\n"
-        "- 質問: #やがぽん でやがぽんをメンション\n"
-        "- 議事録: VCで `/join` → 会議終了時に `/leave`\n"
-        "- 声紋登録: `/voiceprint`（話者名の精度向上）\n"
-        "- 困ったとき: `/status`\n"
-        "- 会議の成果物: #議事録 と連携Google Driveへ保存\n\n"
-        "会議はなるべく #やがぽん会議 または各局VCで行い、関連資料はVCチャットへ貼ってください。"
+    _message, created = await _post_once(
+        bot_guide,
+        ROLE_PANEL_MARKER,
+        content=f"`{ROLE_PANEL_MARKER}`",
+        embed=_bot_guide_embed(guild),
+        view=CommitteeGuideView(guild),
     )
-    _message, created = await _post_once(bot_guide, ROLE_PANEL_MARKER, content=bot_text)
     counts["messages"] += int(created)
 
     return counts
@@ -669,8 +833,10 @@ def register(bot):
             name
             for name, allowed in (
                 ("ロール管理", permissions.manage_roles),
+                ("ニックネーム管理", permissions.manage_nicknames),
                 ("チャンネル管理", permissions.manage_channels),
                 ("メッセージ管理", permissions.manage_messages),
+                ("メッセージのピン留め", permissions.pin_messages),
             )
             if not allowed
         ]
@@ -735,7 +901,15 @@ def register(bot):
     async def role_panel(ctx: discord.ApplicationContext):
         if not await require_guild_admin(ctx):
             return
+        await ctx.respond(embed=_role_panel_embed(), view=SelfRolePanelView())
+
+    @bot.slash_command(name="guide", description="やがぽんと委員会サーバーの使い方を表示するぽん")
+    async def guide(ctx: discord.ApplicationContext):
+        if not ctx.guild:
+            await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
+            return
         await ctx.respond(
-            "所属局・学年を選択し、必要な役職を申請してください。",
-            view=SelfRolePanelView(),
+            embed=_bot_guide_embed(ctx.guild),
+            view=CommitteeGuideView(ctx.guild),
+            ephemeral=True,
         )

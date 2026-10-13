@@ -8,7 +8,10 @@ from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
     POSITION_ROLES,
+    CommitteeGuideView,
+    NicknameModal,
     SelfRolePanelView,
+    _bot_guide_embed,
     _embed_field_id,
     _ensure_category,
     _ensure_forum,
@@ -31,8 +34,38 @@ async def test_persistent_role_panel_has_stable_custom_ids():
     assert {item.custom_id for item in view.children} == {
         "yagapon:committee:bureau:v1",
         "yagapon:committee:grade:v1",
+        "yagapon:committee:nickname:v1",
         "yagapon:committee:position:v1",
     }
+
+
+@pytest.mark.asyncio
+async def test_nickname_modal_limits_server_display_name_length():
+    modal = NicknameModal()
+    assert modal.custom_id == "yagapon:committee:nickname:modal:v1"
+    assert modal.children[0].min_length == 1
+    assert modal.children[0].max_length == 32
+
+
+@pytest.mark.asyncio
+async def test_bot_guide_embed_and_links_use_created_channels():
+    channels = [
+        SimpleNamespace(name="ロール選択", id=1, mention="<#1>"),
+        SimpleNamespace(name="やがぽん", id=2, mention="<#2>"),
+        SimpleNamespace(name="議事録", id=3, mention="<#3>"),
+    ]
+    guild = SimpleNamespace(id=99, channels=channels)
+
+    embed = _bot_guide_embed(guild)
+    view = CommitteeGuideView(guild)
+
+    assert embed.title == "🤖 おしゃべりやがぽん ガイド"
+    assert "<#2>" in embed.fields[0].value
+    assert [item.url for item in view.children] == [
+        "https://discord.com/channels/99/1",
+        "https://discord.com/channels/99/2",
+        "https://discord.com/channels/99/3",
+    ]
 
 
 def test_embed_field_id_reads_known_field_and_rejects_invalid_value():
