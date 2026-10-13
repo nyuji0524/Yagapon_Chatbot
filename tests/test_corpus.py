@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -8,8 +9,10 @@ from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     CorpusManager,
     answer_declares_missing_knowledge,
+    backfill_channel_concurrency,
     calculate_incremental_after,
     calculate_resumable_incremental_after,
+    run_backfill_channels,
 )
 from bot.rag_store import RagStore
 
@@ -407,6 +410,36 @@ def test_resumable_incremental_uses_existing_channel_cursor():
     assert calculate_resumable_incremental_after(config, 1, 2) == datetime(
         2026, 10, 4, 15, 0, tzinfo=timezone.utc
     )
+
+
+@pytest.mark.asyncio
+async def test_backfill_channel_workers_respect_concurrency_limit():
+    active = 0
+    maximum_active = 0
+
+    async def worker(channel):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return channel * 2
+
+    results = await run_backfill_channels(range(6), worker, concurrency=3)
+
+    assert results == [0, 2, 4, 6, 8, 10]
+    assert maximum_active == 3
+
+
+def test_backfill_concurrency_environment_is_safely_bounded(monkeypatch):
+    monkeypatch.setenv("YAGAPON_BACKFILL_CONCURRENCY", "100")
+    assert backfill_channel_concurrency() == 8
+
+    monkeypatch.setenv("YAGAPON_BACKFILL_CONCURRENCY", "0")
+    assert backfill_channel_concurrency() == 1
+
+    monkeypatch.setenv("YAGAPON_BACKFILL_CONCURRENCY", "invalid")
+    assert backfill_channel_concurrency() == 3
 
 
 def test_documents_do_not_cross_jst_date_boundary(corpus_manager):

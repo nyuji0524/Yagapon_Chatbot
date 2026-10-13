@@ -38,6 +38,35 @@ JST = ZoneInfo("Asia/Tokyo")
 
 # レート制限
 DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
+BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
+BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
+
+
+def backfill_channel_concurrency() -> int:
+    """Return a bounded channel worker count safe for Discord and File Search."""
+    raw = os.environ.get("YAGAPON_BACKFILL_CONCURRENCY", str(BACKFILL_CHANNEL_CONCURRENCY_DEFAULT))
+    try:
+        configured = int(raw)
+    except ValueError:
+        log.warning(
+            "Invalid YAGAPON_BACKFILL_CONCURRENCY=%r; using %s",
+            raw,
+            BACKFILL_CHANNEL_CONCURRENCY_DEFAULT,
+        )
+        configured = BACKFILL_CHANNEL_CONCURRENCY_DEFAULT
+    return max(1, min(configured, BACKFILL_CHANNEL_CONCURRENCY_MAX))
+
+
+async def run_backfill_channels(channels, worker, concurrency: int | None = None):
+    """Run one worker per channel with bounded concurrency and cancellation propagation."""
+    limit = concurrency if concurrency is not None else backfill_channel_concurrency()
+    semaphore = asyncio.Semaphore(max(1, min(limit, BACKFILL_CHANNEL_CONCURRENCY_MAX)))
+
+    async def run_one(channel):
+        async with semaphore:
+            return await worker(channel)
+
+    return await asyncio.gather(*(run_one(channel) for channel in channels))
 
 
 def festival_filter_enabled() -> bool:

@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.security import require_api_token
-from bot.corpus import calculate_resumable_incremental_after
+from bot.corpus import (
+    backfill_channel_concurrency,
+    calculate_resumable_incremental_after,
+    run_backfill_channels,
+)
 
 router = APIRouter()
 log = logging.getLogger("yagapon.api")
@@ -105,6 +109,7 @@ async def backfill(request: Request, body: BackfillRequest):
     if not bot.corpus.start_backfill(body.guild_id):
         raise HTTPException(409, "Backfill already running for this guild")
 
+    concurrency = min(len(channels), backfill_channel_concurrency())
     job_id = uuid4().hex
     job = {
         "job_id": job_id,
@@ -112,6 +117,7 @@ async def backfill(request: Request, body: BackfillRequest):
         "guild_id": body.guild_id,
         "channels_total": len(channels),
         "channels_completed": 0,
+        "channel_concurrency": concurrency,
         "messages_indexed": 0,
         "documents_uploaded": 0,
         "documents_replaced": 0,
@@ -124,8 +130,12 @@ async def backfill(request: Request, body: BackfillRequest):
         bot.operations.start_job("backfill", guild_id=body.guild_id, job_id=job_id, progress=job)
 
     async def run():
-        try:
-            for ch in channels:
+        job_lock = asyncio.Lock()
+
+        async def process_channel(ch):
+            result = None
+            failure = None
+            try:
                 if body.mode == "incremental":
                     after = calculate_resumable_incremental_after(
                         bot.config,
@@ -134,30 +144,38 @@ async def backfill(request: Request, body: BackfillRequest):
                     )
                 else:
                     after = datetime.now(timezone.utc) - timedelta(days=body.days) if body.days else None
-                try:
-                    result = await bot.corpus.backfill_channel(
-                        ch,
-                        corpus,
-                        after=after,
-                        replace_existing=True,
-                        dry_run=body.dry_run,
+                result = await bot.corpus.backfill_channel(
+                    ch,
+                    corpus,
+                    after=after,
+                    replace_existing=True,
+                    dry_run=body.dry_run,
+                )
+                if result.latest_message_id and result.latest_message_at and not body.dry_run:
+                    await bot.config.set_backfill_cursor(
+                        body.guild_id,
+                        ch.id,
+                        result.latest_message_id,
+                        result.latest_message_at,
                     )
-                    job["messages_indexed"] += result.messages_indexed
-                    job["documents_uploaded"] += result.documents_uploaded
-                    job["documents_replaced"] += result.documents_replaced
-                    if result.latest_message_id and result.latest_message_at:
-                        if not body.dry_run:
-                            await bot.config.set_backfill_cursor(
-                                body.guild_id, ch.id,
-                                result.latest_message_id, result.latest_message_at,
-                            )
-                except Exception as exc:
-                    job["failures"].append({"channel_id": ch.id, "channel_name": ch.name, "error": str(exc)})
-                    log.exception("API backfill failed for channel %s", ch.id)
-                finally:
+            except Exception as exc:
+                failure = {"channel_id": ch.id, "channel_name": ch.name, "error": str(exc)}
+                log.exception("API backfill failed for channel %s", ch.id)
+            finally:
+                async with job_lock:
+                    if result is not None:
+                        job["messages_indexed"] += result.messages_indexed
+                        job["documents_uploaded"] += result.documents_uploaded
+                        job["documents_replaced"] += result.documents_replaced
+                    if failure is not None:
+                        job["failures"].append(failure)
                     job["channels_completed"] += 1
-                    if hasattr(bot.operations, "update_job"):
-                        bot.operations.update_job(job_id, "running", job)
+                    progress = {**job, "failures": list(job["failures"])}
+                if hasattr(bot.operations, "update_job"):
+                    bot.operations.update_job(job_id, "running", progress)
+
+        try:
+            await run_backfill_channels(channels, process_channel, concurrency=concurrency)
             job["status"] = "failed" if job["failures"] else "completed"
         except asyncio.CancelledError:
             job["status"] = "cancelled"
