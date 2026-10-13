@@ -47,6 +47,8 @@ LIAISON_CHANNELS = tuple(
 GRADE_ROLES = ("1年", "2年", "3年")
 POSITION_ROLES = ("一般委員", "企画長", "役員", "副局長", "局長", "執行部")
 DECLARABLE_POSITIONS = ("企画長", "副局長", "局長")
+OFFICER_POSITIONS = ("副局長", "局長")
+POSITION_ROLE_ORDER = ("執行部", "局長", "副局長", "企画長", "役員", "一般委員")
 ROLE_REQUEST_CHANNEL = "ロール申請🔑"
 ROLE_PANEL_CHANNEL = "ロール選択"
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
@@ -96,6 +98,42 @@ async def _replace_role_group(
     await member.edit(roles=desired_roles, reason=reason)
 
 
+def _position_role_names(roles: Iterable[discord.Role]) -> list[str]:
+    names = {role.name for role in roles}
+    return [name for name in POSITION_ROLE_ORDER if name in names]
+
+
+def _position_role_summary(roles: Iterable[discord.Role]) -> str:
+    return ", ".join(_position_role_names(roles)) or "一般委員"
+
+
+def _roles_after_position_approval(
+    roles: Iterable[discord.Role],
+    approved_role: discord.Role,
+    officer_role: discord.Role | None = None,
+) -> list[discord.Role]:
+    """Preserve project-leader and officer roles independently.
+
+    副局長と局長だけは同時に成立しないため、役員申告の承認時に相互置換する。
+    企画長は役員と兼任できる。
+    """
+    removable_names = {"一般委員"}
+    if approved_role.name in OFFICER_POSITIONS:
+        removable_names.update(OFFICER_POSITIONS)
+    desired = [
+        role
+        for role in roles
+        if not getattr(role, "is_default", lambda: False)()
+        and role.name not in removable_names
+        and role.id != approved_role.id
+    ]
+    desired.append(approved_role)
+    if approved_role.name in OFFICER_POSITIONS and officer_role is not None:
+        if all(role.id != officer_role.id for role in desired):
+            desired.append(officer_role)
+    return desired
+
+
 async def _respond_ephemeral(interaction: discord.Interaction, message: str) -> None:
     if interaction.response.is_done():
         await interaction.followup.send(message, ephemeral=True)
@@ -124,8 +162,12 @@ def _role_panel_embed() -> discord.Embed:
         ),
         color=discord.Color(COMMITTEE_COLOR),
     )
-    embed.add_field(name="⚡ すぐ反映", value="**所属局・学年・一般委員**", inline=True)
-    embed.add_field(name="🛡️ 管理者が確認", value="**企画長・副局長・局長**", inline=True)
+    embed.add_field(name="1️⃣ 登録時", value="**所属局・学年 → 慶應メール**", inline=True)
+    embed.add_field(
+        name="2️⃣ 登録後（該当者のみ）",
+        value="**企画長申告／役員申告**\n※両方を兼任できます",
+        inline=True,
+    )
     embed.add_field(
         name="困ったとき",
         value="選択肢が足りない、変更できない場合はIT局へ連絡してください。",
@@ -316,42 +358,83 @@ class GradeSelect(discord.ui.Select):
         await _respond_ephemeral(interaction, f"✅ 学年を **{role.name}** に設定したぽん！")
 
 
-class PositionSelect(discord.ui.Select):
+async def _submit_position_request(
+    interaction: discord.Interaction,
+    role_name: str,
+    *,
+    application_kind: str,
+) -> None:
+    guild = interaction.guild
+    member = interaction.user
+    role = _find_named(guild.roles, role_name) if guild else None
+    request_channel = _find_named(guild.text_channels, ROLE_REQUEST_CHANNEL) if guild else None
+    if not guild or not isinstance(member, discord.Member) or role is None or request_channel is None:
+        await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
+        return
+    member_role = _find_named(guild.roles, MEMBER_ROLE)
+    registration = interaction.client.config.get_member(guild.id, member.id)
+    registration_complete = bool(
+        registration
+        and registration.get("email")
+        and registration.get("bureau")
+        and registration.get("grade")
+    )
+    if member_role is None or member_role not in member.roles or not registration_complete:
+        await _respond_ephemeral(interaction, "先に所属局・学年・慶應メールの登録を完了してほしいぽん。")
+        return
+    if role in member.roles:
+        await _respond_ephemeral(interaction, f"**{role.name}** は既に付いているぽん！")
+        return
+    embed = discord.Embed(
+        title=f"{application_kind}申請",
+        description=f"{member.mention} が **{role.name}** を申請しています。",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(name="申請者ID", value=str(member.id), inline=True)
+    embed.add_field(name="役職ロールID", value=str(role.id), inline=True)
+    embed.add_field(name="申請種別", value=application_kind, inline=True)
+    embed.set_footer(text="企画長と役員は兼任できます。副局長と局長は選択した方へ置き換わります")
+    await request_channel.send(embed=embed, view=RoleApprovalView(), silent=True)
+    await _respond_ephemeral(interaction, f"📨 **{role.name}** を申請したぽん。管理者の承認を待ってねぽん！")
+
+
+class ProjectLeaderApplicationButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
-            placeholder="役職を申請（管理者承認制）",
-            min_values=1,
-            max_values=1,
-            row=2,
-            custom_id="yagapon:committee:position:v1",
-            options=[discord.SelectOption(label=name, value=name) for name in DECLARABLE_POSITIONS],
+            label="企画長を申告",
+            emoji="🎪",
+            style=discord.ButtonStyle.primary,
+            row=0,
+            custom_id="yagapon:committee:project-leader:v1",
         )
 
     async def callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        member = interaction.user
-        role = _find_named(guild.roles, self.values[0]) if guild else None
-        request_channel = _find_named(guild.text_channels, ROLE_REQUEST_CHANNEL) if guild else None
-        if not guild or not isinstance(member, discord.Member) or role is None or request_channel is None:
-            await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
-            return
-        member_role = _find_named(guild.roles, MEMBER_ROLE)
-        if member_role is None or member_role not in member.roles:
-            await _respond_ephemeral(interaction, "先に所属局・学年・慶應メールの登録を完了してほしいぽん。")
-            return
-        if role in member.roles:
-            await _respond_ephemeral(interaction, f"**{role.name}** は既に付いているぽん！")
-            return
-        embed = discord.Embed(
-            title="役職ロール申請",
-            description=f"{member.mention} が **{role.name}** を申請しています。",
-            color=discord.Color.gold(),
+        await _submit_position_request(interaction, "企画長", application_kind="企画長")
+
+
+class OfficerSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="役員申告：副局長または局長を選択",
+            min_values=1,
+            max_values=1,
+            row=1,
+            custom_id="yagapon:committee:officer:v1",
+            options=[
+                discord.SelectOption(label=name, value=name, emoji="🛡️")
+                for name in OFFICER_POSITIONS
+            ],
         )
-        embed.add_field(name="申請者ID", value=str(member.id), inline=True)
-        embed.add_field(name="役職ロールID", value=str(role.id), inline=True)
-        embed.set_footer(text="局・学年は本人選択、役職だけ管理者承認です")
-        await request_channel.send(embed=embed, view=RoleApprovalView(), silent=True)
-        await _respond_ephemeral(interaction, f"📨 **{role.name}** を申請したぽん。管理者の承認を待ってねぽん！")
+
+    async def callback(self, interaction: discord.Interaction):
+        await _submit_position_request(interaction, self.values[0], application_kind="役員")
+
+
+class PostRegistrationRoleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ProjectLeaderApplicationButton())
+        self.add_item(OfficerSelect())
 
 
 def _is_keio_email(value: str) -> bool:
@@ -360,6 +443,8 @@ def _is_keio_email(value: str) -> bool:
 
 
 def _support_status_message(identity: SupportIdentity) -> str:
+    if identity.status == "disabled":
+        return "現在はテスト設定のため、やがサポ照合を無効にしています。Discord登録だけ完了しました。"
     if identity.status == "directory_match":
         return "やがサポの登録候補を確認しました。UIDの確定とロール同期は管理者承認待ちです。"
     if identity.status == "verified":
@@ -419,18 +504,12 @@ class RegistrationModal(discord.ui.Modal):
         try:
             roles_to_add = [member_role]
             member_role_names = {role.name for role in member.roles}
-            current_position = next(
-                (
-                    name
-                    for name in ("執行部", "局長", "副局長", "企画長", "一般委員")
-                    if name in member_role_names
-                ),
-                None,
-            )
-            if current_position is None:
+            if not member_role_names.intersection(POSITION_ROLES):
                 roles_to_add.append(general_role)
-                current_position = "一般委員"
             await member.add_roles(*roles_to_add, reason="本人による28th委員登録完了")
+            effective_roles = [*member.roles, *roles_to_add]
+            position_roles = _position_role_names(effective_roles)
+            position_summary = _position_role_summary(effective_roles)
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "委員ロールを付ける権限が足りないぽん。管理者に連絡してほしいぽん。")
             return
@@ -464,7 +543,8 @@ class RegistrationModal(discord.ui.Modal):
             "email": email,
             "bureau": bureau,
             "grade": grade,
-            "role": current_position,
+            "role": position_summary,
+            "roles": position_roles,
             "support_uid": effective_identity.uid if preserve_verified_link else None,
             "support_candidate_uid": None if preserve_verified_link else identity.uid,
             "support_status": effective_identity.status,
@@ -506,7 +586,19 @@ class RegistrationModal(discord.ui.Modal):
         embed.add_field(name="慶應メール", value=email, inline=True)
         embed.add_field(name="やがサポ", value=_support_status_message(effective_identity), inline=False)
         embed.set_footer(text="表示名の変更はDiscordのサーバープロフィールから行ってください")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.add_field(
+            name="該当する人だけ次へ",
+            value=(
+                "下の操作から **企画長申告** または **役員申告（副局長・局長）** を行えます。"
+                "企画長と役員は両方申請できます。"
+            ),
+            inline=False,
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=PostRegistrationRoleView(),
+            ephemeral=True,
+        )
         try:
             await member.send(
                 "✅ 28th矢上祭実行委員会のDiscord登録が完了しました。\n"
@@ -514,7 +606,9 @@ class RegistrationModal(discord.ui.Modal):
                 f"**所属:** {bureau} / {grade}\n"
                 f"**慶應メール:** {email}\n\n"
                 "表示名を変える場合は、Discordのサーバープロフィールから自分で変更してください。\n"
-                f"**やがサポ:** {_support_status_message(effective_identity)}"
+                f"**やがサポ:** {_support_status_message(effective_identity)}\n\n"
+                "企画長・副局長・局長に該当する場合は、登録完了画面または "
+                "`/committee_roles` から申請してください。企画長と役員は兼任できます。"
             )
         except discord.HTTPException:
             log.info("Could not send committee registration DM guild=%s member=%s", guild.id, member.id)
@@ -525,13 +619,12 @@ class SelfRolePanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(BureauSelect())
         self.add_item(GradeSelect())
-        self.add_item(PositionSelect())
 
     @discord.ui.button(
         label="登録を完了",
         emoji="✅",
         style=discord.ButtonStyle.success,
-        row=3,
+        row=2,
         custom_id="yagapon:committee:registration:v1",
     )
     async def registration(self, _button: discord.ui.Button, interaction: discord.Interaction):
@@ -577,24 +670,23 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
         return
     if approve:
         try:
-            removable_names = {"一般委員", "役員", *DECLARABLE_POSITIONS}
-            desired_roles = [
-                current
-                for current in member.roles
-                if not getattr(current, "is_default", lambda: False)()
-                and current.name not in removable_names
-            ]
-            desired_roles.append(role)
+            officer_role = None
             if role.name in ("副局長", "局長"):
                 officer_role = _find_named(guild.roles, "役員")
                 if officer_role is None:
                     await _respond_ephemeral(interaction, "役員ロールが見つからないぽん。再セットアップしてほしいぽん。")
                     return
-                desired_roles.append(officer_role)
+            desired_roles = _roles_after_position_approval(
+                member.roles,
+                role,
+                officer_role,
+            )
             await member.edit(roles=desired_roles, reason=f"{interaction.user} による役職承認")
             members = interaction.client.config.get_members(guild.id)
             record = members.get(str(member.id), {})
-            record["role"] = role.name
+            position_roles = _position_role_names(desired_roles)
+            record["role"] = _position_role_summary(desired_roles)
+            record["roles"] = position_roles
             members[str(member.id)] = record
             await interaction.client.config.set_members(guild.id, members)
         except discord.Forbidden:
@@ -1274,6 +1366,7 @@ async def bootstrap_committee_server(
 
 def register_persistent_views(bot) -> None:
     bot.add_view(SelfRolePanelView())
+    bot.add_view(PostRegistrationRoleView())
     bot.add_view(RoleApprovalView())
     bot.add_view(SupportLinkApprovalView())
     bot.add_view(KeyPanelView())
@@ -1291,6 +1384,7 @@ def register(bot):
         missing = [
             name
             for name, allowed in (
+                ("管理者", permissions.administrator),
                 ("ロール管理", permissions.manage_roles),
                 ("チャンネル管理", permissions.manage_channels),
                 ("メッセージ管理", permissions.manage_messages),
@@ -1304,14 +1398,36 @@ def register(bot):
         if missing:
             await ctx.respond(f"権限が足りないぽん: {', '.join(missing)}", ephemeral=True)
             return
+        managed_role_names = {
+            MEMBER_ROLE,
+            SERVER_ADMIN_ROLE,
+            *GRADE_ROLES,
+            *POSITION_ROLES,
+            *_role_names(BUREAU_ROLES),
+        }
+        hierarchy_conflicts = [
+            role.name
+            for role in ctx.guild.roles
+            if role.name in managed_role_names and not me.top_role > role
+        ]
+        if hierarchy_conflicts:
+            await ctx.respond(
+                "やがぽんのロールを、委員長・執行部・各局などすべての管理対象ロールより上に移動してほしいぽん。"
+                f" 現在管理できないロール: {', '.join(hierarchy_conflicts[:8])}",
+                ephemeral=True,
+            )
+            return
         await ctx.defer(ephemeral=True)
         progress_message = await ctx.followup.send(
             "⏳ 委員会サーバーの整備を開始したぽん…",
             ephemeral=True,
             wait=True,
         )
+        current_stage = "開始準備"
 
         async def report_progress(stage: str) -> None:
+            nonlocal current_stage
+            current_stage = stage
             try:
                 await progress_message.edit(content=f"⏳ {stage}だぽん…")
             except discord.HTTPException:
@@ -1324,10 +1440,14 @@ def register(bot):
                 setup_actor=ctx.author,
                 report_progress=report_progress,
             )
-        except discord.Forbidden:
+        except discord.Forbidden as exc:
             log.exception("Committee setup permission error guild=%s", ctx.guild_id)
             await progress_message.edit(
-                content="❌ セットアップ中に権限エラーになったぽん。やがぽんのロールを他の管理対象ロールより上にしてほしいぽん。"
+                content=(
+                    f"❌ **{current_stage}**で権限エラーになったぽん。"
+                    "やがぽんに管理者権限を付け、ロールをすべての管理対象ロールより上にしてほしいぽん。"
+                    f" status={exc.status} / code={exc.code}"
+                )
             )
             return
         except discord.HTTPException as exc:
@@ -1361,6 +1481,37 @@ def register(bot):
                 "既存のものは削除・重複作成していないぽん。"
             )
         )
+
+    @bot.slash_command(name="committee_roles", description="登録後に企画長・役員を申告するぽん")
+    async def committee_roles(ctx: discord.ApplicationContext):
+        guild = ctx.guild
+        member = ctx.author
+        member_role = _find_named(guild.roles, MEMBER_ROLE) if guild else None
+        if not guild or not isinstance(member, discord.Member):
+            await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
+            return
+        registration = bot.config.get_member(guild.id, member.id)
+        registration_complete = bool(
+            registration
+            and registration.get("email")
+            and registration.get("bureau")
+            and registration.get("grade")
+        )
+        if member_role is None or member_role not in member.roles or not registration_complete:
+            await ctx.respond(
+                "先にロール選択パネルから所属局・学年・慶應メールの登録を完了してほしいぽん。",
+                ephemeral=True,
+            )
+            return
+        embed = discord.Embed(
+            title="🛡️ 登録後の役職申告",
+            description=(
+                "該当するものだけ申告してください。\n"
+                "**企画長**と**役員（副局長・局長）**は兼任できます。"
+            ),
+            color=discord.Color.gold(),
+        )
+        await ctx.respond(embed=embed, view=PostRegistrationRoleView(), ephemeral=True)
 
     @bot.slash_command(name="role_panel", description="ロール選択パネルを再掲するぽん")
     @discord.default_permissions(administrator=True)
