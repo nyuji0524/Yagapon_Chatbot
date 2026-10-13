@@ -636,11 +636,15 @@ class CorpusManager:
     @staticmethod
     def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
         rendered = []
+        seen_labels = set()
         for hit in hits:
             label = f"完全一致: #{hit.channel_name or '記録'}"
+            if label in seen_labels:
+                continue
             value = f"[{label}]({hit.source_url})" if hit.source_url else label
             if value not in existing and value not in rendered:
                 rendered.append(value)
+                seen_labels.add(label)
         return rendered
 
     @classmethod

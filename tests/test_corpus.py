@@ -205,6 +205,17 @@ def test_answer_declares_missing_knowledge_only_checks_the_opening():
     assert not answer_declares_missing_knowledge("記録を確認できたぽん。\n\n古い資料には『見当たらない』と書かれていたぽん。")
 
 
+def test_lexical_sources_deduplicates_the_same_channel_label(corpus_manager):
+    hits = [
+        SimpleNamespace(channel_name="仕事", source_url="https://discord.example/1"),
+        SimpleNamespace(channel_name="仕事", source_url="https://discord.example/2"),
+    ]
+
+    assert corpus_manager._lexical_sources(hits, []) == [
+        "[完全一致: #仕事](https://discord.example/1)"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_query_marks_model_declared_missing_knowledge_as_no_answer(corpus_manager, tmp_path):
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
