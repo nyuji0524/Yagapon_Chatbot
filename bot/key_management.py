@@ -37,6 +37,7 @@ KEY_REPORT_CHANNEL = "鍵管理報告"
 KEY_REQUEST_CHANNEL = "209利用申請"
 KEY_PANEL_MARKER = "yagapon-key-panel-v1"
 KEY_STATUS_MARKER = "yagapon-key-status-v1"
+DEFAULT_KEY_NOTIFICATION_TTL_SECONDS = 300
 
 ACTION_LABELS = {
     "borrow": "あけ（借りる）",
@@ -583,7 +584,7 @@ def key_panel_embed() -> discord.Embed:
     )
     embed.add_field(
         name="🔐 矢上部室（209）",
-        value="渉外局・執行部のみ直接利用できます。その他の委員は理由を入力して承認を待ちます。",
+        value="利用時は画面の案内に沿って操作してください。必要な場合のみ利用理由の入力画面が表示されます。",
         inline=False,
     )
     embed.set_footer(text="物理的に受け渡した後、記録も必ず更新してください")
@@ -616,12 +617,6 @@ def _selected_key_embed(guild: discord.Guild, key_name: str, store: KeyManagemen
         embed.description = f"現在の所持者：<@{holding.holder_id}>\n貸出開始：<t:{int(datetime.fromisoformat(holding.borrowed_at).timestamp())}:F>"
     else:
         embed.description = "現在は返却済みです。"
-    if key_name == RESTRICTED_KEY:
-        embed.add_field(
-            name="209の利用制限",
-            value="権限がない場合は、**あけ** または **さしかえ** の際に利用理由を申請します。",
-            inline=False,
-        )
     return embed
 
 
@@ -832,6 +827,10 @@ class KeyManagementManager:
         self._reminder_task: asyncio.Task | None = None
         self.reminder_after_hours = int(os.environ.get("YAGAPON_KEY_REMINDER_HOURS", "8"))
         self.reminder_repeat_hours = int(os.environ.get("YAGAPON_KEY_REMINDER_REPEAT_HOURS", "12"))
+        self.notification_ttl_seconds = max(
+            30,
+            int(os.environ.get("YAGAPON_KEY_NOTIFICATION_TTL_SECONDS", str(DEFAULT_KEY_NOTIFICATION_TTL_SECONDS))),
+        )
 
     def start(self) -> None:
         if self._reminder_task is None or self._reminder_task.done():
@@ -840,6 +839,10 @@ class KeyManagementManager:
     @staticmethod
     def _named_text_channel(guild: discord.Guild, name: str):
         return discord.utils.get(guild.text_channels, name=name)
+
+    async def _send_transient_report(self, channel: discord.TextChannel, embed: discord.Embed) -> None:
+        """Send an actionable notification while keeping the report channel self-cleaning."""
+        await channel.send(embed=embed, delete_after=self.notification_ttl_seconds)
 
     async def perform_action(
         self,
@@ -987,7 +990,7 @@ class KeyManagementManager:
             )
             notice.add_field(name="操作", value=ACTION_LABELS[action])
             try:
-                await report_channel.send(embed=notice, silent=True)
+                await self._send_transient_report(report_channel, notice)
             except discord.HTTPException:
                 log.warning(
                     "209 request public notice failed guild=%s request=%s",
@@ -1042,7 +1045,7 @@ class KeyManagementManager:
                     color=discord.Color(ACTION_COLORS["reject"]),
                     timestamp=_now(),
                 )
-                await channel.send(embed=rejected, silent=True)
+                await self._send_transient_report(channel, rejected)
         target = await self._resolve_user(guild, request.requester_id) if guild else None
         if target:
             try:
@@ -1092,7 +1095,7 @@ class KeyManagementManager:
             label = "209承認者" if event.key_name == RESTRICTED_KEY and event.reason != "管理者による記録修正" else "記録修正者"
             embed.add_field(name=label, value=f"<@{event.approved_by}>", inline=False)
         embed.set_footer(text=f"記録ID: {event.id[:10]}")
-        await channel.send(embed=embed, silent=True)
+        await self._send_transient_report(channel, embed)
         await asyncio.to_thread(self.store.mark_event_reported, event.id)
 
     async def refresh_status(self, guild: discord.Guild) -> None:
@@ -1188,7 +1191,7 @@ class KeyManagementManager:
                     inline=False,
                 )
                 try:
-                    await report_channel.send(embed=embed, silent=True)
+                    await self._send_transient_report(report_channel, embed)
                     notified = True
                 except discord.HTTPException:
                     log.warning(

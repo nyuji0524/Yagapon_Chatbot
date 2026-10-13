@@ -7,6 +7,7 @@ import pytest
 from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
+    LIAISON_CHANNELS,
     POSITION_ROLES,
     CommitteeGuideView,
     NicknameModal,
@@ -17,6 +18,7 @@ from bot.commands.committee_server import (
     _ensure_forum,
     _ensure_text,
     _ensure_voice,
+    _liaison_guide_embed,
     _nickname_block_reason,
     _post_once,
     _replace_role_group,
@@ -26,6 +28,24 @@ from bot.commands.committee_server import (
 def test_role_groups_have_unique_names():
     names = [item[0] for item in BUREAU_ROLES] + list(GRADE_ROLES) + list(POSITION_ROLES)
     assert len(names) == len(set(names))
+
+
+def test_liaison_channels_reference_known_bureaus_and_have_unique_names():
+    bureau_names = {item[0] for item in BUREAU_ROLES}
+    channel_names = []
+    for first_bureau, second_bureau, channel_name in LIAISON_CHANNELS:
+        assert first_bureau in bureau_names
+        assert second_bureau in bureau_names
+        assert first_bureau != second_bureau
+        channel_names.append(channel_name)
+    assert len(channel_names) == len(set(channel_names))
+
+
+def test_liaison_guide_explains_private_scope_and_pinned_location():
+    embed = _liaison_guide_embed("IT局", "総務局")
+    assert "IT局・総務局・執行部" in embed.description
+    assert "ほかの局からは表示されません" in embed.fields[1].value
+    assert "ピン留め" in embed.footer.text
 
 
 @pytest.mark.asyncio

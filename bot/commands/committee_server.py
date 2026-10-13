@@ -36,6 +36,17 @@ BUREAU_ROLES = (
     ("広報局", 0xFF69B4, "📣", "kouhou"),
     ("渉外局", 0x9B59B6, "🤝", "shougai"),
 )
+LIAISON_CHANNELS = (
+    ("IT局", "総務局", "it総務連絡チャット"),
+    ("IT局", "装飾局", "it装飾連絡チャット"),
+    ("IT局", "ステージ局", "itステージ連絡チャット"),
+    ("IT局", "屋外局", "it屋外連絡チャット"),
+    ("IT局", "室内局", "it室内連絡チャット"),
+    ("IT局", "広報局", "it広報連絡チャット"),
+    ("IT局", "渉外局", "it渉外連絡チャット"),
+    ("ステージ局", "広報局", "ステージ広報連絡チャット"),
+    ("室内局", "広報局", "室内広報連絡チャット"),
+)
 GRADE_ROLES = ("1年", "2年", "3年")
 POSITION_ROLES = ("一般委員", "企画長", "役員", "副局長", "局長", "執行部", "副委員長", "委員長")
 ROLE_REQUEST_CHANNEL = "ロール申請"
@@ -107,6 +118,29 @@ def _role_panel_embed() -> discord.Embed:
         inline=False,
     )
     embed.set_footer(text="個人情報ではなく、委員会で呼ばれたい名前を設定してください")
+    return embed
+
+
+def _liaison_guide_embed(first_bureau: str, second_bureau: str) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🔒 {first_bureau} × {second_bureau} 連絡チャット",
+        description=(
+            f"**{first_bureau}・{second_bureau}・執行部**だけが閲覧できる連絡場所です。\n"
+            "相談、途中経過、確定事項を同じ場所に残してください。"
+        ),
+        color=discord.Color(COMMITTEE_COLOR),
+    )
+    embed.add_field(
+        name="使い方",
+        value="話題が長くなる場合はスレッドを作り、最初の投稿に目的・担当・期限を書きます。",
+        inline=False,
+    )
+    embed.add_field(
+        name="共有範囲",
+        value="ほかの局からは表示されません。全体共有が必要になった内容は、適切な全体チャンネルにも転記してください。",
+        inline=False,
+    )
+    embed.set_footer(text="この案内はピン留めされています。チャンネル上部のトピックからも用途を確認できます")
     return embed
 
 
@@ -788,6 +822,37 @@ async def bootstrap_committee_server(
     )
     counts["channels"] += int(created)
 
+    await report("局間専用連絡チャンネルを準備中")
+    liaison_channels = []
+    for first_bureau, second_bureau, channel_name in LIAISON_CHANNELS:
+        liaison_overwrites = _private_overwrites(
+            guild,
+            [
+                bureau_roles[first_bureau],
+                bureau_roles[second_bureau],
+                position_roles["執行部"],
+            ],
+        )
+        liaison_topic = (
+            f"{first_bureau}・{second_bureau}・執行部のみ閲覧可能。"
+            "局間の相談、途中経過、確定事項を共有します。"
+        )
+        liaison_channel, created = await _ensure_text(
+            guild,
+            channel_name,
+            coordination,
+            topic=liaison_topic,
+            overwrites=liaison_overwrites,
+        )
+        counts["channels"] += int(created)
+        await liaison_channel.edit(
+            category=coordination,
+            topic=liaison_topic,
+            overwrites=liaison_overwrites,
+            reason="局間専用連絡チャンネルの閲覧権限を同期",
+        )
+        liaison_channels.append((liaison_channel, first_bureau, second_bureau))
+
     await report("鍵管理チャンネルを準備中")
     key_category, created = await _ensure_category(guild, KEY_CATEGORY)
     counts["categories"] += int(created)
@@ -803,10 +868,14 @@ async def bootstrap_committee_server(
         guild,
         KEY_REPORT_CHANNEL,
         key_category,
-        topic="鍵の貸出・返却・受け渡しと確認通知を自動記録します。",
+        topic="現在の貸出状況を固定表示します。操作通知は一定時間後に自動削除されます。",
         read_only=True,
     )
     counts["channels"] += int(created)
+    await key_report.edit(
+        topic="現在の貸出状況を固定表示します。操作通知は一定時間後に自動削除されます。",
+        reason="鍵管理報告チャンネルの案内を更新",
+    )
     _channel, created = await _ensure_forum(
         guild,
         "申請・依頼",
@@ -859,6 +928,15 @@ async def bootstrap_committee_server(
             )
 
     await report("案内とロール選択パネルを掲示中")
+    for liaison_channel, first_bureau, second_bureau in liaison_channels:
+        marker = f"yagapon-liaison-guide-v1:{liaison_channel.name}"
+        _message, created = await _post_once(
+            liaison_channel,
+            marker,
+            content=f"`{marker}`",
+            embed=_liaison_guide_embed(first_bureau, second_bureau),
+        )
+        counts["messages"] += int(created)
     _message, created = await _post_once(
         intro,
         ROLE_PANEL_MARKER,
