@@ -646,9 +646,15 @@ class CorpusManager:
             # being migrated.  Enforce the requested festival again on the returned
             # evidence so an answer can never be presented with citations from a
             # different year.
-            sources = self._response_sources(response, expected_festival=festival)
+            semantic_sources = self._response_sources(response, expected_festival=festival)
+            sources = [*semantic_sources]
             sources.extend(self._lexical_sources(lexical_hits, sources))
-            if lexical_hits and (not has_answer or answer_declares_missing_knowledge(answer)):
+            semantic_evidence_rejected = festival is not None and not semantic_sources
+            if lexical_hits and (
+                not has_answer
+                or answer_declares_missing_knowledge(answer)
+                or semantic_evidence_rejected
+            ):
                 recovered_answer = await self._recover_from_lexical_hits(
                     question=question,
                     system_instruction=system,
@@ -661,6 +667,12 @@ class CorpusManager:
                     # grounded only in the exact-match excerpts, so do not keep
                     # unrelated semantic-search citations from the first pass.
                     sources = self._lexical_sources(lexical_hits, [])
+                elif semantic_evidence_rejected:
+                    # The original prose may have been generated from an
+                    # off-year semantic chunk.  A same-year lexical hit alone
+                    # does not prove that prose, so fail closed if the
+                    # lexical-only retry cannot answer.
+                    has_answer = False
             no_answer = not sources or not has_answer or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
