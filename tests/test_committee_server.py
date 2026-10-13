@@ -68,6 +68,13 @@ async def test_bot_guide_embed_and_links_use_created_channels():
     ]
 
 
+@pytest.mark.asyncio
+async def test_bot_guide_view_can_be_empty_before_committee_setup():
+    guild = SimpleNamespace(id=99, channels=[])
+    view = CommitteeGuideView(guild)
+    assert view.children == []
+
+
 def test_embed_field_id_reads_known_field_and_rejects_invalid_value():
     embed = discord.Embed(title="request")
     embed.add_field(name="申請者ID", value="123")

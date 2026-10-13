@@ -53,9 +53,16 @@ def register(bot):
         guild_data = bot.config._guild(gid)
         ignored = guild_data.get("ignore_channels", [])
         if ignored:
-            ignore_str = " ".join(f"<#{cid}>" for cid in ignored)
-            if len(ignore_str) > 950:
-                ignore_str = f"{ignore_str[:950]}…"
+            shown = []
+            for channel_id in ignored:
+                mention = f"<#{channel_id}>"
+                if len(" ".join((*shown, mention))) > 900:
+                    break
+                shown.append(mention)
+            hidden_count = len(ignored) - len(shown)
+            ignore_str = " ".join(shown)
+            if hidden_count:
+                ignore_str += f"\nほか **{hidden_count}件**"
             embed.add_field(
                 name=f"🔒 学習除外（{len(ignored)}件）",
                 value=ignore_str,

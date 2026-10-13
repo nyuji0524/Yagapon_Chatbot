@@ -912,8 +912,9 @@ def register(bot):
         if not ctx.guild:
             await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
             return
+        guide_view = CommitteeGuideView(ctx.guild)
         await ctx.respond(
             embed=_bot_guide_embed(ctx.guild),
-            view=CommitteeGuideView(ctx.guild),
+            view=guide_view if guide_view.children else None,
             ephemeral=True,
         )
