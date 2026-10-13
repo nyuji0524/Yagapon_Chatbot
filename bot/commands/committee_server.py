@@ -593,11 +593,11 @@ def _private_overwrites(guild: discord.Guild, allowed_roles: Iterable[discord.Ro
 
 def _overwrite_signature(overwrites) -> dict[int, tuple[int, int]]:
     """Compare Discord overwrites by target and permission bits, not object identity."""
-    return {
-        target.id: (allow.value, deny.value)
-        for target, overwrite in overwrites.items()
-        for allow, deny in (overwrite.pair(),)
-    }
+    signature = {}
+    for target, overwrite in overwrites.items():
+        allow, deny = overwrite.pair()
+        signature[target.id] = (allow.value, deny.value)
+    return signature
 
 
 async def _post_once(channel: discord.TextChannel, marker: str, *, content=None, embed=None, view=None):

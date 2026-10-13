@@ -844,6 +844,31 @@ class KeyManagementManager:
         """Send an actionable notification while keeping the report channel self-cleaning."""
         await channel.send(embed=embed, delete_after=self.notification_ttl_seconds)
 
+    async def cleanup_expired_notifications(self, guild: discord.Guild) -> None:
+        """Remove stale bot notices whose in-memory delete timer was lost on restart."""
+        channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+        if not channel:
+            return
+        bot_user_id = getattr(guild.me, "id", None) or getattr(self.bot.user, "id", None)
+        if bot_user_id is None:
+            return
+        cutoff = _now() - timedelta(seconds=self.notification_ttl_seconds)
+        async for message in channel.history(limit=500):
+            if message.author.id != bot_user_id or message.pinned or KEY_STATUS_MARKER in (message.content or ""):
+                continue
+            if message.created_at > cutoff:
+                continue
+            try:
+                await message.delete(reason="期限切れの鍵管理通知を整理")
+            except discord.NotFound:
+                continue
+            except discord.HTTPException:
+                log.warning(
+                    "Could not remove expired key notice guild=%s message=%s",
+                    guild.id,
+                    message.id,
+                )
+
     async def perform_action(
         self,
         interaction: discord.Interaction,
@@ -1156,6 +1181,8 @@ class KeyManagementManager:
                 return None
 
     async def run_reminders(self) -> None:
+        for guild in getattr(self.bot, "guilds", ()):
+            await self.cleanup_expired_notifications(guild)
         await self.retry_unreported_events()
         due = await asyncio.to_thread(
             self.store.due_reminders,

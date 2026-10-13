@@ -93,6 +93,48 @@ async def test_key_report_notifications_expire_and_are_not_silent(tmp_path, monk
     channel.send.assert_awaited_once_with(embed=embed, delete_after=90)
 
 
+@pytest.mark.asyncio
+async def test_expired_key_notices_are_cleaned_after_restart_but_status_remains(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KEY_NOTIFICATION_TTL_SECONDS", "90")
+    manager = KeyManagementManager(
+        SimpleNamespace(user=SimpleNamespace(id=10)),
+        KeyManagementStore(tmp_path / "keys.sqlite3"),
+    )
+    old_notice = SimpleNamespace(
+        id=1,
+        author=SimpleNamespace(id=10),
+        pinned=False,
+        content="",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        delete=AsyncMock(),
+    )
+    status = SimpleNamespace(
+        id=2,
+        author=SimpleNamespace(id=10),
+        pinned=True,
+        content="yagapon-key-status-v1",
+        created_at=datetime.now(timezone.utc) - timedelta(days=1),
+        delete=AsyncMock(),
+    )
+
+    async def history(*, limit):
+        assert limit == 500
+        yield old_notice
+        yield status
+
+    channel = SimpleNamespace(name="鍵管理報告", history=history)
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=10),
+        text_channels=[channel],
+    )
+
+    await manager.cleanup_expired_notifications(guild)
+
+    old_notice.delete.assert_awaited_once_with(reason="期限切れの鍵管理通知を整理")
+    status.delete.assert_not_awaited()
+
+
 def test_key_state_machine_borrow_transfer_and_return(tmp_path):
     store = KeyManagementStore(tmp_path / "keys.sqlite3")
 
