@@ -7,6 +7,7 @@ import discord
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
+from bot.key_management import KeyManagementManager
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
@@ -30,6 +31,7 @@ class YagaPon(discord.Bot):
         self.config = ConfigManager()
         self.corpus = CorpusManager()
         self.operations = OperationalStore()
+        self.key_management = KeyManagementManager(self)
         self.catalog = CatalogStore()
         self.recording_replays = RecordingReplayManager(self)
         self._recording_recovery_task: asyncio.Task | None = None
@@ -74,6 +76,7 @@ class YagaPon(discord.Bot):
 
     async def on_ready(self):
         self.corpus.start_flush_loop()
+        self.key_management.start()
         removed = await asyncio.to_thread(cleanup_old_recordings)
         if removed:
             log.info("Removed %s expired delivered recording(s)", removed)

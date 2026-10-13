@@ -21,7 +21,7 @@ def main() -> None:
     probe.unlink()
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is missing")
-    for variable in ("YAGAPON_RAG_DB_PATH", "YAGAPON_OPERATIONS_DB_PATH"):
+    for variable in ("YAGAPON_RAG_DB_PATH", "YAGAPON_OPERATIONS_DB_PATH", "YAGAPON_KEY_DB_PATH"):
         path = Path(os.environ.get(variable, "")) if os.environ.get(variable) else None
         if path and path.exists():
             with sqlite3.connect(path) as connection:

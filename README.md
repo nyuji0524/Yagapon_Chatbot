@@ -56,11 +56,22 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - 議事録名は `yymmdd{会議名}`、文字起こしは保存先直下の `文字起こし` フォルダへ同名で保存
 - Markdown見出し・箇条書きをGoogle Docsの段落スタイルに変換し、Noto Sans JPで保存
 
+### 委員会サーバー・鍵管理
+- `/committee_setup` で28th向けロール、カテゴリ、案内、ロール選択を重複なく整備
+- サーバー表示名、所属局、学年、役職申請をリッチなパネルから操作
+- 5種類の部室・倉庫鍵を「あけ」「しめ」「さしかえ」ボタンで記録
+- 矢上部室（209）は渉外局・執行部が直接利用し、それ以外は理由付き承認制
+- 鍵の状態・履歴はSQLiteへ永続化し、長時間所持への確認通知と報告失敗時の自動再送に対応
+
 ## コマンド一覧
 
 | コマンド | 説明 |
 |---------|------|
 | `/setup` | 初期設定ウィザード（1メッセージ完結型） |
+| `/committee_setup` | 28th委員会サーバーのロール・カテゴリ・案内を冪等に整備 |
+| `/guide` | やがぽんと委員会サーバーの使い方をリッチ表示 |
+| `/key_status` | 部室・倉庫鍵の現在状況を表示 |
+| `/key_force_return <key>` | 鍵の記録を管理者が返却済みに修正 |
 | `/reset` | 設定リセット（管理者のみ） |
 | `/status` | 現在の設定状況を表示 |
 | `/backfill [mode] [days] [channel]` | 差分更新（推奨）または指定期間を安全に再構築 |
@@ -101,6 +112,7 @@ Yagapon_Chatbot/
 │   ├── voice.py         # VC録音・文字起こし・リアルタイム応答
 │   ├── tts.py           # edge-tts音声生成
 │   ├── reactions.py     # スマートリアクション
+│   ├── key_management.py# 鍵の状態・承認・通知・Discord UI
 │   ├── reports.py       # 週次・月次レポート生成
 │   ├── gdrive.py        # Drive API・Docs API連携
 │   └── commands/
@@ -146,6 +158,9 @@ YAGAPON_TRANSCRIBE_FALLBACK_MODEL=gemini-3.8-flash
 YAGAPON_AUDIO_MODEL=gemini-3.8-flash
 YAGAPON_DAILY_QUERY_LIMIT=400
 YAGAPON_RAG_DB_PATH=/data/rag.sqlite3
+YAGAPON_KEY_DB_PATH=/data/key-management.sqlite3
+YAGAPON_KEY_REMINDER_HOURS=8
+YAGAPON_KEY_REMINDER_REPEAT_HOURS=12
 YAGAPON_RAG_TRACE_CONTENT=false
 YAGAPON_RAG_FESTIVAL_FILTER_ENABLED=false
 DISCORD_TOKEN=your_discord_bot_token
@@ -213,8 +228,12 @@ GCEではsystemdからComposeを管理し、再起動後も自動復旧させる
 
 ### 3. Discord設定
 
-1. Discordサーバーで `/setup` を実行
-2. ウィザードに従って設定を進める
+1. Discordサーバーで `/setup` を実行し、RAG・メンバー同期・履歴取込みを設定
+2. 28th委員会サーバーでは `/committee_setup` を実行し、ロール・カテゴリ・案内・鍵管理を整備
+
+`/committee_setup` は同名リソースを再利用し、案内メッセージと権限を更新する。既存チャンネルや
+ロールを削除せず、再実行しても重複作成しない。矢上部室（209）の利用申請は渉外局カテゴリの
+`#209利用申請`へ届き、渉外局または執行部が承認・却下する。
 
 ## 開発・テスト
 
