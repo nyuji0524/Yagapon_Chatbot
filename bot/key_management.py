@@ -31,9 +31,9 @@ KEY_BUTTON_IDS = {
     "屋外倉庫": "outdoor",
 }
 RESTRICTED_KEY = "矢上部室（209）"
-KEY_CATEGORY = "06｜鍵管理"
-KEY_ACTION_CHANNEL = "鍵を操作"
-KEY_REPORT_CHANNEL = "鍵管理報告"
+KEY_CATEGORY = "02｜鍵管理"
+KEY_ACTION_CHANNEL = "報告"
+KEY_REPORT_CHANNEL = "鍵管理状況"
 KEY_REQUEST_CHANNEL = "209利用申請"
 KEY_PANEL_MARKER = "yagapon-key-panel-v1"
 KEY_STATUS_MARKER = "yagapon-key-status-v1"
@@ -846,7 +846,7 @@ class KeyManagementManager:
 
     async def cleanup_expired_notifications(self, guild: discord.Guild) -> None:
         """Remove stale bot notices whose in-memory delete timer was lost on restart."""
-        channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+        channel = self._named_text_channel(guild, KEY_ACTION_CHANNEL)
         if not channel:
             return
         bot_user_id = getattr(guild.me, "id", None) or getattr(self.bot.user, "id", None)
@@ -966,7 +966,7 @@ class KeyManagementManager:
             return
         await interaction.response.defer(ephemeral=True)
         request_channel = self._named_text_channel(guild, KEY_REQUEST_CHANNEL)
-        report_channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+        report_channel = self._named_text_channel(guild, KEY_ACTION_CHANNEL)
         if not request_channel:
             await _respond_ephemeral(interaction, content="209利用申請チャンネルがないぽん。管理者に再セットアップを依頼してほしいぽん。")
             return
@@ -1065,7 +1065,7 @@ class KeyManagementManager:
             except discord.HTTPException:
                 log.exception("Approved key event report failed guild=%s event=%s", guild.id, event.id)
         elif guild:
-            channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+            channel = self._named_text_channel(guild, KEY_ACTION_CHANNEL)
             if channel:
                 rejected = discord.Embed(
                     title="🔴 209利用申請が却下されました",
@@ -1095,7 +1095,7 @@ class KeyManagementManager:
                     pass
 
     async def _publish_event(self, guild: discord.Guild, event: KeyEvent) -> None:
-        channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+        channel = self._named_text_channel(guild, KEY_ACTION_CHANNEL)
         if not channel:
             log.warning("Key report channel is missing guild=%s", guild.id)
             return
@@ -1197,7 +1197,7 @@ class KeyManagementManager:
             if not guild:
                 continue
             member = await self._resolve_user(guild, holding.holder_id)
-            report_channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+            report_channel = self._named_text_channel(guild, KEY_ACTION_CHANNEL)
             notified = False
             if member:
                 try:

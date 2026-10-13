@@ -11,6 +11,7 @@ from bot.key_management import KeyManagementManager
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
+from bot.support_directory import SupportDirectory
 from bot.voice import VoiceMode
 from knowledge_catalog.store import CatalogStore, normalize_label
 
@@ -34,6 +35,7 @@ class YagaPon(discord.Bot):
         self.key_management = KeyManagementManager(self)
         self.catalog = CatalogStore()
         self.recording_replays = RecordingReplayManager(self)
+        self.support_directory = SupportDirectory()
         self._recording_recovery_task: asyncio.Task | None = None
 
         # コマンド登録
@@ -99,22 +101,6 @@ class YagaPon(discord.Bot):
                     silent=True,
                 )
                 break
-
-    async def on_member_join(self, member: discord.Member):
-        """Give the non-privileged committee base role when the template is enabled."""
-        from bot.commands.committee_server import MEMBER_ROLE, ROLE_PANEL_CHANNEL
-
-        if member.bot:
-            return
-        if discord.utils.get(member.guild.text_channels, name=ROLE_PANEL_CHANNEL) is None:
-            return
-        role = discord.utils.get(member.guild.roles, name=MEMBER_ROLE)
-        if role is None or role in member.roles:
-            return
-        try:
-            await member.add_roles(role, reason="委員会サーバー自動参加ロール")
-        except discord.Forbidden:
-            log.warning("Could not add committee member role guild=%s member=%s", member.guild.id, member.id)
 
     async def on_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
