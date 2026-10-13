@@ -1,17 +1,21 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from bot.key_management import (
     KEY_NAMES,
     RESTRICTED_KEY,
+    KeyManagementManager,
     KeyManagementStore,
     KeyPanelView,
     KeyStateConflict,
     RestrictedKeyApprovalView,
+    _selected_key_embed,
     can_approve_restricted_key,
     can_use_restricted_key,
+    key_panel_embed,
 )
 
 
@@ -55,6 +59,80 @@ async def test_key_panel_has_all_keys_and_stable_persistent_ids():
         "yagapon:key:209:approve:v1",
         "yagapon:key:209:reject:v1",
     }
+
+
+def test_restricted_key_copy_does_not_frame_the_user_as_unauthorized(tmp_path):
+    panel = key_panel_embed()
+    selected = _selected_key_embed(
+        SimpleNamespace(id=1),
+        RESTRICTED_KEY,
+        KeyManagementStore(tmp_path / "keys.sqlite3"),
+    )
+    rendered = "\n".join(
+        [panel.description or "", selected.description or ""]
+        + [field.value for field in panel.fields]
+        + [field.value for field in selected.fields]
+    )
+    assert "権限がない" not in rendered
+    assert "その他の委員" not in rendered
+    assert "利用制限" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_key_report_notifications_expire_and_are_not_silent(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KEY_NOTIFICATION_TTL_SECONDS", "90")
+    manager = KeyManagementManager(
+        SimpleNamespace(),
+        KeyManagementStore(tmp_path / "keys.sqlite3"),
+    )
+    channel = SimpleNamespace(send=AsyncMock())
+    embed = key_panel_embed()
+
+    await manager._send_transient_report(channel, embed)
+
+    channel.send.assert_awaited_once_with(embed=embed, delete_after=90)
+
+
+@pytest.mark.asyncio
+async def test_expired_key_notices_are_cleaned_after_restart_but_status_remains(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KEY_NOTIFICATION_TTL_SECONDS", "90")
+    manager = KeyManagementManager(
+        SimpleNamespace(user=SimpleNamespace(id=10)),
+        KeyManagementStore(tmp_path / "keys.sqlite3"),
+    )
+    old_notice = SimpleNamespace(
+        id=1,
+        author=SimpleNamespace(id=10),
+        pinned=False,
+        content="",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        delete=AsyncMock(),
+    )
+    status = SimpleNamespace(
+        id=2,
+        author=SimpleNamespace(id=10),
+        pinned=True,
+        content="yagapon-key-status-v1",
+        created_at=datetime.now(timezone.utc) - timedelta(days=1),
+        delete=AsyncMock(),
+    )
+
+    async def history(*, limit):
+        assert limit == 500
+        yield old_notice
+        yield status
+
+    channel = SimpleNamespace(name="鍵管理報告", history=history)
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=10),
+        text_channels=[channel],
+    )
+
+    await manager.cleanup_expired_notifications(guild)
+
+    old_notice.delete.assert_awaited_once_with(reason="期限切れの鍵管理通知を整理")
+    status.delete.assert_not_awaited()
 
 
 def test_key_state_machine_borrow_transfer_and_return(tmp_path):
