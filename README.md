@@ -58,8 +58,10 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 
 ### 委員会サーバー・鍵管理
 - `/committee_setup` で28th向けロール、カテゴリ、案内、ロール選択を重複なく整備
-- サーバー表示名、所属局、学年、役職申請をリッチなパネルから操作
-- 局間連絡は関係する2局と執行部だけが見える専用チャンネルを用意し、用途をトピックと固定案内に表示
+- 実行者にはDiscordのAdministrator権限を持つ `サーバー管理者` ロールを付与
+- 表示名は本人がサーバープロフィールで変更し、所属局・学年・慶應メール・役職申請をリッチなパネルから操作
+- 慶應メールはサーバー資格情報でYaga Supportのusers/staffInfosと照合し、UID確定は非公開申請の管理者承認後に行う。未登録・照合保留でもDiscord登録は継続
+- 全28通りの局間連絡は関係する2局と執行部だけが見える専用チャンネルを用意し、用途をトピックと固定案内に表示
 - 5種類の部室・倉庫鍵を「あけ」「しめ」「さしかえ」ボタンで記録
 - 矢上部室（209）は利用者に応じて必要な確認フローを自動表示
 - 鍵の状態・履歴はSQLiteへ永続化し、固定の貸出状況パネル、一定時間後に消える操作通知、長時間所持への確認と報告失敗時の自動再送に対応
@@ -233,10 +235,31 @@ GCEではsystemdからComposeを管理し、再起動後も自動復旧させる
 1. Discordサーバーで `/setup` を実行し、RAG・メンバー同期・履歴取込みを設定
 2. 28th委員会サーバーでは `/committee_setup` を実行し、ロール・カテゴリ・案内・鍵管理を整備
 
-`/committee_setup` は同名リソースを再利用し、案内メッセージと権限を更新する。既存チャンネルや
-ロールを削除せず、再実行しても重複作成しない。局間専用チャンネルは関係する2局と執行部だけに
-表示される。矢上部室（209）で確認が必要な操作は渉外局カテゴリの `#209利用申請` へ届き、
-渉外局または執行部が承認・却下する。鍵管理報告の一時通知は既定で5分後に削除される。
+`/committee_setup` は同じカテゴリ内の同名リソースを再利用し、案内メッセージと権限を更新する。
+既存チャンネルやロールを削除せず、再実行しても重複作成しない。局間専用チャンネルは関係する
+2局と執行部だけに表示される。矢上部室（209）で確認が必要な操作は非公開の `#209利用申請` へ
+届き、渉外局または執行部が承認・却下する。`#報告` の一時通知は既定で5分後に削除され、
+`#鍵管理状況` は固定された現在状況だけを更新する。
+
+Yaga Support照合は `YAGAPON_SUPPORT_BACKEND` で明示的に切り替える。既定の `disabled` では
+Firestoreへ接続しない。開発時は次の手順でFirestore Emulatorとテストデータを起動できる。
+
+```bash
+docker compose --profile support-emulator up -d support-firestore
+docker compose --profile support-emulator run --rm support-emulator-seed
+YAGAPON_SUPPORT_BACKEND=emulator \
+YAGAPON_SUPPORT_FIREBASE_PROJECT=demo-yagapon-support \
+YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 \
+YAGAPON_SUPPORT_ROLE_SYNC_ENABLED=true \
+  .venv/bin/pytest -q tests/test_support_directory_emulator.py
+docker compose --profile support-emulator down
+```
+
+Emulator UIは `http://127.0.0.1:4000` で確認できる。本番移行時だけバックエンドを `firestore`、
+プロジェクトを本番IDへ変更し、GCEサービスアカウントへ必要最小限のFirestore IAMを付与する。
+`YAGAPON_SUPPORT_ROLE_SYNC_ENABLED=true` の場合だけ、局・学年の再照合と管理者承認が完了した
+既存利用者へ `矢上祭実行委員` ロールをサーバー側から追記する。クライアントの自己申告だけを
+根拠にYaga Support権限を変更しない。
 
 ## 開発・テスト
 

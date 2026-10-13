@@ -122,7 +122,7 @@ async def test_expired_key_notices_are_cleaned_after_restart_but_status_remains(
         yield old_notice
         yield status
 
-    channel = SimpleNamespace(name="鍵管理報告", history=history)
+    channel = SimpleNamespace(name="報告", history=history)
     guild = SimpleNamespace(
         id=1,
         me=SimpleNamespace(id=10),

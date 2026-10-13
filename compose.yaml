@@ -19,6 +19,10 @@ services:
       YAGAPON_REPLAY_DIR: /data/replays
       YAGAPON_KNOWLEDGE_OUTBOX: /data/knowledge-outbox
       GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
+      YAGAPON_SUPPORT_BACKEND: ${YAGAPON_SUPPORT_BACKEND:-disabled}
+      YAGAPON_SUPPORT_FIREBASE_PROJECT: ${YAGAPON_SUPPORT_FIREBASE_PROJECT:-demo-yagapon-support}
+      YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST: ${YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST:-support-firestore:8080}
+      YAGAPON_SUPPORT_ROLE_SYNC_ENABLED: ${YAGAPON_SUPPORT_ROLE_SYNC_ENABLED:-false}
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"
     volumes:
@@ -83,5 +87,35 @@ services:
       - ${YAGAPON_DATA_PATH:-./data}:/data
       - ${YAGAPON_KNOWLEDGE_REPO_PATH:-../YagamiFes-IT-Knowledge}:/knowledge:ro
     command: ["python", "-m", "knowledge_index", "--watch-interval", "900"]
+    healthcheck:
+      disable: true
+
+  support-firestore:
+    build:
+      context: ./firebase-emulator
+    profiles: [support-emulator]
+    restart: unless-stopped
+    ports:
+      - "${YAGAPON_SUPPORT_EMULATOR_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_SUPPORT_EMULATOR_PORT:-8080}:8080"
+      - "${YAGAPON_SUPPORT_EMULATOR_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_SUPPORT_EMULATOR_UI_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+      start_period: 10s
+
+  support-emulator-seed:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    profiles: [support-emulator]
+    depends_on:
+      support-firestore:
+        condition: service_healthy
+    environment:
+      FIRESTORE_EMULATOR_HOST: support-firestore:8080
+      YAGAPON_SUPPORT_FIREBASE_PROJECT: ${YAGAPON_SUPPORT_FIREBASE_PROJECT:-demo-yagapon-support}
+    command: ["python", "-m", "bot.support_emulator_seed"]
     healthcheck:
       disable: true
