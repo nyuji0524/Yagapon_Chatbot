@@ -203,6 +203,7 @@ def test_answer_declares_missing_knowledge_checks_the_opening_section():
     assert answer_declares_missing_knowledge("具体的な保存場所の情報は、今のボクの記憶には見当たらないぽん。")
     assert answer_declares_missing_knowledge("該当する記録は確認できなかったぽん。\n\n周辺情報はあるぽん。")
     assert answer_declares_missing_knowledge("確認するぽん！\n\n該当する記録は確認できなかったぽん。")
+    assert answer_declares_missing_knowledge("該当する記録は、\n確認できませんでした。")
     assert answer_declares_missing_knowledge("該当する情報は見つかりませんでした。")
     assert answer_declares_missing_knowledge("記録は確認できませんでした。")
     assert not answer_declares_missing_knowledge("回答だぽん。" + "x" * 500 + "記録は確認できなかったぽん。")

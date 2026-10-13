@@ -109,7 +109,7 @@ def answer_declares_missing_knowledge(answer: str) -> bool:
         rf"(?:情報|記録|根拠|記憶).{{0,40}}{missing_expression}",
         rf"{missing_expression}.{{0,30}}(?:情報|記録|根拠|記憶)",
     )
-    return any(re.search(pattern, opening) for pattern in patterns)
+    return any(re.search(pattern, opening, re.DOTALL) for pattern in patterns)
 
 
 @dataclass

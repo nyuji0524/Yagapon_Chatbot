@@ -199,6 +199,10 @@ YAGAPON_KNOWLEDGE_INDEX_STATE=/data/knowledge-index-state.json
 YAGAPON_KNOWLEDGE_INDEX_STATUSES=approved,verified,current
 ```
 
+`YAGAPON_MINUTES_IMAGE_URL` はGoogle Docs APIから認証なしで取得できる公開URLが必要です。
+既定値は公開リポジトリ上の画像です。リポジトリを非公開化する場合は、Cloud Storageなどの
+公開配信URLへ必ず変更してください。
+
 RAGと回答生成はGemini 3.8 Flash、音声認識はGemini 3.5 Transcribe、
 短い要約やリアクション判定はFlash-Liteを既定値にする。モデル名は環境変数で
 切り戻せる。TTSは引き続きedge-ttsを使う。料金前提と予算ガードは

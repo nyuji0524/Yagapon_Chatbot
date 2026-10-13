@@ -23,6 +23,8 @@ TRANSCRIPT_FOLDER_NAME = "文字起こし"
 MINUTES_ACCENT_COLOR = {"red": 19 / 255, "green": 79 / 255, "blue": 92 / 255}
 MINUTES_SUBHEADING_COLOR = {"red": 67 / 255, "green": 67 / 255, "blue": 67 / 255}
 DEFAULT_MINUTES_IMAGE_URL = (
+    # This repository is public. If its visibility changes, operators must set
+    # YAGAPON_MINUTES_IMAGE_URL to another publicly fetchable image URL.
     "https://raw.githubusercontent.com/nyuji0524/Yagapon_Chatbot/main/assets/yagapon_minutes.png"
 )
 
