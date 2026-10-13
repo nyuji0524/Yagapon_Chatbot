@@ -17,6 +17,7 @@ from bot.commands.committee_server import (
     _ensure_forum,
     _ensure_text,
     _ensure_voice,
+    _nickname_block_reason,
     _post_once,
     _replace_role_group,
 )
@@ -45,6 +46,39 @@ async def test_nickname_modal_limits_server_display_name_length():
     assert modal.custom_id == "yagapon:committee:nickname:modal:v1"
     assert modal.children[0].min_length == 1
     assert modal.children[0].max_length == 32
+
+
+def test_nickname_permission_guard_covers_owner_permission_and_role_order():
+    member = SimpleNamespace(id=1, top_role=10)
+    owner_guild = SimpleNamespace(owner_id=1, me=SimpleNamespace())
+    assert "サーバー所有者" in _nickname_block_reason(owner_guild, member)
+
+    no_permission_guild = SimpleNamespace(
+        owner_id=2,
+        me=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_nicknames=False),
+            top_role=20,
+        ),
+    )
+    assert "権限が足りない" in _nickname_block_reason(no_permission_guild, member)
+
+    low_role_guild = SimpleNamespace(
+        owner_id=2,
+        me=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_nicknames=True),
+            top_role=10,
+        ),
+    )
+    assert "ロール順位" in _nickname_block_reason(low_role_guild, member)
+
+    allowed_guild = SimpleNamespace(
+        owner_id=2,
+        me=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_nicknames=True),
+            top_role=20,
+        ),
+    )
+    assert _nickname_block_reason(allowed_guild, member) is None
 
 
 @pytest.mark.asyncio

@@ -162,6 +162,17 @@ def _bot_guide_embed(guild: discord.Guild) -> discord.Embed:
     return embed
 
 
+def _nickname_block_reason(guild: discord.Guild, member: discord.Member) -> str | None:
+    if member.id == guild.owner_id:
+        return "サーバー所有者の表示名はBotから変更できないぽん。プロフィールから手動で変更してほしいぽん。"
+    me = guild.me
+    if not me or not me.guild_permissions.manage_nicknames:
+        return "やがぽんに「ニックネームの管理」権限が足りないぽん。管理者に連絡してほしいぽん。"
+    if member.top_role >= me.top_role:
+        return "ロール順位の都合で表示名を変更できないぽん。管理者に連絡してほしいぽん。"
+    return None
+
+
 class CommitteeGuideView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         # Link buttons are resolved by Discord and do not need a running timer.
@@ -298,23 +309,18 @@ class NicknameModal(discord.ui.Modal):
         if not nickname:
             await _respond_ephemeral(interaction, "表示名を入力してほしいぽん。")
             return
-        if member.id == guild.owner_id:
-            await _respond_ephemeral(
-                interaction,
-                "サーバー所有者の表示名はBotから変更できないぽん。プロフィールから手動で変更してほしいぽん。",
-            )
-            return
-        me = guild.me
-        if not me or not me.guild_permissions.manage_nicknames:
-            await _respond_ephemeral(interaction, "やがぽんに「ニックネームの管理」権限が足りないぽん。管理者に連絡してほしいぽん。")
-            return
-        if member.top_role >= me.top_role:
-            await _respond_ephemeral(interaction, "ロール順位の都合で表示名を変更できないぽん。管理者に連絡してほしいぽん。")
+        block_reason = _nickname_block_reason(guild, member)
+        if block_reason:
+            await _respond_ephemeral(interaction, block_reason)
             return
         try:
             await member.edit(nick=nickname, reason="本人によるサーバー表示名設定")
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "表示名を変更する権限が足りないぽん。管理者に連絡してほしいぽん。")
+            return
+        except discord.HTTPException:
+            log.exception("Nickname update failed guild=%s member=%s", guild.id, member.id)
+            await _respond_ephemeral(interaction, "Discord APIとの通信に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
             return
         embed = discord.Embed(
             title="✅ 表示名を更新しました",
