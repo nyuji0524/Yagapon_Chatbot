@@ -251,6 +251,47 @@ async def test_query_marks_model_declared_missing_knowledge_as_no_answer(corpus_
     assert result.citations == ("#開発",)
 
 
+@pytest.mark.asyncio
+async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    corpus_manager.rag_store.upsert_document(
+        "documents/it-lab",
+        "ITラボではAI鬼ごっこと福澤先生寝かしつけを来場者向けに実施した。",
+        [
+            {"key": "document_key", "string_value": "it-lab"},
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "channel_name", "string_value": "ITラボ"},
+            {"key": "source_url", "string_value": "https://discord.example/it-lab"},
+        ],
+    )
+    first_response = SimpleNamespace(
+        text="具体的な活動の記録は確認できなかったぽん。",
+        usage_metadata=None,
+        candidates=[],
+    )
+    recovered_response = SimpleNamespace(
+        text="ITラボではAI鬼ごっこと福澤先生寝かしつけを実施していたぽん。",
+        usage_metadata=None,
+        candidates=[],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[first_response, recovered_response]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボではどんなことをしていましたか？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "AI鬼ごっこ" in result.text
+    assert result.citations == ("[完全一致: #ITラボ](https://discord.example/it-lab)",)
+    calls = corpus_manager._client.aio.models.generate_content.await_args_list
+    assert len(calls) == 2
+    assert calls[1].kwargs["config"].tools is None
+
+
 def test_incremental_boundary_is_previous_jst_midnight():
     cursor = {"message_at": "2026-10-05T15:30:00+00:00"}
 
