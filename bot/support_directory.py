@@ -17,6 +17,7 @@ log = logging.getLogger("yagapon.support_directory")
 
 COMMITTEE_ROLE = "矢上祭実行委員"
 FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore"
+SUPPORT_BACKENDS = {"disabled", "emulator", "firestore"}
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,19 @@ class SupportDirectory:
     """Look up Support identities with server credentials, never client claims."""
 
     def __init__(self) -> None:
-        self.project_id = os.environ.get("YAGAPON_SUPPORT_FIREBASE_PROJECT", "").strip()
+        self.backend = os.environ.get("YAGAPON_SUPPORT_BACKEND", "disabled").strip().lower()
+        if self.backend not in SUPPORT_BACKENDS:
+            log.error("Unknown YAGAPON_SUPPORT_BACKEND=%s; disabling integration", self.backend)
+            self.backend = "disabled"
+        default_project = "demo-yagapon-support" if self.backend == "emulator" else ""
+        self.project_id = os.environ.get(
+            "YAGAPON_SUPPORT_FIREBASE_PROJECT",
+            default_project,
+        ).strip()
+        self.emulator_host = os.environ.get(
+            "YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST",
+            os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080"),
+        ).strip()
         self.role_sync_enabled = (
             os.environ.get("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "false").lower() == "true"
         )
@@ -70,7 +83,7 @@ class SupportDirectory:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.project_id)
+        return self.backend in {"emulator", "firestore"} and bool(self.project_id)
 
     async def _token(self) -> str:
         async with self._credentials_lock:
@@ -91,9 +104,11 @@ class SupportDirectory:
         *,
         payload: dict[str, Any] | None = None,
     ) -> Any:
-        token = await self._token()
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {}
+        if self.backend == "firestore":
+            token = await self._token()
+            headers["Authorization"] = f"Bearer {token}"
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.request(method, url, json=payload) as response:
                 if response.status == 404:
@@ -104,10 +119,11 @@ class SupportDirectory:
                 return await response.json()
 
     def _documents_url(self, suffix: str = "") -> str:
-        base = (
-            "https://firestore.googleapis.com/v1/projects/"
-            f"{quote(self.project_id, safe='')}/databases/(default)/documents"
-        )
+        if self.backend == "emulator":
+            root = f"http://{self.emulator_host}"
+        else:
+            root = "https://firestore.googleapis.com"
+        base = f"{root}/v1/projects/{quote(self.project_id, safe='')}/databases/(default)/documents"
         return f"{base}{suffix}"
 
     async def _find_user(self, email: str) -> dict[str, Any] | None:

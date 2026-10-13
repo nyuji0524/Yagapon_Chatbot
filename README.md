@@ -241,11 +241,25 @@ GCEではsystemdからComposeを管理し、再起動後も自動復旧させる
 届き、渉外局または執行部が承認・却下する。`#報告` の一時通知は既定で5分後に削除され、
 `#鍵管理状況` は固定された現在状況だけを更新する。
 
-Yaga Support照合は `YAGAPON_SUPPORT_FIREBASE_PROJECT` を設定すると有効になる。GCEサービス
-アカウントには対象Firestoreを読み取るIAM権限が必要。`YAGAPON_SUPPORT_ROLE_SYNC_ENABLED=true`
-の場合だけ、局・学年の再照合と管理者承認が完了した既存利用者へ `矢上祭実行委員` ロールを
-サーバー側から追記する。既定値は `false` で、クライアントの自己申告だけを根拠にYaga Support
-権限を変更しない。
+Yaga Support照合は `YAGAPON_SUPPORT_BACKEND` で明示的に切り替える。既定の `disabled` では
+Firestoreへ接続しない。開発時は次の手順でFirestore Emulatorとテストデータを起動できる。
+
+```bash
+docker compose --profile support-emulator up -d support-firestore
+docker compose --profile support-emulator run --rm support-emulator-seed
+YAGAPON_SUPPORT_BACKEND=emulator \
+YAGAPON_SUPPORT_FIREBASE_PROJECT=demo-yagapon-support \
+YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 \
+YAGAPON_SUPPORT_ROLE_SYNC_ENABLED=true \
+  .venv/bin/pytest -q tests/test_support_directory_emulator.py
+docker compose --profile support-emulator down
+```
+
+Emulator UIは `http://127.0.0.1:4000` で確認できる。本番移行時だけバックエンドを `firestore`、
+プロジェクトを本番IDへ変更し、GCEサービスアカウントへ必要最小限のFirestore IAMを付与する。
+`YAGAPON_SUPPORT_ROLE_SYNC_ENABLED=true` の場合だけ、局・学年の再照合と管理者承認が完了した
+既存利用者へ `矢上祭実行委員` ロールをサーバー側から追記する。クライアントの自己申告だけを
+根拠にYaga Support権限を変更しない。
 
 ## 開発・テスト
 

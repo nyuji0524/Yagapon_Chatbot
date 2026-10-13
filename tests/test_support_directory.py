@@ -49,6 +49,7 @@ def test_grade_matching_accepts_staff_info_variants():
 
 @pytest.mark.asyncio
 async def test_disabled_directory_never_uses_credentials(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "disabled")
     monkeypatch.delenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", raising=False)
     directory = SupportDirectory()
 
@@ -59,6 +60,7 @@ async def test_disabled_directory_never_uses_credentials(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_verified_profile_links_uid_without_writing_by_default(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "firestore")
     monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
     monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "false")
     directory = SupportDirectory()
@@ -76,6 +78,7 @@ async def test_verified_profile_links_uid_without_writing_by_default(monkeypatch
 
 @pytest.mark.asyncio
 async def test_role_sync_requires_trusted_profile_match_and_feature_flag(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "firestore")
     monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
     monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "true")
     directory = SupportDirectory()
@@ -92,6 +95,7 @@ async def test_role_sync_requires_trusted_profile_match_and_feature_flag(monkeyp
 
 @pytest.mark.asyncio
 async def test_role_sync_uses_stored_uid_when_document_id_differs(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "firestore")
     monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
     monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "true")
     directory = SupportDirectory()
@@ -110,6 +114,7 @@ async def test_role_sync_uses_stored_uid_when_document_id_differs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_profile_mismatch_never_syncs_role(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "firestore")
     monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
     monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "true")
     directory = SupportDirectory()
@@ -125,6 +130,7 @@ async def test_profile_mismatch_never_syncs_role(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_role_sync_failure_returns_unavailable_instead_of_raising(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "firestore")
     monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
     monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "true")
     directory = SupportDirectory()
@@ -135,3 +141,28 @@ async def test_role_sync_failure_returns_unavailable_instead_of_raising(monkeypa
     identity = await directory.approve_link("member@keio.jp", "IT局", "2年", "uid-1")
 
     assert identity.status == "unavailable"
+
+
+def test_emulator_backend_uses_local_url_without_production_project(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "emulator")
+    monkeypatch.delenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", raising=False)
+    monkeypatch.setenv("YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST", "localhost:18080")
+
+    directory = SupportDirectory()
+
+    assert directory.enabled is True
+    assert directory.project_id == "demo-yagapon-support"
+    assert directory._documents_url(":commit") == (
+        "http://localhost:18080/v1/projects/demo-yagapon-support/"
+        "databases/(default)/documents:commit"
+    )
+
+
+def test_unknown_backend_fails_closed(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_BACKEND", "production-ish")
+    monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
+
+    directory = SupportDirectory()
+
+    assert directory.enabled is False
+    assert directory.backend == "disabled"
