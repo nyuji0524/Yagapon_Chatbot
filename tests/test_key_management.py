@@ -39,12 +39,15 @@ def test_restricted_key_uses_profile_roles_and_records_approver_roles():
 async def test_key_panel_has_all_keys_and_stable_persistent_ids():
     panel = KeyPanelView()
     assert panel.timeout is None
-    select = next(child for child in panel.children if child.custom_id == "yagapon:key:select:v1")
-    assert [option.value for option in select.options] == list(KEY_NAMES)
     assert {child.custom_id for child in panel.children} == {
-        "yagapon:key:select:v1",
+        "yagapon:key:select:hiyoshi:v1",
+        "yagapon:key:select:yagami-212:v1",
+        "yagapon:key:select:yagami-209:v1",
+        "yagapon:key:select:basement:v1",
+        "yagapon:key:select:outdoor:v1",
         "yagapon:key:status:v1",
     }
+    assert {child.label for child in panel.children if child.row == 0} == set(KEY_NAMES)
 
     approval = RestrictedKeyApprovalView()
     assert approval.timeout is None
@@ -163,3 +166,12 @@ def test_reminders_repeat_only_after_interval(tmp_path):
     store.mark_reminded(1, "地下倉庫", at=now + timedelta(hours=9))
     assert not store.due_reminders(now=now + timedelta(hours=10), after_hours=8, repeat_hours=12)
     assert store.due_reminders(now=now + timedelta(hours=22), after_hours=8, repeat_hours=12)
+
+
+def test_status_message_id_is_persisted(tmp_path):
+    store = KeyManagementStore(tmp_path / "keys.sqlite3")
+    assert store.get_status_message_id(1) is None
+    store.set_status_message_id(1, 123)
+    assert store.get_status_message_id(1) == 123
+    store.set_status_message_id(1, 456)
+    assert store.get_status_message_id(1) == 456

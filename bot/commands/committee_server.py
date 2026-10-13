@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 
@@ -896,6 +897,7 @@ async def bootstrap_committee_server(
         content=f"`{KEY_STATUS_MARKER}`",
         embed=key_status_embed(guild, key_store),
     )
+    await asyncio.to_thread(key_store.set_status_message_id, guild.id, _message.id)
     counts["messages"] += int(created)
 
     return counts

@@ -23,6 +23,13 @@ KEY_NAMES = (
     "地下倉庫",
     "屋外倉庫",
 )
+KEY_BUTTON_IDS = {
+    "日吉部室": "hiyoshi",
+    "矢上部室（212）": "yagami-212",
+    "矢上部室（209）": "yagami-209",
+    "地下倉庫": "basement",
+    "屋外倉庫": "outdoor",
+}
 RESTRICTED_KEY = "矢上部室（209）"
 KEY_CATEGORY = "06｜鍵管理"
 KEY_ACTION_CHANNEL = "鍵を操作"
@@ -171,6 +178,10 @@ class KeyManagementStore:
                 );
                 CREATE INDEX IF NOT EXISTS key_requests_pending
                     ON key_requests(guild_id, status, created_at DESC);
+                CREATE TABLE IF NOT EXISTS key_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    status_message_id INTEGER
+                );
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(key_events)")}
@@ -467,6 +478,24 @@ class KeyManagementStore:
                 (_iso(at), event_id),
             )
 
+    def get_status_message_id(self, guild_id: int) -> int | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT status_message_id FROM key_settings WHERE guild_id=?",
+                (guild_id,),
+            ).fetchone()
+        return int(row["status_message_id"]) if row and row["status_message_id"] else None
+
+    def set_status_message_id(self, guild_id: int, message_id: int) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO key_settings (guild_id, status_message_id) VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET status_message_id=excluded.status_message_id
+                """,
+                (guild_id, message_id),
+            )
+
     def due_reminders(
         self,
         *,
@@ -596,33 +625,34 @@ def _selected_key_embed(guild: discord.Guild, key_name: str, store: KeyManagemen
     return embed
 
 
-class KeySelect(discord.ui.Select):
-    def __init__(self):
+class KeyButton(discord.ui.Button):
+    def __init__(self, key_name: str):
         super().__init__(
-            placeholder="操作する鍵を選択",
-            min_values=1,
-            max_values=1,
-            custom_id="yagapon:key:select:v1",
-            options=[discord.SelectOption(label=name, value=name, emoji="🔑") for name in KEY_NAMES],
+            label=key_name,
+            emoji="🔑",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id=f"yagapon:key:select:{KEY_BUTTON_IDS[key_name]}:v1",
         )
+        self.key_name = key_name
 
     async def callback(self, interaction: discord.Interaction):
         manager = getattr(interaction.client, "key_management", None)
         if not manager or not interaction.guild:
             await _respond_ephemeral(interaction, content="鍵管理を利用できないぽん。管理者へ連絡してほしいぽん。")
             return
-        key_name = self.values[0]
         await _respond_ephemeral(
             interaction,
-            embed=_selected_key_embed(interaction.guild, key_name, manager.store),
-            view=KeyActionView(key_name),
+            embed=_selected_key_embed(interaction.guild, self.key_name, manager.store),
+            view=KeyActionView(self.key_name),
         )
 
 
 class KeyPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(KeySelect())
+        for key_name in KEY_NAMES:
+            self.add_item(KeyButton(key_name))
 
     @discord.ui.button(
         label="現在の所持状況",
@@ -710,9 +740,10 @@ class KeyRecipientSelect(discord.ui.Select):
                 target_member = await interaction.guild.fetch_member(target.id)
             except (discord.NotFound, discord.HTTPException):
                 target_member = None
-        if self.key_name == RESTRICTED_KEY and (
-            target_member is None or not can_use_restricted_key(target_member)
-        ):
+        if target_member is None:
+            await _respond_ephemeral(interaction, content="受取人がこのサーバーのメンバーか確認できなかったぽん。")
+            return
+        if self.key_name == RESTRICTED_KEY and not can_use_restricted_key(target_member):
             await interaction.response.send_modal(RestrictedKeyReasonModal("transfer", target_id=target.id))
             return
         await manager.perform_action(interaction, self.key_name, "transfer", target_id=target.id)
@@ -955,7 +986,14 @@ class KeyManagementManager:
                 timestamp=_now(),
             )
             notice.add_field(name="操作", value=ACTION_LABELS[action])
-            await report_channel.send(embed=notice, silent=True)
+            try:
+                await report_channel.send(embed=notice, silent=True)
+            except discord.HTTPException:
+                log.warning(
+                    "209 request public notice failed guild=%s request=%s",
+                    guild.id,
+                    request.id,
+                )
         await _respond_ephemeral(
             interaction,
             content=f"📨 209の **{ACTION_LABELS[action]}** を申請したぽん。承認されるまで実物の鍵は受け取らないでほしいぽん。",
@@ -1052,12 +1090,25 @@ class KeyManagementManager:
         if not channel:
             return
         message = None
-        async for candidate in channel.history(limit=100):
-            if candidate.author.id == guild.me.id and KEY_STATUS_MARKER in (candidate.content or ""):
-                message = candidate
-                break
+        message_id = await asyncio.to_thread(self.store.get_status_message_id, guild.id)
+        if message_id:
+            try:
+                message = await channel.fetch_message(message_id)
+            except discord.NotFound:
+                message = None
+        if message is None:
+            for candidate in await channel.pins():
+                if candidate.author.id == guild.me.id and KEY_STATUS_MARKER in (candidate.content or ""):
+                    message = candidate
+                    break
+        if message is None:
+            async for candidate in channel.history(limit=100):
+                if candidate.author.id == guild.me.id and KEY_STATUS_MARKER in (candidate.content or ""):
+                    message = candidate
+                    break
         embed = key_status_embed(guild, self.store)
         if message:
+            await asyncio.to_thread(self.store.set_status_message_id, guild.id, message.id)
             await message.edit(content=f"`{KEY_STATUS_MARKER}`", embed=embed)
             if not message.pinned:
                 try:
@@ -1066,6 +1117,7 @@ class KeyManagementManager:
                     log.warning("Could not pin key status guild=%s message=%s", guild.id, message.id)
         else:
             message = await channel.send(content=f"`{KEY_STATUS_MARKER}`", embed=embed, silent=True)
+            await asyncio.to_thread(self.store.set_status_message_id, guild.id, message.id)
             try:
                 await message.pin(reason="鍵の現在状況")
             except discord.HTTPException:
