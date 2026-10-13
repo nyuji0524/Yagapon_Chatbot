@@ -592,10 +592,12 @@ class CorpusManager:
                 ),
             )
             log_usage(log, "rag_query", model, response)
-            answer = (response.text or "").strip() or "回答を生成できなかったぽん..."
+            raw_answer = (response.text or "").strip()
+            answer = raw_answer or "回答を生成できなかったぽん..."
+            has_answer = bool(raw_answer)
             sources = self._response_sources(response)
             sources.extend(self._lexical_sources(lexical_hits, sources))
-            if lexical_hits and answer_declares_missing_knowledge(answer):
+            if lexical_hits and (not has_answer or answer_declares_missing_knowledge(answer)):
                 recovered_answer = await self._recover_from_lexical_hits(
                     question=question,
                     system_instruction=system,
@@ -603,11 +605,12 @@ class CorpusManager:
                 )
                 if recovered_answer and not answer_declares_missing_knowledge(recovered_answer):
                     answer = recovered_answer
+                    has_answer = True
                     # The recovery pass has no File Search tool. Its answer is
                     # grounded only in the exact-match excerpts, so do not keep
                     # unrelated semantic-search citations from the first pass.
                     sources = self._lexical_sources(lexical_hits, [])
-            no_answer = not sources or answer_declares_missing_knowledge(answer)
+            no_answer = not sources or not has_answer or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"

@@ -265,7 +265,7 @@ async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpu
         ],
     )
     first_response = SimpleNamespace(
-        text="具体的な活動の記録は確認できなかったぽん。",
+        text="  \n",
         usage_metadata=None,
         candidates=[],
     )
