@@ -23,6 +23,8 @@ from bot.commands.committee_server import (
     _is_keio_email,
     _liaison_guide_embed,
     _overwrite_signature,
+    _position_role_names,
+    _position_role_summary,
     _post_once,
     _replace_role_group,
     _roles_after_position_approval,
@@ -123,6 +125,20 @@ def test_officer_approval_preserves_project_leader_and_replaces_officer_title():
     )
 
     assert {role.name for role in roles} == {"企画長", "役員", "局長"}
+
+
+def test_position_role_summary_is_stable_for_combined_roles_and_empty_input():
+    roles = [
+        SimpleNamespace(name="企画長"),
+        SimpleNamespace(name="IT局"),
+        SimpleNamespace(name="役員"),
+        SimpleNamespace(name="局長"),
+    ]
+
+    assert _position_role_names(roles) == ["局長", "企画長", "役員"]
+    assert _position_role_summary(roles) == "局長, 企画長, 役員"
+    assert _position_role_names([]) == []
+    assert _position_role_summary([]) == "一般委員"
 
 
 @pytest.mark.asyncio

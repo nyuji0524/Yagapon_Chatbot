@@ -107,6 +107,18 @@ def _position_role_summary(roles: Iterable[discord.Role]) -> str:
     return ", ".join(_position_role_names(roles)) or "一般委員"
 
 
+def _has_completed_registration(config, guild_id: int, member, member_role) -> bool:
+    registration = config.get_member(guild_id, member.id)
+    return bool(
+        member_role
+        and member_role in member.roles
+        and registration
+        and registration.get("email")
+        and registration.get("bureau")
+        and registration.get("grade")
+    )
+
+
 def _roles_after_position_approval(
     roles: Iterable[discord.Role],
     approved_role: discord.Role,
@@ -372,14 +384,12 @@ async def _submit_position_request(
         await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
         return
     member_role = _find_named(guild.roles, MEMBER_ROLE)
-    registration = interaction.client.config.get_member(guild.id, member.id)
-    registration_complete = bool(
-        registration
-        and registration.get("email")
-        and registration.get("bureau")
-        and registration.get("grade")
-    )
-    if member_role is None or member_role not in member.roles or not registration_complete:
+    if not _has_completed_registration(
+        interaction.client.config,
+        guild.id,
+        member,
+        member_role,
+    ):
         await _respond_ephemeral(interaction, "先に所属局・学年・慶應メールの登録を完了してほしいぽん。")
         return
     if role in member.roles:
@@ -1405,15 +1415,19 @@ def register(bot):
             *POSITION_ROLES,
             *_role_names(BUREAU_ROLES),
         }
-        hierarchy_conflicts = [
-            role.name
-            for role in ctx.guild.roles
-            if role.name in managed_role_names and not me.top_role > role
-        ]
+        hierarchy_conflicts = list(
+            dict.fromkeys(
+                role.name
+                for role in ctx.guild.roles
+                if role.name in managed_role_names and not me.top_role > role
+            )
+        )
         if hierarchy_conflicts:
+            omitted = len(hierarchy_conflicts) - 8
+            omitted_label = f"（他 {omitted} 件）" if omitted > 0 else ""
             await ctx.respond(
                 "やがぽんのロールを、委員長・執行部・各局などすべての管理対象ロールより上に移動してほしいぽん。"
-                f" 現在管理できないロール: {', '.join(hierarchy_conflicts[:8])}",
+                f" 現在管理できないロール: {', '.join(hierarchy_conflicts[:8])}{omitted_label}",
                 ephemeral=True,
             )
             return
@@ -1490,14 +1504,7 @@ def register(bot):
         if not guild or not isinstance(member, discord.Member):
             await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
             return
-        registration = bot.config.get_member(guild.id, member.id)
-        registration_complete = bool(
-            registration
-            and registration.get("email")
-            and registration.get("bureau")
-            and registration.get("grade")
-        )
-        if member_role is None or member_role not in member.roles or not registration_complete:
+        if not _has_completed_registration(bot.config, guild.id, member, member_role):
             await ctx.respond(
                 "先にロール選択パネルから所属局・学年・慶應メールの登録を完了してほしいぽん。",
                 ephemeral=True,
