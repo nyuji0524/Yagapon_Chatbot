@@ -136,6 +136,9 @@ SYSTEM_INSTRUCTION = (
     "- 会話の文脈（前後の発言の流れ）を考慮して、発言の意図を正しく読み取るぽん。\n"
     "- 検索結果から得た情報を統合し、全体像を把握してから回答するぽん。\n"
     "- 現在の状態を聞かれた場合は、日付が新しい根拠を優先し、古い記録と矛盾する場合は更新時期も説明するぽん。\n"
+    "- 権限・認可・運用状態を聞かれた場合は、提案や検討中の会話より、確定・本番・実装済み・デプロイ済みと明示された新しい記録を優先するぽん。\n"
+    "- 権限の回答では、全体管理権限と企画・組織単位の操作権限を混同せず、根拠に書かれた範囲だけを説明するぽん。\n"
+    "- 根拠同士が矛盾し、どれが最終状態か判断できない場合は、断定せず確認が必要だと伝えるぽん。\n"
     "- 出典にない日付・担当者・決定事項を補完してはいけないぽん。"
 )
 
@@ -639,7 +642,11 @@ class CorpusManager:
             raw_answer = (response.text or "").strip()
             answer = raw_answer or "回答を生成できなかったぽん..."
             has_answer = bool(raw_answer)
-            sources = self._response_sources(response)
+            # File Search metadata filtering stays disabled while legacy documents are
+            # being migrated.  Enforce the requested festival again on the returned
+            # evidence so an answer can never be presented with citations from a
+            # different year.
+            sources = self._response_sources(response, expected_festival=festival)
             sources.extend(self._lexical_sources(lexical_hits, sources))
             if lexical_hits and (not has_answer or answer_declares_missing_knowledge(answer)):
                 recovered_answer = await self._recover_from_lexical_hits(
@@ -660,6 +667,10 @@ class CorpusManager:
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
                     "年度や用語を変えて質問するか、資料を追加してほしいぽん。"
                 )
+                # Tangential File Search chunks must not make a no-answer response
+                # look grounded.  They also make the feedback/evaluation record
+                # misleading, so omit them from both the response and trace.
+                sources = []
             if sources:
                 answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
             query_id = (
@@ -747,7 +758,13 @@ class CorpusManager:
         return rendered
 
     @classmethod
-    def _response_sources(cls, response, limit: int = 5) -> list[str]:
+    def _response_sources(
+        cls,
+        response,
+        limit: int = 5,
+        *,
+        expected_festival: int | None = None,
+    ) -> list[str]:
         """File Search grounding metadataをDiscord上で読める参照一覧へ変換する。"""
         candidates = getattr(response, "candidates", None) or []
         if not candidates:
@@ -764,6 +781,15 @@ class CorpusManager:
             channel = metadata.get("channel_name")
             start = str(metadata.get("start_at") or "")[:10]
             festival = metadata.get("festival")
+            if expected_festival is not None:
+                try:
+                    source_festival = int(float(festival))
+                except (TypeError, ValueError):
+                    # An unlabelled legacy document cannot safely support a
+                    # festival-specific answer.
+                    continue
+                if source_festival != expected_festival:
+                    continue
             status = metadata.get("status")
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)

@@ -273,7 +273,75 @@ async def test_query_marks_model_declared_missing_knowledge_as_no_answer(corpus_
     )
 
     assert result.no_answer is True
-    assert result.citations == ("#開発",)
+    assert result.citations == ()
+    assert "**参照**" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_query_rejects_evidence_from_a_different_festival(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    context = SimpleNamespace(
+        title="27thの役職記録",
+        uri=None,
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "引き継ぎ"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "status", "string_value": "raw"},
+        ],
+    )
+    response = SimpleNamespace(
+        text="28thのIT局長はAさんだぽん。",
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
+
+    result = await corpus_manager.query_with_trace(
+        "今年度のIT局長は誰ですか？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.festival == 28
+    assert result.no_answer is True
+    assert result.citations == ()
+    assert "Aさん" not in result.text
+
+
+def test_response_sources_keep_only_the_expected_festival(corpus_manager):
+    def chunk(festival):
+        return SimpleNamespace(
+            retrieved_context=SimpleNamespace(
+                title=f"{festival or 'legacy'} record",
+                uri=None,
+                custom_metadata=[
+                    {"key": "channel_name", "string_value": "記録"},
+                    *(
+                        [{"key": "festival", "numeric_value": festival}]
+                        if festival is not None
+                        else []
+                    ),
+                ],
+            )
+        )
+
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[chunk(27), chunk(None), chunk(28)]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response, expected_festival=28) == ["#記録 [28th]"]
 
 
 @pytest.mark.asyncio
