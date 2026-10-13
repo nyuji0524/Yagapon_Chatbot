@@ -229,7 +229,7 @@ class ConfigManager:
         vocabulary: list[str] = []
         seen: set[str] = set()
         for term, entry in self.get_glossary(guild_id).items():
-            values = [term, entry.get("reading", ""), *entry.get("aliases", [])]
+            values = [term, entry.get("reading", ""), *(entry.get("aliases") or [])]
             for value in values:
                 cleaned = str(value).strip()
                 normalized = cleaned.casefold()

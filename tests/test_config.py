@@ -58,6 +58,10 @@ def test_glossary_vocabulary_contains_terms_readings_and_aliases(tmp_path):
             "definition": "運営アプリ",
             "aliases": ["Yaga Support"],
         },
+        "IT局": {
+            "definition": "実行委員会のIT担当局",
+            "aliases": None,
+        },
     }
 
     assert config.get_glossary_vocabulary(1) == [
@@ -66,6 +70,7 @@ def test_glossary_vocabulary_contains_terms_readings_and_aliases(tmp_path):
         "矢実",
         "やがサポ",
         "Yaga Support",
+        "IT局",
     ]
 
 

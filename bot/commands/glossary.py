@@ -14,6 +14,13 @@ from knowledge_catalog.models import CatalogPatch
 from knowledge_catalog.store import CatalogConflictError, CatalogNotFoundError, normalize_label
 
 
+async def _respond_embed_pages(ctx: discord.ApplicationContext, embeds: list[discord.Embed]) -> None:
+    """Send one embed per ephemeral message to stay below Discord's message cap."""
+    await ctx.respond(embed=embeds[0], ephemeral=True)
+    for embed in embeds[1:]:
+        await ctx.followup.send(embed=embed, ephemeral=True)
+
+
 def register(bot):
     group = bot.create_group("glossary", "語録辞書だぽん！")
 
@@ -57,23 +64,25 @@ def register(bot):
 
         embeds = []
         items = sorted(glossary.items())
-        for page_start in range(0, len(items), 25):
+        # Five bounded fields keep each individual embed comfortably below
+        # Discord's 6,000-character aggregate embed limit.
+        for page_start in range(0, len(items), 5):
             embed = discord.Embed(
                 title="📖 語録辞書",
                 description=f"登録済み {len(items)}件",
                 color=discord.Color.green(),
             )
-            for term, entry in items[page_start:page_start + 25]:
+            for term, entry in items[page_start:page_start + 5]:
                 reading = entry.get("reading", "")
                 title = f"{term}（{reading}）" if reading else term
                 desc = entry["definition"]
-                aliases = entry.get("aliases", [])
+                aliases = entry.get("aliases") or []
                 if aliases:
                     desc += f"\n_別名: {', '.join(aliases)}_"
-                embed.add_field(name=title, value=desc[:1024], inline=False)
+                embed.add_field(name=title[:256], value=desc[:700], inline=False)
             embeds.append(embed)
 
-        await ctx.respond(embeds=embeds[:10], silent=True)
+        await _respond_embed_pages(ctx, embeds)
 
     @group.command(name="candidates", description="文書から抽出した確認待ち用語を表示するぽん")
     async def glossary_candidates(ctx: discord.ApplicationContext):
@@ -106,7 +115,7 @@ def register(bot):
             for page in pages[:10]
         ]
         embeds[-1].set_footer(text="内容を確認して /glossary approve で正式登録")
-        await ctx.respond(embeds=embeds, ephemeral=True)
+        await _respond_embed_pages(ctx, embeds)
 
     @group.command(name="approve", description="確認待ち候補を語録へ正式登録するぽん")
     @discord.option("term", description="候補の用語（完全一致）")
