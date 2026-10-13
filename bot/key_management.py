@@ -497,8 +497,8 @@ class KeyManagementStore:
             )
 
 
-def _has_role(member: discord.Member, role_name: str) -> bool:
-    return any(role.name == role_name for role in member.roles)
+def _has_role(member: discord.Member | discord.User, role_name: str) -> bool:
+    return any(role.name == role_name for role in (getattr(member, "roles", None) or ()))
 
 
 def can_use_restricted_key(member: discord.Member) -> bool:
@@ -704,7 +704,15 @@ class KeyRecipientSelect(discord.ui.Select):
         if target.id == member.id:
             await _respond_ephemeral(interaction, content="自分以外の受取人を選んでほしいぽん。")
             return
-        if self.key_name == RESTRICTED_KEY and not can_use_restricted_key(target):
+        target_member = target if isinstance(target, discord.Member) else interaction.guild.get_member(target.id)
+        if target_member is None:
+            try:
+                target_member = await interaction.guild.fetch_member(target.id)
+            except (discord.NotFound, discord.HTTPException):
+                target_member = None
+        if self.key_name == RESTRICTED_KEY and (
+            target_member is None or not can_use_restricted_key(target_member)
+        ):
             await interaction.response.send_modal(RestrictedKeyReasonModal("transfer", target_id=target.id))
             return
         await manager.perform_action(interaction, self.key_name, "transfer", target_id=target.id)
@@ -894,6 +902,7 @@ class KeyManagementManager:
         if not guild:
             await _respond_ephemeral(interaction, content="サーバー内で操作してほしいぽん。")
             return
+        await interaction.response.defer(ephemeral=True)
         request_channel = self._named_text_channel(guild, KEY_REQUEST_CHANNEL)
         report_channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
         if not request_channel:
@@ -996,7 +1005,7 @@ class KeyManagementManager:
                     timestamp=_now(),
                 )
                 await channel.send(embed=rejected, silent=True)
-        target = guild.get_member(request.requester_id) if guild else None
+        target = await self._resolve_user(guild, request.requester_id) if guild else None
         if target:
             try:
                 await target.send(
@@ -1051,10 +1060,33 @@ class KeyManagementManager:
         if message:
             await message.edit(content=f"`{KEY_STATUS_MARKER}`", embed=embed)
             if not message.pinned:
-                await message.pin(reason="鍵の現在状況")
+                try:
+                    await message.pin(reason="鍵の現在状況")
+                except discord.HTTPException:
+                    log.warning("Could not pin key status guild=%s message=%s", guild.id, message.id)
         else:
             message = await channel.send(content=f"`{KEY_STATUS_MARKER}`", embed=embed, silent=True)
-            await message.pin(reason="鍵の現在状況")
+            try:
+                await message.pin(reason="鍵の現在状況")
+            except discord.HTTPException:
+                log.warning("Could not pin key status guild=%s message=%s", guild.id, message.id)
+
+    async def _resolve_user(self, guild: discord.Guild, user_id: int):
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except discord.NotFound:
+            try:
+                return await self.bot.fetch_user(user_id)
+            except (discord.NotFound, discord.HTTPException):
+                return None
+        except discord.HTTPException:
+            try:
+                return await self.bot.fetch_user(user_id)
+            except (discord.NotFound, discord.HTTPException):
+                return None
 
     async def run_reminders(self) -> None:
         await self.retry_unreported_events()
@@ -1067,14 +1099,16 @@ class KeyManagementManager:
             guild = self.bot.get_guild(holding.guild_id)
             if not guild:
                 continue
-            member = guild.get_member(holding.holder_id)
+            member = await self._resolve_user(guild, holding.holder_id)
             report_channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
+            notified = False
             if member:
                 try:
                     await member.send(
                         f"🔑 **{holding.key_name}** をまだ所持している記録になっているぽん。\n"
                         "返却済みなら「しめ」、別の人へ渡したなら「さしかえ」を記録してほしいぽん。"
                     )
+                    notified = True
                 except discord.HTTPException:
                     pass
             if report_channel:
@@ -1089,8 +1123,17 @@ class KeyManagementManager:
                     value="返却済みなら **しめ**、別の委員へ渡したなら **さしかえ** を記録してください。",
                     inline=False,
                 )
-                await report_channel.send(embed=embed, silent=True)
-            await asyncio.to_thread(self.store.mark_reminded, holding.guild_id, holding.key_name)
+                try:
+                    await report_channel.send(embed=embed, silent=True)
+                    notified = True
+                except discord.HTTPException:
+                    log.warning(
+                        "Key reminder report failed guild=%s key=%s",
+                        holding.guild_id,
+                        holding.key_name,
+                    )
+            if notified:
+                await asyncio.to_thread(self.store.mark_reminded, holding.guild_id, holding.key_name)
 
     async def retry_unreported_events(self) -> None:
         events = await asyncio.to_thread(self.store.list_unreported_events)

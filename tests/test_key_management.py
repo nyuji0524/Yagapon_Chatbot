@@ -31,6 +31,8 @@ def test_restricted_key_uses_profile_roles_and_records_approver_roles():
     assert can_approve_restricted_key(_member("渉外局"))
     assert can_approve_restricted_key(_member("執行部"))
     assert not can_approve_restricted_key(_member("一般委員"))
+    user_without_roles = SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False))
+    assert not can_use_restricted_key(user_without_roles)
 
 
 @pytest.mark.asyncio
