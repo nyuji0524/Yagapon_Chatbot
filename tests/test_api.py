@@ -25,6 +25,9 @@ class FakeConfig:
     def get_backfill_cursor(self, guild_id, channel_id):
         return None
 
+    def has_backfill_cursors(self, guild_id):
+        return False
+
     async def set_backfill_cursor(self, guild_id, channel_id, message_id, message_at):
         return None
 
@@ -156,6 +159,7 @@ def test_backfill_exposes_job_progress(monkeypatch):
 
     assert status.status_code == 200
     assert status.json()["status"] == "completed"
+    assert status.json()["channel_concurrency"] == 1
     assert status.json()["messages_indexed"] == 2
     assert status.json()["documents_uploaded"] == 1
     bot.corpus.finish_backfill.assert_called_once_with(1)

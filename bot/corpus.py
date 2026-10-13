@@ -38,6 +38,35 @@ JST = ZoneInfo("Asia/Tokyo")
 
 # レート制限
 DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
+BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
+BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
+
+
+def backfill_channel_concurrency() -> int:
+    """Return a bounded channel worker count safe for Discord and File Search."""
+    raw = os.environ.get("YAGAPON_BACKFILL_CONCURRENCY", str(BACKFILL_CHANNEL_CONCURRENCY_DEFAULT))
+    try:
+        configured = int(raw)
+    except ValueError:
+        log.warning(
+            "Invalid YAGAPON_BACKFILL_CONCURRENCY=%r; using %s",
+            raw,
+            BACKFILL_CHANNEL_CONCURRENCY_DEFAULT,
+        )
+        configured = BACKFILL_CHANNEL_CONCURRENCY_DEFAULT
+    return max(1, min(configured, BACKFILL_CHANNEL_CONCURRENCY_MAX))
+
+
+async def run_backfill_channels(channels, worker, concurrency: int | None = None):
+    """Run one worker per channel with bounded concurrency and cancellation propagation."""
+    limit = concurrency if concurrency is not None else backfill_channel_concurrency()
+    semaphore = asyncio.Semaphore(max(1, min(limit, BACKFILL_CHANNEL_CONCURRENCY_MAX)))
+
+    async def run_one(channel):
+        async with semaphore:
+            return await worker(channel)
+
+    return await asyncio.gather(*(run_one(channel) for channel in channels))
 
 
 def festival_filter_enabled() -> bool:
@@ -61,6 +90,21 @@ def calculate_incremental_after(cursor: dict | None, now: datetime | None = None
     if cursor_at is not None:
         local -= timedelta(days=1)
     return local.astimezone(timezone.utc)
+
+
+def calculate_resumable_incremental_after(
+    config,
+    guild_id: int,
+    channel_id: int,
+    now: datetime | None = None,
+) -> datetime | None:
+    """途中停止した取り込みでは、未完了チャンネルだけ全履歴から再開する。"""
+    cursor = config.get_backfill_cursor(guild_id, channel_id)
+    if cursor:
+        return calculate_incremental_after(cursor, now=now)
+    if config.has_backfill_cursors(guild_id):
+        return None
+    return calculate_incremental_after(None, now=now)
 
 
 SYSTEM_INSTRUCTION = (
@@ -982,7 +1026,13 @@ class CorpusManager:
             result.latest_message_id = knowledge_message.message_id
             result.latest_message_at = knowledge_message.timestamp
             if progress_callback and result.messages_seen % 500 == 0:
-                await progress_callback(result.messages_seen)
+                try:
+                    await progress_callback(result.messages_seen)
+                except Exception as exc:
+                    # Discord interaction webhooks expire during long backfills. A
+                    # display-only failure must never abort indexing or replacement.
+                    log.warning("Backfill progress callback disabled after failure: %s", exc)
+                    progress_callback = None
 
         documents = self._build_knowledge_documents(channel, messages)
         if dry_run:

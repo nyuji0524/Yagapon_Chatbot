@@ -99,6 +99,10 @@ class ConfigManager:
         cursor = self._guild(guild_id).get("backfill_cursors", {}).get(str(channel_id))
         return dict(cursor) if cursor else None
 
+    def has_backfill_cursors(self, guild_id: int) -> bool:
+        """サーバー内で少なくとも1チャンネルの履歴取り込みが完了済みか返す。"""
+        return bool(self._guild(guild_id).get("backfill_cursors"))
+
     async def set_backfill_cursor(
         self,
         guild_id: int,
@@ -218,6 +222,26 @@ class ConfigManager:
                 parts.append(f"別名:{', '.join(aliases)}")
             lines.append(f"- {' / '.join(parts)}: {entry['definition']}")
         return "\n".join(lines)
+
+    def get_glossary_vocabulary(self, guild_id: int) -> list[str]:
+        """Return canonical terms, readings, and aliases for speech recognition.
+
+        ``custom_vocabulary`` is most useful for the exact surface forms which
+        may occur in audio.  Passing only the dictionary keys meant that a
+        registered reading or common nickname never reached STT.
+        """
+        vocabulary: list[str] = []
+        seen: set[str] = set()
+        for term, entry in self.get_glossary(guild_id).items():
+            values = [term, entry.get("reading", ""), *(entry.get("aliases") or [])]
+            for value in values:
+                cleaned = str(value).strip()
+                normalized = cleaned.casefold()
+                if not cleaned or normalized in seen:
+                    continue
+                seen.add(normalized)
+                vocabulary.append(cleaned)
+        return vocabulary
 
     async def set_glossary(self, guild_id: int, glossary: dict):
         self._guild(guild_id)["glossary"] = glossary

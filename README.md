@@ -16,13 +16,16 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 ### ボイスチャンネル
 - **3つのモード**: listen（聞き専）/ meeting（参加者）/ chat（おしゃべり）
 - **音声録音 & 文字起こし**: pycord + Gemini Audio APIで自動文字起こし
+- **Discord確定話者ラベル**: ユーザー別受信トラックをサーバー表示名へ確実に紐付け
+- **終了後の全体再処理**: `/leave`時に録音先頭から再文字起こしし、成功時だけ途中結果を置換
 - **リアルタイム応答**: meeting/chatモードでは会話に参加（15秒間隔）
 - **TTS読み上げ**: edge-tts（ja-JP-NanamiNeural）でVCに音声出力
 - **議事録自動生成**: `/leave`時にGeminiで構造化議事録を作成 → Google Docsに保存
 
 ### 声紋による話者識別
 - `/voiceprint register` でVCから10秒間の登録音声を取得し、音質を検証
-- listenモードと `/minutes` では登録音声を会議音声と照合
+- `/minutes` でアップロードした対面・混合音声を登録音声と照合
+- Discord VCの録音は受信トラックのuser_idを確定情報として使い、声紋推定を行わない
 - 十分一致した登録者だけ名前を表示し、未一致話者は `Speaker N` のまま保持
 - 声紋照合は確率的なため、公開前に人が話者ラベルを確認
 
@@ -48,6 +51,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 
 ### 語録辞書
 - `/glossary bulk` で一括登録（CSV形式 / →形式）
+- `/glossary candidates` で文書抽出候補を確認し、`/glossary approve` で正式登録
 - ひらがな読み・別名に対応
 - RAG回答・音声文字起こし・議事録の精度向上に活用
 
@@ -97,6 +101,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/voiceprint delete [@user]` | 声紋を削除 |
 | `/glossary add <term> <def> [reading] [aliases]` | 語録に追加 |
 | `/glossary bulk` | 語録を一括登録 |
+| `/glossary candidates` | 文書から抽出した確認待ち用語を表示 |
+| `/glossary approve <term>` | 候補を確認済み語録として登録 |
 | `/glossary list` | 語録一覧 |
 | `/glossary delete <term>` | 語録から削除 |
 | `/corpus delete` | コーパスを完全削除 |
@@ -162,6 +168,7 @@ YAGAPON_TRANSCRIBE_MODEL=gemini-3.5-transcribe
 YAGAPON_TRANSCRIBE_FALLBACK_MODEL=gemini-3.8-flash
 YAGAPON_AUDIO_MODEL=gemini-3.8-flash
 YAGAPON_DAILY_QUERY_LIMIT=400
+YAGAPON_BACKFILL_CONCURRENCY=3
 YAGAPON_RAG_DB_PATH=/data/rag.sqlite3
 YAGAPON_KEY_DB_PATH=/data/key-management.sqlite3
 YAGAPON_KEY_REMINDER_HOURS=8
