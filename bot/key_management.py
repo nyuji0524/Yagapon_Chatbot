@@ -1052,6 +1052,16 @@ class KeyManagementManager:
                 )
             except discord.HTTPException:
                 pass
+        if approve and request.action == "transfer" and request.target_id and guild:
+            recipient = await self._resolve_user(guild, request.target_id)
+            if recipient:
+                try:
+                    await recipient.send(
+                        f"🔑 **{RESTRICTED_KEY}** のさしかえが承認され、あなたが現在の所持者として記録されたぽん。\n"
+                        "返却したら **しめ**、別の委員へ渡したら **さしかえ** を記録してほしいぽん。"
+                    )
+                except discord.HTTPException:
+                    pass
 
     async def _publish_event(self, guild: discord.Guild, event: KeyEvent) -> None:
         channel = self._named_text_channel(guild, KEY_REPORT_CHANNEL)
@@ -1097,13 +1107,15 @@ class KeyManagementManager:
             except discord.NotFound:
                 message = None
         if message is None:
+            bot_user_id = getattr(guild.me, "id", None) or getattr(self.bot.user, "id", None)
             for candidate in await channel.pins():
-                if candidate.author.id == guild.me.id and KEY_STATUS_MARKER in (candidate.content or ""):
+                if candidate.author.id == bot_user_id and KEY_STATUS_MARKER in (candidate.content or ""):
                     message = candidate
                     break
         if message is None:
+            bot_user_id = getattr(guild.me, "id", None) or getattr(self.bot.user, "id", None)
             async for candidate in channel.history(limit=100):
-                if candidate.author.id == guild.me.id and KEY_STATUS_MARKER in (candidate.content or ""):
+                if candidate.author.id == bot_user_id and KEY_STATUS_MARKER in (candidate.content or ""):
                     message = candidate
                     break
         embed = key_status_embed(guild, self.store)
@@ -1211,8 +1223,3 @@ class KeyManagementManager:
             except Exception:
                 log.exception("Key reminder loop failed")
             await asyncio.sleep(15 * 60)
-
-
-def register_persistent_views(bot) -> None:
-    bot.add_view(KeyPanelView())
-    bot.add_view(RestrictedKeyApprovalView())
