@@ -41,6 +41,8 @@ class LexicalHit:
     source_url: str
     excerpt: str
     score: int
+    authority: str = ""
+    status: str = ""
 
 
 class RagStore:
@@ -170,6 +172,11 @@ class RagStore:
                 remote_names,
             )
 
+    def delete_source_documents(self, source_type: str):
+        """Replace a code-shipped source without touching synced Knowledge documents."""
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM documents WHERE source_type = ?", (source_type,))
+
     @staticmethod
     def query_terms(question: str, glossary: dict | None = None) -> list[str]:
         terms = []
@@ -220,7 +227,9 @@ class RagStore:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
         if not clean_terms:
             return []
-        conditions = ["guild_id = ?"]
+        # guild_id=0 is reserved for reviewed references shipped with the bot.
+        # Those records are safe to share across configured guilds.
+        conditions = ["(guild_id = ? OR guild_id = 0)"]
         params: list[object] = [guild_id]
         if festival is not None:
             conditions.append("festival = ?")
@@ -258,6 +267,8 @@ class RagStore:
                 source_url=row["source_url"] or "",
                 excerpt=excerpt,
                 score=matched_terms * 100 + authority_bonus + status_bonus,
+                authority=row["authority"] or "",
+                status=row["status"] or "",
             ))
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[:limit]

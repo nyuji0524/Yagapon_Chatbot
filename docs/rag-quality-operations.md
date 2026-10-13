@@ -39,6 +39,13 @@ Discordの会話は`status=raw`、`authority=conversation`とする。Knowledge�
 `active,historical,approved,verified,current`を自動索引し、`authority=curated`として完全一致検索で
 会話記録より優先する。draftやneeds-reviewを回答根拠へ自動昇格させない。
 
+Bot自身の保存仕様など、コードと一緒に更新すべき少量の確定事項は
+`bot/trusted_knowledge.json`へ出典URL付きで収録する。起動時に`guild_id=0`の
+`builtin_reference`としてローカル索引を置換し、全Guildから参照できる。
+`authority=curated`かつ承認済み状態の完全一致候補がある場合は、Discord会話の
+意味検索結果をそのまま採用せず、その原文だけを使った回答生成を優先する。
+会議記録や一般的な委員会知識をここへ増やさず、Knowledgeリポジトリを正本とする。
+
 ## 検索と回答
 
 1. Gemini File Searchで意味検索を行う。

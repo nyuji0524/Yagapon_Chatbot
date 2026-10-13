@@ -79,6 +79,24 @@ def test_exact_search_reranks_curated_documents(tmp_path):
 
     assert [hit.document_key for hit in hits] == ["curated", "raw"]
     assert hits[0].score > hits[1].score
+    assert hits[0].authority == "curated"
+    assert hits[0].status == "approved"
+
+
+def test_exact_search_includes_global_trusted_documents(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    global_metadata = [
+        {"key": "guild_id", "numeric_value": 0},
+        {"key": "document_key", "string_value": "builtin:drive"},
+        {"key": "channel_name", "string_value": "Bot運用仕様"},
+        {"key": "authority", "string_value": "curated"},
+        {"key": "status", "string_value": "current"},
+    ]
+    store.upsert_document("builtin://drive", "文字起こしは専用フォルダへ保存する", global_metadata)
+
+    hits = store.search_exact(999, ["文字起こし"])
+
+    assert [hit.document_key for hit in hits] == ["builtin:drive"]
 
 
 def test_query_terms_extracts_japanese_subjects_from_natural_questions():
