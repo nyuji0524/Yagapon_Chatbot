@@ -292,6 +292,62 @@ async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpu
     assert calls[1].kwargs["config"].tools is None
 
 
+@pytest.mark.asyncio
+async def test_query_keeps_no_answer_when_exact_excerpts_are_insufficient(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    corpus_manager.rag_store.upsert_document(
+        "documents/drive",
+        "Google Driveという単語だけが残っているが、保存先の記録はない。",
+        [
+            {"key": "document_key", "string_value": "drive"},
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "channel_name", "string_value": "雑談"},
+        ],
+    )
+    missing_response = SimpleNamespace(
+        text="その件に関する情報は、今のボクの記憶には見当たらないぽん。",
+        usage_metadata=None,
+        candidates=[],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[missing_response, missing_response]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "Google Drive上の保存先を教えてください",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert "裏付ける記録" in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_lexical_recovery_ignores_blank_response_and_api_failure(corpus_manager):
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(text="  \n", usage_metadata=None)
+    )
+    blank = await corpus_manager._recover_from_lexical_hits(
+        question="質問",
+        system_instruction="指示",
+        model="gemini-test",
+    )
+
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("temporary failure")
+    )
+    failed = await corpus_manager._recover_from_lexical_hits(
+        question="質問",
+        system_instruction="指示",
+        model="gemini-test",
+    )
+
+    assert blank is None
+    assert failed is None
+
+
 def test_incremental_boundary_is_previous_jst_midnight():
     cursor = {"message_at": "2026-10-05T15:30:00+00:00"}
 

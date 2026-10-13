@@ -592,7 +592,7 @@ class CorpusManager:
                 ),
             )
             log_usage(log, "rag_query", model, response)
-            answer = response.text or "回答を生成できなかったぽん..."
+            answer = (response.text or "").strip() or "回答を生成できなかったぽん..."
             sources = self._response_sources(response)
             sources.extend(self._lexical_sources(lexical_hits, sources))
             if lexical_hits and answer_declares_missing_knowledge(answer):
@@ -672,7 +672,7 @@ class CorpusManager:
                 ),
             )
             log_usage(log, "rag_lexical_recovery", model, response)
-            return response.text or None
+            return (response.text or "").strip() or None
         except Exception as exc:
             log.warning("Lexical RAG recovery failed: %s", exc)
             return None
