@@ -98,7 +98,7 @@ SYSTEM_INSTRUCTION = (
 
 def answer_declares_missing_knowledge(answer: str) -> bool:
     """Detect a model-declared no-answer even when File Search returned tangential sources."""
-    opening = answer.split("\n\n", 1)[0]
+    opening = answer[:500]
     patterns = (
         r"(?:情報|記録|根拠|記憶).{0,40}(?:見当たらない|見つけられない|確認できなかった|確認できない)",
         r"(?:見当たらない|見つけられない|確認できなかった).{0,30}(?:情報|記録|根拠|記憶)",

@@ -199,10 +199,11 @@ def test_response_sources_deduplicates_discord_links(corpus_manager):
     assert corpus_manager._response_sources(response) == ["[#開発（2026-10-05）](https://discord.com/channels/1/2/3)"]
 
 
-def test_answer_declares_missing_knowledge_only_checks_the_opening():
+def test_answer_declares_missing_knowledge_checks_the_opening_section():
     assert answer_declares_missing_knowledge("具体的な保存場所の情報は、今のボクの記憶には見当たらないぽん。")
     assert answer_declares_missing_knowledge("該当する記録は確認できなかったぽん。\n\n周辺情報はあるぽん。")
-    assert not answer_declares_missing_knowledge("記録を確認できたぽん。\n\n古い資料には『見当たらない』と書かれていたぽん。")
+    assert answer_declares_missing_knowledge("確認するぽん！\n\n該当する記録は確認できなかったぽん。")
+    assert not answer_declares_missing_knowledge("回答だぽん。" + "x" * 500 + "記録は確認できなかったぽん。")
 
 
 def test_lexical_sources_deduplicates_the_same_channel_label(corpus_manager):
