@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.security import require_api_token
-from bot.corpus import calculate_incremental_after
+from bot.corpus import calculate_resumable_incremental_after
 
 router = APIRouter()
 log = logging.getLogger("yagapon.api")
@@ -126,9 +126,12 @@ async def backfill(request: Request, body: BackfillRequest):
     async def run():
         try:
             for ch in channels:
-                cursor = bot.config.get_backfill_cursor(body.guild_id, ch.id)
                 if body.mode == "incremental":
-                    after = calculate_incremental_after(cursor)
+                    after = calculate_resumable_incremental_after(
+                        bot.config,
+                        body.guild_id,
+                        ch.id,
+                    )
                 else:
                     after = datetime.now(timezone.utc) - timedelta(days=body.days) if body.days else None
                 try:

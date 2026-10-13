@@ -63,6 +63,21 @@ def calculate_incremental_after(cursor: dict | None, now: datetime | None = None
     return local.astimezone(timezone.utc)
 
 
+def calculate_resumable_incremental_after(
+    config,
+    guild_id: int,
+    channel_id: int,
+    now: datetime | None = None,
+) -> datetime | None:
+    """途中停止した取り込みでは、未完了チャンネルだけ全履歴から再開する。"""
+    cursor = config.get_backfill_cursor(guild_id, channel_id)
+    if cursor:
+        return calculate_incremental_after(cursor, now=now)
+    if config.has_backfill_cursors(guild_id):
+        return None
+    return calculate_incremental_after(None, now=now)
+
+
 SYSTEM_INSTRUCTION = (
     "あなたは慶應義塾大学 矢上祭実行委員会の専属AI「おしゃべりやがぽん」だぽん。\n"
     "矢上祭は慶應義塾大学理工学部の学園祭で、実行委員会は複数の局（IT局、総務局、装飾局など）で構成されているぽん。\n\n"
@@ -982,7 +997,13 @@ class CorpusManager:
             result.latest_message_id = knowledge_message.message_id
             result.latest_message_at = knowledge_message.timestamp
             if progress_callback and result.messages_seen % 500 == 0:
-                await progress_callback(result.messages_seen)
+                try:
+                    await progress_callback(result.messages_seen)
+                except Exception as exc:
+                    # Discord interaction webhooks expire during long backfills. A
+                    # display-only failure must never abort indexing or replacement.
+                    log.warning("Backfill progress callback disabled after failure: %s", exc)
+                    progress_callback = None
 
         documents = self._build_knowledge_documents(channel, messages)
         if dry_run:

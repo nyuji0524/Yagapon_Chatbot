@@ -9,6 +9,7 @@ from bot.corpus import (
     CorpusManager,
     answer_declares_missing_knowledge,
     calculate_incremental_after,
+    calculate_resumable_incremental_after,
 )
 from bot.rag_store import RagStore
 
@@ -171,6 +172,27 @@ async def test_empty_backfill_does_not_delete_existing_knowledge(corpus_manager)
 
     assert result.messages_indexed == 0
     corpus_manager._delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_continues_when_progress_reporting_fails(corpus_manager):
+    messages = [fake_message(i + 1, content=f"決定事項 {i}") for i in range(500)]
+    for index, message in enumerate(messages):
+        message.created_at = datetime(2026, 10, 5, tzinfo=timezone.utc) + timedelta(minutes=index)
+    corpus_manager._existing_channel_documents = AsyncMock(return_value=[])
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+    corpus_manager._delete_documents = AsyncMock(return_value=0)
+    progress = AsyncMock(side_effect=RuntimeError("expired webhook"))
+
+    result = await corpus_manager.backfill_channel(
+        FakeChannel(messages),
+        "fileSearchStores/test",
+        progress_callback=progress,
+    )
+
+    assert result.messages_indexed == 500
+    assert result.documents_uploaded > 0
+    progress.assert_awaited_once_with(500)
 
 
 def test_response_sources_deduplicates_discord_links(corpus_manager):
@@ -352,6 +374,39 @@ def test_incremental_boundary_is_previous_jst_midnight():
     cursor = {"message_at": "2026-10-05T15:30:00+00:00"}
 
     assert calculate_incremental_after(cursor) == datetime(2026, 10, 4, 15, 0, tzinfo=timezone.utc)
+
+
+def test_resumable_incremental_uses_default_window_for_first_run():
+    config = SimpleNamespace(
+        get_backfill_cursor=lambda guild_id, channel_id: None,
+        has_backfill_cursors=lambda guild_id: False,
+    )
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+
+    assert calculate_resumable_incremental_after(config, 1, 2, now=now) == datetime(
+        2026, 9, 13, 15, 0, tzinfo=timezone.utc
+    )
+
+
+def test_resumable_incremental_reads_all_of_an_unfinished_channel():
+    config = SimpleNamespace(
+        get_backfill_cursor=lambda guild_id, channel_id: None,
+        has_backfill_cursors=lambda guild_id: True,
+    )
+
+    assert calculate_resumable_incremental_after(config, 1, 2) is None
+
+
+def test_resumable_incremental_uses_existing_channel_cursor():
+    cursor = {"message_at": "2026-10-05T15:30:00+00:00"}
+    config = SimpleNamespace(
+        get_backfill_cursor=lambda guild_id, channel_id: cursor,
+        has_backfill_cursors=lambda guild_id: True,
+    )
+
+    assert calculate_resumable_incremental_after(config, 1, 2) == datetime(
+        2026, 10, 4, 15, 0, tzinfo=timezone.utc
+    )
 
 
 def test_documents_do_not_cross_jst_date_boundary(corpus_manager):

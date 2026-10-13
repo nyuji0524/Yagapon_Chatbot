@@ -80,9 +80,13 @@ async def test_backfill_cursor_is_saved_and_reloaded(tmp_path):
     config = ConfigManager(path)
     message_at = datetime(2026, 10, 5, 1, 2, tzinfo=timezone.utc)
 
+    assert config.has_backfill_cursors(1) is False
+
     await config.set_backfill_cursor(1, 20, 999, message_at)
 
-    assert ConfigManager(path).get_backfill_cursor(1, 20) == {
+    reloaded = ConfigManager(path)
+    assert reloaded.has_backfill_cursors(1) is True
+    assert reloaded.get_backfill_cursor(1, 20) == {
         "message_id": "999",
         "message_at": message_at.isoformat(),
     }

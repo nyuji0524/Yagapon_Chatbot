@@ -99,6 +99,10 @@ class ConfigManager:
         cursor = self._guild(guild_id).get("backfill_cursors", {}).get(str(channel_id))
         return dict(cursor) if cursor else None
 
+    def has_backfill_cursors(self, guild_id: int) -> bool:
+        """サーバー内で少なくとも1チャンネルの履歴取り込みが完了済みか返す。"""
+        return bool(self._guild(guild_id).get("backfill_cursors"))
+
     async def set_backfill_cursor(
         self,
         guild_id: int,

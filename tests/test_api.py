@@ -25,6 +25,9 @@ class FakeConfig:
     def get_backfill_cursor(self, guild_id, channel_id):
         return None
 
+    def has_backfill_cursors(self, guild_id):
+        return False
+
     async def set_backfill_cursor(self, guild_id, channel_id, message_id, message_at):
         return None
 

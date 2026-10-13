@@ -6,13 +6,40 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 from bot.authorization import require_guild_admin
-from bot.corpus import calculate_incremental_after
+from bot.corpus import calculate_resumable_incremental_after
 
 log = logging.getLogger("yagapon.backfill")
 
 
-def _incremental_after(config, guild_id: int, channel_id: int) -> datetime:
-    return calculate_incremental_after(config.get_backfill_cursor(guild_id, channel_id))
+class BackfillStatus:
+    """長時間処理からDiscordの期限付きWebhookを切り離す進捗表示。"""
+
+    def __init__(self, channel, message=None):
+        self.channel = channel
+        self.message = message
+
+    async def update(self, content: str) -> bool:
+        if self.message is None:
+            return False
+        try:
+            await self.message.edit(content=content)
+            return True
+        except Exception as exc:
+            log.warning("Backfill status update disabled: %s", exc)
+            self.message = None
+            return False
+
+    async def finish(self, content: str) -> None:
+        if await self.update(content):
+            return
+        try:
+            self.message = await self.channel.send(content, silent=True)
+        except Exception as exc:
+            log.exception("Could not publish final backfill status: %s", exc)
+
+
+def _incremental_after(config, guild_id: int, channel_id: int) -> datetime | None:
+    return calculate_resumable_incremental_after(config, guild_id, channel_id)
 
 
 def register(bot):
@@ -76,15 +103,19 @@ def register(bot):
             and not bot.config.is_ignored(ctx.guild_id, ch.id)
         ]
         label = "差分" if mode == "incremental" else ("全期間" if days == 0 else f"過去{days}日")
+        initial_status = f"📚 {len(channels)}チャンネルの{label}を取り込むぽん。しばらく待ってねぽん..."
+        status_msg = None
         try:
-            status_msg = await ctx.followup.send(
-                f"📚 {len(channels)}チャンネルの{label}を取り込むぽん。しばらく待ってねぽん...",
-                wait=True,
-                silent=True,
-            )
-        except Exception:
-            bot.corpus.finish_backfill(ctx.guild_id)
-            raise
+            # Followup messages depend on a short-lived interaction webhook.
+            # A normal bot-authored message remains editable throughout a long backfill.
+            status_msg = await ctx.channel.send(initial_status, silent=True)
+        except Exception as exc:
+            log.warning("Could not create durable backfill status message: %s", exc)
+            try:
+                status_msg = await ctx.followup.send(initial_status, wait=True, silent=True)
+            except Exception as fallback_exc:
+                log.warning("Backfill will continue without a status message: %s", fallback_exc)
+        status = BackfillStatus(ctx.channel, status_msg)
         total_messages = 0
         total_documents = 0
         total_replaced = 0
@@ -98,11 +129,9 @@ def register(bot):
                 )
                 try:
                     async def progress(count, _ch=ch, _i=i):
-                        await status_msg.edit(
-                            content=(
-                                f"📚 {label}取り込み中... ({_i}/{len(channels)}) "
-                                f"#{_ch.name}: {count:,}件確認中 | 索引済み: {total_messages:,}件"
-                            )
+                        await status.update(
+                            f"📚 {label}取り込み中... ({_i}/{len(channels)}) "
+                            f"#{_ch.name}: {count:,}件確認中 | 索引済み: {total_messages:,}件"
                         )
 
                     result = await bot.corpus.backfill_channel(
@@ -123,11 +152,9 @@ def register(bot):
                     total_messages += result.messages_indexed
                     total_documents += result.documents_uploaded
                     total_replaced += result.documents_replaced
-                    await status_msg.edit(
-                        content=(
-                            f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: "
-                            f"{result.messages_indexed:,}件 / {result.documents_uploaded:,}文書"
-                        )
+                    await status.update(
+                        f"📚 {label}取り込み中... ({i}/{len(channels)}) #{ch.name}: "
+                        f"{result.messages_indexed:,}件 / {result.documents_uploaded:,}文書"
                     )
                 except Exception as exc:
                     failures.append(ch.name)
@@ -136,11 +163,9 @@ def register(bot):
             bot.corpus.finish_backfill(ctx.guild_id)
 
         failure_text = f"\n⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}" if failures else ""
-        await status_msg.edit(
-            content=(
-                f"✅ {'事前確認' if dry_run else '取り込み'}完了: "
-                f"**{total_messages:,}件 / {total_documents:,}文書**\n"
-                f"旧文書 **{total_replaced:,}件** を"
-                f"{'置換対象として確認した' if dry_run else '安全に置換した'}ぽん。{failure_text}"
-            )
+        await status.finish(
+            f"✅ {'事前確認' if dry_run else '取り込み'}完了: "
+            f"**{total_messages:,}件 / {total_documents:,}文書**\n"
+            f"旧文書 **{total_replaced:,}件** を"
+            f"{'置換対象として確認した' if dry_run else '安全に置換した'}ぽん。{failure_text}"
         )
