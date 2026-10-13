@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bot.gdrive import DriveWriter, _extract_folder_id, upload_transcript
+from bot.gdrive import DriveWriter, _extract_folder_id, _render_markdown, upload_minutes, upload_transcript
 from bot.google_credentials import load_google_credentials
 
 
@@ -61,6 +61,76 @@ def test_drive_writer_creates_document_and_inserts_content():
     update = writer.docs.documents().batchUpdate.call_args.kwargs
     assert update["body"]["requests"][0]["insertText"]["text"] == "本文\n"
     assert any("updateTextStyle" in request for request in update["body"]["requests"])
+
+
+def test_minutes_document_matches_reference_style_and_inserts_yagapon_image():
+    writer = DriveWriter.__new__(DriveWriter)
+    writer.drive = MagicMock()
+    writer.docs = MagicMock()
+    writer.drive.files().create.return_value = execute_result(
+        {"id": "doc-1", "webViewLink": "https://docs.example/doc-1"}
+    )
+    writer.docs.documents().batchUpdate.return_value = execute_result({})
+
+    writer.create_document(
+        "folder-1",
+        "261014全体会議",
+        "# 26/10/14 全体会議\n\n## 今日の議題\n- Discord整理\n\n## Discordについて\n### 問題\n権限が複雑",
+        minutes_document=True,
+    )
+
+    calls = writer.docs.documents().batchUpdate.call_args_list
+    assert len(calls) == 2
+    first_requests = calls[0].kwargs["body"]["requests"]
+    inserted = first_requests[0]["insertText"]["text"]
+    assert "作成：おしゃべりやがぽん\n" in inserted
+    assert any(
+        request.get("updateParagraphStyle", {}).get("paragraphStyle", {}).get("alignment") == "CENTER"
+        for request in first_requests
+    )
+    assert any(
+        request.get("updateTextStyle", {}).get("textStyle", {}).get("foregroundColor", {})
+        .get("color", {})
+        .get("rgbColor", {})
+        .get("red")
+        == 19 / 255
+        for request in first_requests
+    )
+    image_requests = calls[1].kwargs["body"]["requests"]
+    assert image_requests[0]["insertText"]["text"] == " "
+    image_request = image_requests[1]["insertInlineImage"]
+    assert image_request["uri"].endswith("/assets/yagapon_minutes.png")
+    assert image_request["objectSize"]["width"]["magnitude"] == 64
+
+
+def test_minutes_markdown_uses_heading_3_for_reference_subheadings():
+    text, requests, image_index = _render_markdown(
+        "# 26/10/14 全体会議\n## 議題\n### 問題\n本文",
+        minutes_document=True,
+    )
+
+    assert text.startswith("26/10/14 全体会議\n作成：おしゃべりやがぽん\n")
+    assert image_index == 1 + len("26/10/14 全体会議")
+    styles = [
+        request["updateParagraphStyle"]["paragraphStyle"].get("namedStyleType")
+        for request in requests
+        if "updateParagraphStyle" in request
+    ]
+    assert "HEADING_1" in styles
+    assert "HEADING_3" in styles
+
+
+@pytest.mark.asyncio
+async def test_minutes_upload_selects_minutes_document_style():
+    config = MagicMock()
+    config.get_drive_folder.return_value = "https://drive.google.com/drive/folders/folder_123"
+    uploader = AsyncMock(return_value="https://docs.example/minutes")
+
+    with patch("bot.gdrive.upload_to_drive", uploader):
+        result = await upload_minutes(config, 1, "# 議事録", "全体会議")
+
+    assert result == "https://docs.example/minutes"
+    assert uploader.await_args.kwargs["minutes_document"] is True
 
 
 def test_drive_writer_reuses_transcript_folder():

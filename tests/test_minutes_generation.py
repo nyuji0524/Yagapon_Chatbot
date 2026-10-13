@@ -82,8 +82,10 @@ async def test_minutes_uses_reference_document_heading_structure():
     prompt = generated.await_args.kwargs["contents"]
     assert "# 26/10/12 全体会議" in prompt
     assert "## 今日の議題" in prompt
-    assert "- 問題:" in prompt
-    assert "- 対応:" in prompt
+    assert "## 〇〇について" in prompt
+    assert "### 問題" in prompt
+    assert "### 対応" in prompt
+    assert "ラベルを本文へ埋め込まず、小見出しとして分ける" in prompt
 
 
 @pytest.mark.asyncio

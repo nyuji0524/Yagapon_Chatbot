@@ -96,6 +96,22 @@ SYSTEM_INSTRUCTION = (
 )
 
 
+def answer_declares_missing_knowledge(answer: str) -> bool:
+    """Detect a model-declared no-answer even when File Search returned tangential sources."""
+    opening = answer[:500]
+    missing_expression = (
+        r"(?:見当たら(?:ない|ず|なかった|なく|ません(?:でした)?)|"
+        r"見つけられ(?:ない|ず|なかった|なく|ません(?:でした)?)|"
+        r"見つか(?:ら(?:ない|ず|なかった|なく)|りません(?:でした)?)|"
+        r"確認でき(?:ない|ず|なかった|なく|ません(?:でした)?))"
+    )
+    patterns = (
+        rf"(?:情報|記録|根拠|記憶).{{0,40}}{missing_expression}",
+        rf"{missing_expression}.{{0,30}}(?:情報|記録|根拠|記憶)",
+    )
+    return any(re.search(pattern, opening, re.DOTALL) for pattern in patterns)
+
+
 @dataclass
 class MessageBuffer:
     channel_name: str
@@ -579,7 +595,7 @@ class CorpusManager:
             answer = response.text or "回答を生成できなかったぽん..."
             sources = self._response_sources(response)
             sources.extend(self._lexical_sources(lexical_hits, sources))
-            no_answer = not sources
+            no_answer = not sources or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
@@ -626,11 +642,15 @@ class CorpusManager:
     @staticmethod
     def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
         rendered = []
+        seen_labels = set()
         for hit in hits:
             label = f"完全一致: #{hit.channel_name or '記録'}"
+            if label in seen_labels:
+                continue
             value = f"[{label}]({hit.source_url})" if hit.source_url else label
             if value not in existing and value not in rendered:
                 rendered.append(value)
+                seen_labels.add(label)
         return rendered
 
     @classmethod

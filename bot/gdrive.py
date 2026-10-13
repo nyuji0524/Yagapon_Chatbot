@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timezone
 
@@ -19,6 +20,13 @@ DOCS_SCOPE = "https://www.googleapis.com/auth/documents"
 GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 TRANSCRIPT_FOLDER_NAME = "文字起こし"
+MINUTES_ACCENT_COLOR = {"red": 19 / 255, "green": 79 / 255, "blue": 92 / 255}
+MINUTES_SUBHEADING_COLOR = {"red": 67 / 255, "green": 67 / 255, "blue": 67 / 255}
+DEFAULT_MINUTES_IMAGE_URL = (
+    # This repository is public. If its visibility changes, operators must set
+    # YAGAPON_MINUTES_IMAGE_URL to another publicly fetchable image URL.
+    "https://raw.githubusercontent.com/nyuji0524/Yagapon_Chatbot/main/assets/yagapon_minutes.png"
+)
 
 
 def _extract_folder_id(url: str) -> str | None:
@@ -51,13 +59,20 @@ def _strip_inline_markdown(value: str, start_index: int) -> tuple[str, list[tupl
     return "".join(output), ranges
 
 
-def _render_markdown(content: str) -> tuple[str, list[dict]]:
+def _render_markdown(
+    content: str,
+    *,
+    minutes_document: bool = False,
+) -> tuple[str, list[dict], int | None]:
     """Convert the limited minutes Markdown into a styled Google Doc."""
     rendered: list[str] = []
-    headings: list[tuple[int, int, str]] = []
+    headings: list[tuple[int, int, str, int]] = []
     bullets: list[tuple[int, int]] = []
     bold_ranges: list[tuple[int, int]] = []
+    author_range: tuple[int, int] | None = None
+    image_index: int | None = None
     index = 1
+    title_seen = False
 
     for raw_line in content.strip().splitlines():
         line = raw_line.rstrip()
@@ -67,7 +82,10 @@ def _render_markdown(content: str) -> tuple[str, list[dict]]:
         if heading:
             level = len(heading.group(1))
             line = heading.group(2)
-            named_style = "TITLE" if level == 1 else f"HEADING_{min(level - 1, 3)}"
+            if minutes_document:
+                named_style = "TITLE" if level == 1 else ("HEADING_1" if level == 2 else "HEADING_3")
+            else:
+                named_style = "TITLE" if level == 1 else f"HEADING_{min(level - 1, 3)}"
         elif bullet:
             line = bullet.group(1)
 
@@ -76,10 +94,20 @@ def _render_markdown(content: str) -> tuple[str, list[dict]]:
         rendered.append(plain_line + "\n")
         bold_ranges.extend(inline_bold)
         if heading and end > index:
-            headings.append((index, end, named_style))
+            headings.append((index, end, named_style, level))
+            if minutes_document and level == 1 and not title_seen:
+                image_index = end
+                title_seen = True
         if bullet:
             bullets.append((index, end + 1))
         index = end + 1
+
+        if minutes_document and heading and level == 1 and author_range is None:
+            author = "作成：おしゃべりやがぽん"
+            author_start = index
+            rendered.append(author + "\n")
+            index += _utf16_length(author) + 1
+            author_range = (author_start, index - 1)
 
     text = "".join(rendered) or "\n"
     end_index = 1 + _utf16_length(text)
@@ -92,13 +120,64 @@ def _render_markdown(content: str) -> tuple[str, list[dict]]:
             }
         }
     ]
-    for start, end, style in headings:
+    if minutes_document:
+        requests[0]["updateTextStyle"]["textStyle"]["fontSize"] = {
+            "magnitude": 11,
+            "unit": "PT",
+        }
+        requests[0]["updateTextStyle"]["fields"] = "weightedFontFamily,fontSize"
+
+    for start, end, style, level in headings:
+        paragraph_style: dict = {"namedStyleType": style}
+        paragraph_fields = "namedStyleType"
+        if minutes_document and level == 1:
+            paragraph_style["alignment"] = "CENTER"
+            paragraph_fields += ",alignment"
         requests.append(
             {
                 "updateParagraphStyle": {
                     "range": {"startIndex": start, "endIndex": end},
-                    "paragraphStyle": {"namedStyleType": style},
-                    "fields": "namedStyleType",
+                    "paragraphStyle": paragraph_style,
+                    "fields": paragraph_fields,
+                }
+            }
+        )
+        if minutes_document:
+            if level == 1:
+                text_style = {
+                    "bold": True,
+                    "fontSize": {"magnitude": 24, "unit": "PT"},
+                    "foregroundColor": {"color": {"rgbColor": MINUTES_ACCENT_COLOR}},
+                }
+            elif level == 2:
+                text_style = {
+                    "bold": True,
+                    "fontSize": {"magnitude": 20, "unit": "PT"},
+                    "foregroundColor": {"color": {"rgbColor": MINUTES_ACCENT_COLOR}},
+                }
+            else:
+                text_style = {
+                    "bold": True,
+                    "fontSize": {"magnitude": 14, "unit": "PT"},
+                    "foregroundColor": {"color": {"rgbColor": MINUTES_SUBHEADING_COLOR}},
+                }
+            requests.append(
+                {
+                    "updateTextStyle": {
+                        "range": {"startIndex": start, "endIndex": end},
+                        "textStyle": text_style,
+                        "fields": "bold,fontSize,foregroundColor",
+                    }
+                }
+            )
+
+    if author_range:
+        requests.append(
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": author_range[0], "endIndex": author_range[1]},
+                    "paragraphStyle": {"alignment": "END"},
+                    "fields": "alignment",
                 }
             }
         )
@@ -121,7 +200,7 @@ def _render_markdown(content: str) -> tuple[str, list[dict]]:
                 }
             }
         )
-    return text, requests
+    return text, requests, image_index
 
 
 class DriveWriter:
@@ -179,7 +258,14 @@ class DriveWriter:
         )
         return created["id"]
 
-    def create_document(self, folder_id: str, filename: str, content: str) -> str:
+    def create_document(
+        self,
+        folder_id: str,
+        filename: str,
+        content: str,
+        *,
+        minutes_document: bool = False,
+    ) -> str:
         created = (
             self.drive.files()
             .create(
@@ -190,7 +276,10 @@ class DriveWriter:
             .execute(num_retries=3)
         )
         document_id = created["id"]
-        text, style_requests = _render_markdown(content)
+        text, style_requests, image_index = _render_markdown(
+            content,
+            minutes_document=minutes_document,
+        )
         try:
             self.docs.documents().batchUpdate(
                 documentId=document_id,
@@ -207,6 +296,35 @@ class DriveWriter:
             except Exception:
                 log.exception("Failed to remove an empty Google Doc after content insertion failed")
             raise
+        if minutes_document and image_index is not None:
+            image_url = os.environ.get("YAGAPON_MINUTES_IMAGE_URL", DEFAULT_MINUTES_IMAGE_URL).strip()
+            if image_url:
+                try:
+                    self.docs.documents().batchUpdate(
+                        documentId=document_id,
+                        body={
+                            "requests": [
+                                {
+                                    "insertText": {
+                                        "location": {"index": image_index},
+                                        "text": " ",
+                                    }
+                                },
+                                {
+                                    "insertInlineImage": {
+                                        "location": {"index": image_index + 1},
+                                        "uri": image_url,
+                                        "objectSize": {
+                                            "height": {"magnitude": 52, "unit": "PT"},
+                                            "width": {"magnitude": 64, "unit": "PT"},
+                                        },
+                                    }
+                                }
+                            ]
+                        },
+                    ).execute(num_retries=3)
+                except Exception:
+                    log.exception("Failed to insert the YagaPon image; keeping the styled minutes document")
         return created.get("webViewLink") or f"https://docs.google.com/document/d/{document_id}/edit"
 
 
@@ -224,6 +342,7 @@ async def upload_to_drive(
     content: str,
     *,
     subfolder_name: str | None = None,
+    minutes_document: bool = False,
 ) -> str | None:
     """Create a styled Google Doc with ADC/service-account credentials."""
     folder_id = _extract_folder_id(folder_url)
@@ -234,7 +353,13 @@ async def upload_to_drive(
         writer = await asyncio.to_thread(DriveWriter)
         if subfolder_name:
             folder_id = await asyncio.to_thread(writer.get_or_create_folder, folder_id, subfolder_name)
-        return await asyncio.to_thread(writer.create_document, folder_id, filename, content)
+        return await asyncio.to_thread(
+            writer.create_document,
+            folder_id,
+            filename,
+            content,
+            minutes_document=minutes_document,
+        )
     except Exception:
         log.exception("Direct Google Drive upload failed")
         return None
@@ -251,7 +376,12 @@ async def upload_minutes(
     folder_url = config.get_drive_folder(guild_id)
     if not folder_url:
         return None
-    return await upload_to_drive(folder_url, document_name(channel_name, meeting_at), minutes)
+    return await upload_to_drive(
+        folder_url,
+        document_name(channel_name, meeting_at),
+        minutes,
+        minutes_document=True,
+    )
 
 
 async def upload_transcript(

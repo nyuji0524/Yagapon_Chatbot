@@ -79,3 +79,17 @@ def test_exact_search_reranks_curated_documents(tmp_path):
 
     assert [hit.document_key for hit in hits] == ["curated", "raw"]
     assert hits[0].score > hits[1].score
+
+
+def test_query_terms_extracts_japanese_subjects_from_natural_questions():
+    assert "ITラボ" in RagStore.query_terms("ITラボではどんなことをしていましたか？")
+
+    terms = RagStore.query_terms(
+        "27thの整理券機能で、企画メンバーと整理券管理者の権限はどう分かれていましたか？"
+    )
+
+    assert "整理券機能" in terms
+    assert "企画メンバー" in terms
+    assert "整理券管理者" in terms
+
+    assert RagStore.query_terms("今日はこれについて教えてください") == []
