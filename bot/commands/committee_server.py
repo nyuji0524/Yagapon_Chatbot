@@ -845,12 +845,17 @@ async def bootstrap_committee_server(
             overwrites=liaison_overwrites,
         )
         counts["channels"] += int(created)
-        await liaison_channel.edit(
-            category=coordination,
-            topic=liaison_topic,
-            overwrites=liaison_overwrites,
-            reason="局間専用連絡チャンネルの閲覧権限を同期",
-        )
+        if not created and (
+            liaison_channel.category_id != coordination.id
+            or liaison_channel.topic != liaison_topic
+            or liaison_channel.overwrites != liaison_overwrites
+        ):
+            await liaison_channel.edit(
+                category=coordination,
+                topic=liaison_topic,
+                overwrites=liaison_overwrites,
+                reason="局間専用連絡チャンネルの閲覧権限を同期",
+            )
         liaison_channels.append((liaison_channel, first_bureau, second_bureau))
 
     await report("鍵管理チャンネルを準備中")
@@ -864,18 +869,20 @@ async def bootstrap_committee_server(
         read_only=True,
     )
     counts["channels"] += int(created)
+    key_report_topic = "現在の貸出状況を固定表示します。操作通知は一定時間後に自動削除されます。"
     key_report, created = await _ensure_text(
         guild,
         KEY_REPORT_CHANNEL,
         key_category,
-        topic="現在の貸出状況を固定表示します。操作通知は一定時間後に自動削除されます。",
+        topic=key_report_topic,
         read_only=True,
     )
     counts["channels"] += int(created)
-    await key_report.edit(
-        topic="現在の貸出状況を固定表示します。操作通知は一定時間後に自動削除されます。",
-        reason="鍵管理報告チャンネルの案内を更新",
-    )
+    if not created and key_report.topic != key_report_topic:
+        await key_report.edit(
+            topic=key_report_topic,
+            reason="鍵管理報告チャンネルの案内を更新",
+        )
     _channel, created = await _ensure_forum(
         guild,
         "申請・依頼",
