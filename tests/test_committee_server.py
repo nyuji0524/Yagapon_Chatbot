@@ -8,12 +8,16 @@ from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
     POSITION_ROLES,
+    CommitteeGuideView,
+    NicknameModal,
     SelfRolePanelView,
+    _bot_guide_embed,
     _embed_field_id,
     _ensure_category,
     _ensure_forum,
     _ensure_text,
     _ensure_voice,
+    _nickname_block_reason,
     _post_once,
     _replace_role_group,
 )
@@ -31,8 +35,78 @@ async def test_persistent_role_panel_has_stable_custom_ids():
     assert {item.custom_id for item in view.children} == {
         "yagapon:committee:bureau:v1",
         "yagapon:committee:grade:v1",
+        "yagapon:committee:nickname:v1",
         "yagapon:committee:position:v1",
     }
+
+
+@pytest.mark.asyncio
+async def test_nickname_modal_limits_server_display_name_length():
+    modal = NicknameModal()
+    assert modal.custom_id == "yagapon:committee:nickname:modal:v1"
+    assert modal.children[0].min_length == 1
+    assert modal.children[0].max_length == 32
+
+
+def test_nickname_permission_guard_covers_owner_permission_and_role_order():
+    member = SimpleNamespace(id=1, top_role=10)
+    owner_guild = SimpleNamespace(owner_id=1, me=SimpleNamespace())
+    assert "サーバー所有者" in _nickname_block_reason(owner_guild, member)
+
+    no_permission_guild = SimpleNamespace(
+        owner_id=2,
+        me=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_nicknames=False),
+            top_role=20,
+        ),
+    )
+    assert "権限が足りない" in _nickname_block_reason(no_permission_guild, member)
+
+    low_role_guild = SimpleNamespace(
+        owner_id=2,
+        me=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_nicknames=True),
+            top_role=10,
+        ),
+    )
+    assert "ロール順位" in _nickname_block_reason(low_role_guild, member)
+
+    allowed_guild = SimpleNamespace(
+        owner_id=2,
+        me=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_nicknames=True),
+            top_role=20,
+        ),
+    )
+    assert _nickname_block_reason(allowed_guild, member) is None
+
+
+@pytest.mark.asyncio
+async def test_bot_guide_embed_and_links_use_created_channels():
+    channels = [
+        SimpleNamespace(name="ロール選択", id=1, mention="<#1>"),
+        SimpleNamespace(name="やがぽん", id=2, mention="<#2>"),
+        SimpleNamespace(name="議事録", id=3, mention="<#3>"),
+    ]
+    guild = SimpleNamespace(id=99, channels=channels)
+
+    embed = _bot_guide_embed(guild)
+    view = CommitteeGuideView(guild)
+
+    assert embed.title == "🤖 おしゃべりやがぽん ガイド"
+    assert "<#2>" in embed.fields[0].value
+    assert [item.url for item in view.children] == [
+        "https://discord.com/channels/99/1",
+        "https://discord.com/channels/99/2",
+        "https://discord.com/channels/99/3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bot_guide_view_can_be_empty_before_committee_setup():
+    guild = SimpleNamespace(id=99, channels=[])
+    view = CommitteeGuideView(guild)
+    assert view.children == []
 
 
 def test_embed_field_id_reads_known_field_and_rejects_invalid_value():
