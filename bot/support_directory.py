@@ -217,7 +217,13 @@ class SupportDirectory:
             )
         try:
             user_document = await self._find_user(email)
-            if user_document is None or user_document["name"].rsplit("/", 1)[-1] != expected_uid:
+            if user_document is None:
+                return SupportIdentity(status="approval_mismatch")
+            fields = _document_fields(user_document)
+            refetched_uid = str(
+                fields.get("uid") or user_document["name"].rsplit("/", 1)[-1]
+            )
+            if refetched_uid != expected_uid:
                 return SupportIdentity(status="approval_mismatch")
             await self._sync_committee_role(user_document["name"])
         except Exception:

@@ -989,8 +989,6 @@ async def bootstrap_committee_server(
         counts["channels"] += int(created)
         if not created:
             edit_kwargs = {}
-            if channel.category_id != category.id:
-                edit_kwargs["category"] = category
             if channel.topic != topic:
                 edit_kwargs["topic"] = topic
             if overwrites is not None and _overwrite_signature(channel.overwrites) != _overwrite_signature(overwrites):

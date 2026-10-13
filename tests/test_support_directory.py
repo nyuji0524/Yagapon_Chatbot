@@ -10,11 +10,14 @@ from bot.support_directory import (
 )
 
 
-def _user_document(*, roles=()):
+def _user_document(*, roles=(), document_id="uid-1", uid="uid-1"):
     return {
-        "name": "projects/yagamy26th/databases/(default)/documents/support/functions/users/uid-1",
+        "name": (
+            "projects/yagamy26th/databases/(default)/documents/"
+            f"support/functions/users/{document_id}"
+        ),
         "fields": {
-            "uid": {"stringValue": "uid-1"},
+            "uid": {"stringValue": uid},
             "email": {"stringValue": "member@keio.jp"},
             "departments": {
                 "arrayValue": {"values": [{"stringValue": "IT局"}]}
@@ -84,6 +87,24 @@ async def test_role_sync_requires_trusted_profile_match_and_feature_flag(monkeyp
 
     assert identity.status == "verified"
     assert identity.role_synced is True
+    directory._sync_committee_role.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_role_sync_uses_stored_uid_when_document_id_differs(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
+    monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "true")
+    directory = SupportDirectory()
+    directory._find_user = AsyncMock(
+        return_value=_user_document(document_id="firestore-doc", uid="auth-uid")
+    )
+    directory._find_grade = AsyncMock(return_value="2")
+    directory._sync_committee_role = AsyncMock()
+
+    identity = await directory.approve_link("member@keio.jp", "IT局", "2年", "auth-uid")
+
+    assert identity.status == "verified"
+    assert identity.uid == "auth-uid"
     directory._sync_committee_role.assert_awaited_once()
 
 
