@@ -99,9 +99,15 @@ SYSTEM_INSTRUCTION = (
 def answer_declares_missing_knowledge(answer: str) -> bool:
     """Detect a model-declared no-answer even when File Search returned tangential sources."""
     opening = answer[:500]
+    missing_expression = (
+        r"(?:見当たら(?:ない|ず|なかった|なく|ません(?:でした)?)|"
+        r"見つけられ(?:ない|ず|なかった|なく|ません(?:でした)?)|"
+        r"見つか(?:ら(?:ない|ず|なかった|なく)|りません(?:でした)?)|"
+        r"確認でき(?:ない|ず|なかった|なく|ません(?:でした)?))"
+    )
     patterns = (
-        r"(?:情報|記録|根拠|記憶).{0,40}(?:見当たらない|見つけられない|確認できなかった|確認できない)",
-        r"(?:見当たらない|見つけられない|確認できなかった).{0,30}(?:情報|記録|根拠|記憶)",
+        rf"(?:情報|記録|根拠|記憶).{{0,40}}{missing_expression}",
+        rf"{missing_expression}.{{0,30}}(?:情報|記録|根拠|記憶)",
     )
     return any(re.search(pattern, opening) for pattern in patterns)
 
