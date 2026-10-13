@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 
 import discord
 
 from bot.authorization import require_guild_admin
+from bot.key_management import (
+    KEY_ACTION_CHANNEL,
+    KEY_CATEGORY,
+    KEY_NAMES,
+    KEY_PANEL_MARKER,
+    KEY_REPORT_CHANNEL,
+    KEY_REQUEST_CHANNEL,
+    KEY_STATUS_MARKER,
+    KeyPanelView,
+    RestrictedKeyApprovalView,
+    key_panel_embed,
+    key_status_embed,
+)
 
 log = logging.getLogger("yagapon.committee_server")
 
@@ -128,6 +142,14 @@ def _intro_embed(guild: discord.Guild) -> discord.Embed:
         ),
         inline=False,
     )
+    embed.add_field(
+        name="5️⃣ 部室・倉庫の鍵を記録",
+        value=(
+            f"{_channel_mention(guild, KEY_ACTION_CHANNEL)} で鍵を選び、"
+            "**あけ・しめ・さしかえ** をボタンで記録します。"
+        ),
+        inline=False,
+    )
     embed.set_footer(text="機密情報・個人情報は、必要なメンバーだけが見られるチャンネルへ")
     return embed
 
@@ -151,6 +173,11 @@ def _bot_guide_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(
         name="🧭 自分の設定",
         value=f"{_channel_mention(guild, ROLE_PANEL_CHANNEL)} で表示名・局・学年・役職を設定",
+        inline=True,
+    )
+    embed.add_field(
+        name="🔑 鍵管理",
+        value=f"{_channel_mention(guild, KEY_ACTION_CHANNEL)} で鍵と操作を選択",
         inline=True,
     )
     embed.add_field(
@@ -564,6 +591,7 @@ async def _post_once(channel: discord.TextChannel, marker: str, *, content=None,
 async def bootstrap_committee_server(
     guild: discord.Guild,
     *,
+    key_store,
     report_progress: ProgressReporter | None = None,
 ) -> dict[str, int]:
     """Create the approved server template without deleting existing resources."""
@@ -589,7 +617,6 @@ async def bootstrap_committee_server(
     for name in POSITION_ROLES:
         position_roles[name], created = await _ensure_role(guild, name, color=0xF39C12)
         counts["roles"] += int(created)
-
     await report("既存メンバーへ基本ロールを設定中")
     if not guild.chunked:
         await guild.chunk()
@@ -760,6 +787,26 @@ async def bootstrap_committee_server(
         topic="複数局にまたがる連絡。継続する案件は申請・依頼フォーラムへ。",
     )
     counts["channels"] += int(created)
+
+    await report("鍵管理チャンネルを準備中")
+    key_category, created = await _ensure_category(guild, KEY_CATEGORY)
+    counts["categories"] += int(created)
+    key_action, created = await _ensure_text(
+        guild,
+        KEY_ACTION_CHANNEL,
+        key_category,
+        topic="鍵を選び、あけ・しめ・さしかえをボタンで記録します。",
+        read_only=True,
+    )
+    counts["channels"] += int(created)
+    key_report, created = await _ensure_text(
+        guild,
+        KEY_REPORT_CHANNEL,
+        key_category,
+        topic="鍵の貸出・返却・受け渡しと確認通知を自動記録します。",
+        read_only=True,
+    )
+    counts["channels"] += int(created)
     _channel, created = await _ensure_forum(
         guild,
         "申請・依頼",
@@ -793,6 +840,23 @@ async def bootstrap_committee_server(
         counts["channels"] += int(created)
         _channel, created = await _ensure_voice(guild, f"{bureau_name}会議", category, overwrites=overwrites)
         counts["channels"] += int(created)
+        if bureau_name == "渉外局":
+            request_overwrites = _private_overwrites(
+                guild,
+                [bureau_roles["渉外局"], position_roles["執行部"]],
+            )
+            request_channel, created = await _ensure_text(
+                guild,
+                KEY_REQUEST_CHANNEL,
+                category,
+                topic="矢上部室（209）の利用理由を確認し、承認・却下します。",
+                overwrites=request_overwrites,
+            )
+            counts["channels"] += int(created)
+            await request_channel.edit(
+                overwrites=request_overwrites,
+                reason="209利用申請の閲覧・承認権限を同期",
+            )
 
     await report("案内とロール選択パネルを掲示中")
     _message, created = await _post_once(
@@ -819,6 +883,22 @@ async def bootstrap_committee_server(
         view=CommitteeGuideView(guild),
     )
     counts["messages"] += int(created)
+    _message, created = await _post_once(
+        key_action,
+        KEY_PANEL_MARKER,
+        content=f"`{KEY_PANEL_MARKER}`",
+        embed=key_panel_embed(),
+        view=KeyPanelView(),
+    )
+    counts["messages"] += int(created)
+    _message, created = await _post_once(
+        key_report,
+        KEY_STATUS_MARKER,
+        content=f"`{KEY_STATUS_MARKER}`",
+        embed=key_status_embed(guild, key_store),
+    )
+    await asyncio.to_thread(key_store.set_status_message_id, guild.id, _message.id)
+    counts["messages"] += int(created)
 
     return counts
 
@@ -826,6 +906,8 @@ async def bootstrap_committee_server(
 def register_persistent_views(bot) -> None:
     bot.add_view(SelfRolePanelView())
     bot.add_view(RoleApprovalView())
+    bot.add_view(KeyPanelView())
+    bot.add_view(RestrictedKeyApprovalView())
 
 
 def register(bot):
@@ -867,7 +949,11 @@ def register(bot):
                 log.warning("Could not update committee setup progress guild=%s", ctx.guild_id)
 
         try:
-            counts = await bootstrap_committee_server(ctx.guild, report_progress=report_progress)
+            counts = await bootstrap_committee_server(
+                ctx.guild,
+                key_store=bot.key_management.store,
+                report_progress=report_progress,
+            )
         except discord.Forbidden:
             log.exception("Committee setup permission error guild=%s", ctx.guild_id)
             await progress_message.edit(
@@ -912,6 +998,25 @@ def register(bot):
         if not await require_guild_admin(ctx):
             return
         await ctx.respond(embed=_role_panel_embed(), view=SelfRolePanelView())
+
+    @bot.slash_command(name="key_status", description="部室・倉庫の鍵の現在状況を表示するぽん")
+    async def key_status(ctx: discord.ApplicationContext):
+        if not ctx.guild:
+            await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
+            return
+        await ctx.respond(embed=key_status_embed(ctx.guild, bot.key_management.store), ephemeral=True)
+
+    @bot.slash_command(name="key_force_return", description="鍵の記録を管理者が返却済みに修正するぽん")
+    @discord.default_permissions(administrator=True)
+    @discord.option(
+        "key_name",
+        description="返却済みに修正する鍵",
+        choices=[discord.OptionChoice(name, name) for name in KEY_NAMES],
+    )
+    async def key_force_return(ctx: discord.ApplicationContext, key_name: str):
+        if not await require_guild_admin(ctx):
+            return
+        await bot.key_management.force_return(ctx, key_name)
 
     @bot.slash_command(name="guide", description="やがぽんと委員会サーバーの使い方を表示するぽん")
     async def guide(ctx: discord.ApplicationContext):
