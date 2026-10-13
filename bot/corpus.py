@@ -592,10 +592,25 @@ class CorpusManager:
                 ),
             )
             log_usage(log, "rag_query", model, response)
-            answer = response.text or "回答を生成できなかったぽん..."
+            raw_answer = (response.text or "").strip()
+            answer = raw_answer or "回答を生成できなかったぽん..."
+            has_answer = bool(raw_answer)
             sources = self._response_sources(response)
             sources.extend(self._lexical_sources(lexical_hits, sources))
-            no_answer = not sources or answer_declares_missing_knowledge(answer)
+            if lexical_hits and (not has_answer or answer_declares_missing_knowledge(answer)):
+                recovered_answer = await self._recover_from_lexical_hits(
+                    question=question,
+                    system_instruction=system,
+                    model=model,
+                )
+                if recovered_answer and not answer_declares_missing_knowledge(recovered_answer):
+                    answer = recovered_answer
+                    has_answer = True
+                    # The recovery pass has no File Search tool. Its answer is
+                    # grounded only in the exact-match excerpts, so do not keep
+                    # unrelated semantic-search citations from the first pass.
+                    sources = self._lexical_sources(lexical_hits, [])
+            no_answer = not sources or not has_answer or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
@@ -630,6 +645,40 @@ class CorpusManager:
         except Exception as e:
             log.error(f"RAG query error: {e}")
             return RagAnswer(text=f"エラーが出ちゃったぽん...: {e}", festival=festival, no_answer=True)
+
+    async def _recover_from_lexical_hits(
+        self,
+        *,
+        question: str,
+        system_instruction: str,
+        model: str,
+    ) -> str | None:
+        """Retry without File Search when exact excerpts exist but tool search refuses to answer."""
+        recovery_instruction = (
+            system_instruction
+            + "\n\n【完全一致候補からの再確認】\n"
+            "File Searchは十分な回答を作れなかったぽん。上にある完全一致候補の原文だけを読み直し、"
+            "質問へ直接答えられる根拠がある場合は、その範囲で具体的に回答するぽん。"
+            "候補が質問と無関係、または根拠が不足する場合は、"
+            "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
+            "候補にない事実は補完しないぽん。"
+        )
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=model,
+                contents=question,
+                config=generation_config(
+                    model,
+                    thinking_level="low",
+                    max_output_tokens=1024,
+                    system_instruction=recovery_instruction,
+                ),
+            )
+            log_usage(log, "rag_lexical_recovery", model, response)
+            return (response.text or "").strip() or None
+        except Exception as exc:
+            log.warning("Lexical RAG recovery failed: %s", exc)
+            return None
 
     @staticmethod
     def _lexical_context(hits: list[LexicalHit]) -> str:
