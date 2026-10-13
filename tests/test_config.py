@@ -46,6 +46,29 @@ def test_saved_config_is_valid_json(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8")) == loaded._config
 
 
+def test_glossary_vocabulary_contains_terms_readings_and_aliases(tmp_path):
+    config = ConfigManager(tmp_path / "server_config.json")
+    config._guild(1)["glossary"] = {
+        "矢上祭": {
+            "definition": "大学祭",
+            "reading": "やがみさい",
+            "aliases": ["矢実", "やがみさい"],
+        },
+        "やがサポ": {
+            "definition": "運営アプリ",
+            "aliases": ["Yaga Support"],
+        },
+    }
+
+    assert config.get_glossary_vocabulary(1) == [
+        "矢上祭",
+        "やがみさい",
+        "矢実",
+        "やがサポ",
+        "Yaga Support",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_backfill_cursor_is_saved_and_reloaded(tmp_path):
     path = tmp_path / "server_config.json"

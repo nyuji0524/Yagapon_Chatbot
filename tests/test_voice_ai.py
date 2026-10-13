@@ -181,7 +181,10 @@ async def test_drain_recording_processes_bounded_chunks_until_caught_up():
     await session._drain_recording()
 
     assert session._last_audio_len == {42: 11}
-    assert session.transcript == ["[Speaker 1]: 最初", "[Speaker 1]: 次"]
+    assert session.transcript == [
+        "[Discord確定: user-42]: 最初",
+        "[Discord確定: user-42]: 次",
+    ]
     assert session.recording_sink.read_chunks.call_count == 3
 
 
@@ -259,10 +262,16 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
         "meeting.wav",
         "矢上祭: やがみさい",
         "定例会",
+        custom_vocabulary=["矢上祭", "やがみさい", "矢実"],
     )
 
     assert result == "# 会議"
     assert transcribe.await_args.kwargs["diarization"] is True
+    assert transcribe.await_args.kwargs["custom_vocabulary"] == [
+        "矢上祭",
+        "やがみさい",
+        "矢実",
+    ]
     assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
     assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
     prompt = generated.await_args.kwargs["contents"]
@@ -271,7 +280,7 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_voice_assigns_stable_anonymous_speaker_labels():
+async def test_voice_assigns_stable_discord_id_labels():
     guild = SimpleNamespace(get_member=lambda _user_id: None)
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(guild=guild), VoiceMode.LISTEN)
     session.recording_sink = SimpleNamespace(
@@ -290,10 +299,78 @@ async def test_voice_assigns_stable_anonymous_speaker_labels():
     await session._drain_recording()
 
     assert session.transcript == [
-        "[Speaker 1]: Bです",
-        "[Speaker 2]: Aです",
-        "[Speaker 2]: Aの続き",
+        "[Discord確定: User 20]: Bです",
+        "[Discord確定: User 10]: Aです",
+        "[Discord確定: User 10]: Aの続き",
     ]
+
+
+def test_voice_uses_registered_name_when_member_cache_is_unavailable():
+    config = SimpleNamespace(
+        get_member=lambda _guild_id, user_id: {"name": "毛蟹"} if user_id == 42 else None
+    )
+    session = VoiceSession(
+        SimpleNamespace(config=config),
+        1,
+        SimpleNamespace(guild=SimpleNamespace(get_member=lambda _user_id: None)),
+        VoiceMode.LISTEN,
+    )
+
+    assert session._speaker_label(42) == "Discord確定: 毛蟹"
+
+
+@pytest.mark.asyncio
+async def test_final_reprocess_replaces_incremental_transcript_only_after_full_success():
+    guild = SimpleNamespace(
+        get_member=lambda user_id: SimpleNamespace(display_name=f"member-{user_id}")
+    )
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(guild=guild), VoiceMode.LISTEN)
+    session.transcript = ["[Discord確定: member-10]: 途中結果"]
+    session.recording_sink = SimpleNamespace(
+        total_bytes=4000,
+        read_chunks=Mock(
+            side_effect=[
+                {10: (b"first", 5), 20: (b"second", 6)},
+                {},
+            ]
+        ),
+        mark=Mock(),
+        save_transcript=Mock(return_value=None),
+        checkpoint=Mock(),
+    )
+    session._transcribe_audio = AsyncMock(side_effect=["確定A", "確定B"])
+
+    assert await session._reprocess_complete_recording() is True
+
+    assert session.transcript == [
+        "[Discord確定: member-10]: 確定A",
+        "[Discord確定: member-20]: 確定B",
+    ]
+    assert session._last_audio_len == {10: 5, 20: 6}
+    assert all(
+        call.kwargs["prefer_dedicated"] is True
+        and call.kwargs["diarization"] is False
+        for call in session._transcribe_audio.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_final_reprocess_keeps_incremental_transcript_when_a_chunk_fails():
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session.transcript = ["[Discord確定: User 10]: 保存済み"]
+    session.recording_sink = SimpleNamespace(
+        total_bytes=4000,
+        read_chunks=Mock(return_value={10: (b"audio", 5)}),
+        mark=Mock(),
+    )
+    session._transcribe_audio = AsyncMock(return_value=None)
+
+    assert await session._reprocess_complete_recording() is False
+    assert session.transcript == ["[Discord確定: User 10]: 保存済み"]
+    session.recording_sink.mark.assert_called_with(
+        "final_reprocess_deferred",
+        final_reprocess_offsets={},
+    )
 
 
 def test_listen_mode_separates_multiple_people_using_one_discord_account():

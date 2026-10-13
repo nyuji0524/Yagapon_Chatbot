@@ -219,6 +219,26 @@ class ConfigManager:
             lines.append(f"- {' / '.join(parts)}: {entry['definition']}")
         return "\n".join(lines)
 
+    def get_glossary_vocabulary(self, guild_id: int) -> list[str]:
+        """Return canonical terms, readings, and aliases for speech recognition.
+
+        ``custom_vocabulary`` is most useful for the exact surface forms which
+        may occur in audio.  Passing only the dictionary keys meant that a
+        registered reading or common nickname never reached STT.
+        """
+        vocabulary: list[str] = []
+        seen: set[str] = set()
+        for term, entry in self.get_glossary(guild_id).items():
+            values = [term, entry.get("reading", ""), *entry.get("aliases", [])]
+            for value in values:
+                cleaned = str(value).strip()
+                normalized = cleaned.casefold()
+                if not cleaned or normalized in seen:
+                    continue
+                seen.add(normalized)
+                vocabulary.append(cleaned)
+        return vocabulary
+
     async def set_glossary(self, guild_id: int, glossary: dict):
         self._guild(guild_id)["glossary"] = glossary
         await self._save()

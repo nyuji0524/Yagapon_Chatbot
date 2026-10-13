@@ -30,6 +30,7 @@ REALTIME_INTERVAL_MEETING = 15  # meetingモード: 会議の邪魔にならな�
 REALTIME_INTERVAL_LISTEN = 300  # listenモード: 専用STTの日次リクエスト枠を温存
 TRANSCRIPTION_CHUNK_BYTES_REALTIME = 5 * 1024 * 1024
 TRANSCRIPTION_CHUNK_BYTES_LISTEN = 50 * 1024 * 1024
+FINAL_REPROCESS_CHUNK_BYTES = 50 * 1024 * 1024
 TRANSCRIPTION_TIMEOUT_SECONDS = 180
 _transcription_rate_limiter = RateLimitCircuitBreaker()
 
@@ -91,9 +92,27 @@ class VoiceSession:
         log.info(f"Reference doc added: {source} ({len(content)} chars)")
 
     def _speaker_label(self, user_id: int) -> str:
-        """Return a stable anonymous label for this recording session."""
+        """Return a stable label backed by Discord's per-user audio stream."""
         if user_id not in self._speaker_labels:
-            self._speaker_labels[user_id] = self._next_speaker_label()
+            name = ""
+            guild = getattr(self.channel, "guild", None)
+            if guild is None and hasattr(self.bot, "get_guild"):
+                guild = self.bot.get_guild(self.guild_id)
+            member = guild.get_member(user_id) if guild else None
+            name = str(
+                getattr(member, "display_name", "")
+                or getattr(member, "name", "")
+            ).strip()
+            if not name:
+                config = getattr(self.bot, "config", None)
+                if config and hasattr(config, "get_member"):
+                    registered = config.get_member(self.guild_id, user_id) or {}
+                    name = str(registered.get("name") or "").strip()
+            name = re.sub(r"[\[\]\r\n:：]", " ", name).strip() or f"User {user_id}"
+            label = f"Discord確定: {name}"
+            if label in self._speaker_labels.values():
+                label = f"{label} ({str(user_id)[-4:]})"
+            self._speaker_labels[user_id] = label
         return self._speaker_labels[user_id]
 
     def _next_speaker_label(self) -> str:
@@ -289,27 +308,24 @@ class VoiceSession:
             if len(audio_bytes) < 1000:
                 self._last_audio_len[user_id] = next_offset
                 continue
-            speaker = (
-                f"stream-{user_id}"
-                if self.mode == VoiceMode.LISTEN
-                else self._speaker_label(user_id)
-            )
+            speaker = self._speaker_label(user_id)
             audio_chunks[user_id] = (speaker, audio_bytes)
             next_offsets[user_id] = next_offset
 
         if not audio_chunks:
             return
 
-        # listenモード: 文字起こしのみ（従来方式）
+        # listenモード: 文字起こしのみ。受信トラック自体がDiscord
+        # user_idで分離済みなので、確定ラベルを維持する。
         if self.mode == VoiceMode.LISTEN:
             for user_id, (name, new_audio) in audio_chunks.items():
                 log.info(f"Transcribing {len(new_audio)} bytes from {name}")
-                text = await self._transcribe_audio(new_audio, name, diarization=True)
+                text = await self._transcribe_audio(new_audio, name, diarization=False)
                 if text is None:
                     continue
                 self._last_audio_len[user_id] = next_offsets[user_id]
                 if text.strip():
-                    formatted = self._format_transcribed_text(user_id, text, diarized=True)
+                    formatted = self._format_transcribed_text(user_id, text, diarized=False)
                     await self._append_transcript(formatted)
                     log.info("Transcribed stream=%s: %s...", user_id, formatted[:50])
                 await self._checkpoint_state()
@@ -647,6 +663,8 @@ class VoiceSession:
 
         if self.recording_sink:
             await self._drain_recording()
+            if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
+                await self._reprocess_complete_recording()
             await self._persist_transcript()
 
         if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
@@ -682,8 +700,11 @@ class VoiceSession:
                 return
             progressed = False
             for user_id, (audio_bytes, next_offset) in chunks.items():
-                diarized = self.mode == VoiceMode.LISTEN
-                speaker = f"stream-{user_id}" if diarized else self._speaker_label(user_id)
+                # Pycord already gives us one durable track per Discord user.
+                # Re-diarizing that track discards this certain identity and can
+                # invent a fresh Speaker N on every chunk.
+                diarized = False
+                speaker = self._speaker_label(user_id)
                 text = await self._transcribe_audio(
                     audio_bytes, speaker, diarization=diarized
                 )
@@ -700,6 +721,63 @@ class VoiceSession:
                 self._transcription_failed = True
                 self.recording_sink.mark("transcription_failed")
                 return
+
+    async def _reprocess_complete_recording(self) -> bool:
+        """Re-transcribe the complete recording after capture has stopped.
+
+        Realtime transcripts are crash-safe drafts.  The final pass starts at
+        byte zero, uses larger bounded chunks and the Discord stream identity,
+        then atomically replaces the draft only when every chunk succeeds.
+        Long recordings therefore remain bounded and a 429 never destroys the
+        usable incremental transcript.
+        """
+        if not self.recording_sink or self.recording_sink.total_bytes <= 0:
+            return False
+
+        offsets: dict[int, int] = {}
+        final_transcript: list[str] = []
+        self.recording_sink.mark("final_reprocess_processing")
+        while True:
+            chunks = await asyncio.to_thread(
+                self.recording_sink.read_chunks,
+                offsets,
+                chunk_bytes=FINAL_REPROCESS_CHUNK_BYTES,
+            )
+            if not chunks:
+                break
+            progressed = False
+            for user_id, (audio_bytes, next_offset) in chunks.items():
+                speaker = self._speaker_label(user_id)
+                text = await self._transcribe_audio(
+                    audio_bytes,
+                    speaker,
+                    diarization=False,
+                    prefer_dedicated=True,
+                )
+                if text is None:
+                    self.recording_sink.mark(
+                        "final_reprocess_deferred",
+                        final_reprocess_offsets={str(key): value for key, value in offsets.items()},
+                    )
+                    return False
+                offsets[user_id] = next_offset
+                progressed = True
+                if text.strip():
+                    final_transcript.append(
+                        self._format_transcribed_text(user_id, text, diarized=False)
+                    )
+            if not progressed:
+                self.recording_sink.mark("final_reprocess_deferred")
+                return False
+
+        if not final_transcript:
+            self.recording_sink.mark("final_reprocess_empty")
+            return False
+        self.transcript = final_transcript
+        self._last_audio_len = offsets
+        await self._persist_transcript()
+        await self._checkpoint_state(status="final_reprocess_completed")
+        return True
 
     @staticmethod
     def _pcm_to_wav(pcm_data: bytes, channels: int = 2, sample_rate: int = 48000, sample_width: int = 2) -> bytes:
@@ -720,6 +798,7 @@ class VoiceSession:
         speaker_name: str,
         *,
         diarization: bool = False,
+        prefer_dedicated: bool | None = None,
     ) -> str | None:
         """Gemini Audio APIで音声を文字起こし"""
         if len(audio_bytes) < 1000:  # ほぼ無音
@@ -743,7 +822,11 @@ class VoiceSession:
         try:
             vocabulary = []
             if self.bot and hasattr(self.bot, "config"):
-                vocabulary = list(self.bot.config.get_glossary(self.guild_id).keys())
+                get_vocabulary = getattr(self.bot.config, "get_glossary_vocabulary", None)
+                if get_vocabulary:
+                    vocabulary = get_vocabulary(self.guild_id)
+                else:
+                    vocabulary = list(self.bot.config.get_glossary(self.guild_id).keys())
 
             text = await asyncio.wait_for(
                 transcribe_audio(
@@ -755,7 +838,11 @@ class VoiceSession:
                     diarization=diarization,
                     # Short interactive modes can create many requests. Reserve
                     # the dedicated STT quota for long-form listen/minutes mode.
-                    prefer_dedicated=self.mode == VoiceMode.LISTEN,
+                    prefer_dedicated=(
+                        self.mode == VoiceMode.LISTEN
+                        if prefer_dedicated is None
+                        else prefer_dedicated
+                    ),
                     voiceprint_paths=(self._registered_voiceprints() if diarization else None),
                 ),
                 timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
@@ -948,6 +1035,8 @@ async def _recover_recording(bot, candidate) -> None:
     session.recording_sink.mark("recovery_processing", recovery_attempts=attempts)
     try:
         await session._drain_recording()
+        if mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
+            await session._reprocess_complete_recording()
         await session._persist_transcript()
         if session._transcription_failed:
             raise RuntimeError("transcription remains rate limited or unavailable")

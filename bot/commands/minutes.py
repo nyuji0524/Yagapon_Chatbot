@@ -64,6 +64,7 @@ def register(bot):
             mime_type = _get_mime_type(ext)
 
             glossary_text = bot.config.get_glossary_text(ctx.guild_id)
+            glossary_vocabulary = bot.config.get_glossary_vocabulary(ctx.guild_id)
 
             # 文字起こしを先に恒久保存し、議事録生成失敗時にも失わない。
             transcript = await _transcribe_file(
@@ -71,6 +72,7 @@ def register(bot):
                 mime_type,
                 file.filename,
                 voiceprint_paths=_voiceprint_paths(bot, ctx.guild_id),
+                custom_vocabulary=glossary_vocabulary,
             )
             if not transcript:
                 if hasattr(bot, "operations"):
@@ -249,6 +251,7 @@ async def _generate_minutes_from_file(
     title: str,
     speaker_roster: str = "",
     voiceprint_paths: dict[str, str] | None = None,
+    custom_vocabulary: list[str] | None = None,
 ) -> str | None:
     """専用STTで文字起こしし、別モデルで構造化議事録を生成。"""
     try:
@@ -257,6 +260,7 @@ async def _generate_minutes_from_file(
             mime_type,
             filename,
             voiceprint_paths=voiceprint_paths,
+            custom_vocabulary=custom_vocabulary,
         )
 
         if not transcript:
@@ -287,6 +291,7 @@ async def _transcribe_file(
     filename: str,
     *,
     voiceprint_paths: dict[str, str] | None = None,
+    custom_vocabulary: list[str] | None = None,
 ) -> str | None:
     """Diarize a whole in-person recording, with a non-diarized fallback."""
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
@@ -297,6 +302,7 @@ async def _transcribe_file(
                 display_name=filename,
                 diarization=True,
                 voiceprint_paths=voiceprint_paths,
+                custom_vocabulary=custom_vocabulary,
             )
         except Exception as exc:
             message = str(exc).lower()
@@ -309,6 +315,7 @@ async def _transcribe_file(
             log.warning("Diarized transcription failed; retrying without diarization: %s", exc)
             return await transcribe_audio(
                 client, audio_bytes, mime_type=mime_type, display_name=filename,
+                custom_vocabulary=custom_vocabulary,
             )
     except Exception:
         log.exception("Uploaded audio transcription failed")
