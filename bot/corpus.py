@@ -96,6 +96,16 @@ SYSTEM_INSTRUCTION = (
 )
 
 
+def answer_declares_missing_knowledge(answer: str) -> bool:
+    """Detect a model-declared no-answer even when File Search returned tangential sources."""
+    opening = answer.split("\n\n", 1)[0]
+    patterns = (
+        r"(?:情報|記録|根拠|記憶).{0,40}(?:見当たらない|見つけられない|確認できなかった|確認できない)",
+        r"(?:見当たらない|見つけられない|確認できなかった).{0,30}(?:情報|記録|根拠|記憶)",
+    )
+    return any(re.search(pattern, opening) for pattern in patterns)
+
+
 @dataclass
 class MessageBuffer:
     channel_name: str
@@ -579,7 +589,7 @@ class CorpusManager:
             answer = response.text or "回答を生成できなかったぽん..."
             sources = self._response_sources(response)
             sources.extend(self._lexical_sources(lexical_hits, sources))
-            no_answer = not sources
+            no_answer = not sources or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"

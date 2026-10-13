@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from bot.corpus import DOCUMENT_MAX_MESSAGES, CorpusManager, calculate_incremental_after
+from bot.corpus import (
+    DOCUMENT_MAX_MESSAGES,
+    CorpusManager,
+    answer_declares_missing_knowledge,
+    calculate_incremental_after,
+)
 from bot.rag_store import RagStore
 
 
@@ -192,6 +197,43 @@ def test_response_sources_deduplicates_discord_links(corpus_manager):
     )
 
     assert corpus_manager._response_sources(response) == ["[#開発（2026-10-05）](https://discord.com/channels/1/2/3)"]
+
+
+def test_answer_declares_missing_knowledge_only_checks_the_opening():
+    assert answer_declares_missing_knowledge("具体的な保存場所の情報は、今のボクの記憶には見当たらないぽん。")
+    assert answer_declares_missing_knowledge("該当する記録は確認できなかったぽん。\n\n周辺情報はあるぽん。")
+    assert not answer_declares_missing_knowledge("記録を確認できたぽん。\n\n古い資料には『見当たらない』と書かれていたぽん。")
+
+
+@pytest.mark.asyncio
+async def test_query_marks_model_declared_missing_knowledge_as_no_answer(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    context = SimpleNamespace(
+        title="周辺資料",
+        uri=None,
+        custom_metadata=[{"key": "channel_name", "string_value": "開発"}],
+    )
+    response = SimpleNamespace(
+        text="具体的な権限分担の記録は確認できなかったぽん。",
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
+
+    result = await corpus_manager.query_with_trace(
+        "整理券の権限分担は？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert result.citations == ("#開発",)
 
 
 def test_incremental_boundary_is_previous_jst_midnight():

@@ -54,7 +54,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 ### Google Drive連携
 - Application Default CredentialsからDrive API・Docs APIへ直接接続
 - 議事録名は `yymmdd{会議名}`、文字起こしは保存先直下の `文字起こし` フォルダへ同名で保存
-- Markdown見出し・箇条書きをGoogle Docsの段落スタイルに変換し、Noto Sans JPで保存
+- 議事録は見本に合わせた青緑の見出し、問題・対応などの小見出し、作成者表記、やがぽん画像を含むGoogle Docsとして保存
+- 文字起こし・レポートはMarkdown見出しと箇条書きをGoogle Docsの段落スタイルに変換し、Noto Sans JPで保存
 
 ### 委員会サーバー・鍵管理
 - `/committee_setup` で28th向けロール、カテゴリ、案内、ロール選択を重複なく整備
@@ -168,6 +169,7 @@ YAGAPON_KEY_REMINDER_REPEAT_HOURS=12
 YAGAPON_KEY_NOTIFICATION_TTL_SECONDS=300
 YAGAPON_RAG_TRACE_CONTENT=false
 YAGAPON_RAG_FESTIVAL_FILTER_ENABLED=false
+YAGAPON_MINUTES_IMAGE_URL=https://raw.githubusercontent.com/nyuji0524/Yagapon_Chatbot/main/assets/yagapon_minutes.png
 DISCORD_TOKEN=your_discord_bot_token
 YAGAPON_API_TOKEN=generate_a_long_random_token
 API_HOST=http://your-server-ip:8000

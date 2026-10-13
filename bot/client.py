@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 
 import discord
 
@@ -19,6 +20,45 @@ log = logging.getLogger("yagapon.client")
 
 RAG_FEEDBACK_PROMPT = "回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
 RAG_FEEDBACK_RATINGS = {"✅": "positive", "⚠️": "partial", "❌": "negative"}
+
+
+def _clean_rag_query(content: str, bot_user_id: int | None) -> str:
+    """Remove Discord addressing helpers that should not become search terms."""
+    query = content
+    if bot_user_id:
+        query = query.replace(f"<@{bot_user_id}>", "").replace(f"<@!{bot_user_id}>", "")
+    query = re.sub(r"(?i)(?<!\S)@silent(?!\S)", "", query)
+    return " ".join(query.split())
+
+
+def _guild_yagapon_emojis(guild) -> dict[str, str]:
+    """Return custom YagaPon emojis which the bot can use in this guild."""
+    emojis: dict[str, str] = {}
+    for emoji in getattr(guild, "emojis", ()):
+        name = getattr(emoji, "name", "")
+        if not name.startswith("yagapon_") or getattr(emoji, "available", True) is False:
+            continue
+        is_usable = getattr(emoji, "is_usable", None)
+        if callable(is_usable) and not is_usable():
+            continue
+        emojis[name] = str(emoji)
+    return emojis
+
+
+def _decorate_rag_answer(answer: str, guild, *, no_answer: bool) -> str:
+    """Use guild YagaPon emojis without emitting broken ``:name:`` placeholders."""
+    available = _guild_yagapon_emojis(guild)
+    preferred = (
+        ("yagapon_cry", "yagapon_bow", "yagapon_relaxing")
+        if no_answer
+        else ("yagapon_happy", "yagapon_glad", "yagapon_bow", "yagapon_kansha")
+    )
+    selected = [available[name] for name in preferred if name in available and available[name] not in answer][:2]
+    if not selected:
+        return answer
+    if len(selected) == 1:
+        return f"{selected[0]} {answer}"
+    return f"{selected[0]} {answer}\n\n{selected[1]}"
 
 
 class YagaPon(discord.Bot):
@@ -391,10 +431,7 @@ class YagaPon(discord.Bot):
 
     async def _handle_question(self, message: discord.Message, corpus: str, guild_id: int = 0):
         """RAGで質問に回答"""
-        query = message.content
-        # メンション部分を除去
-        if self.user:
-            query = query.replace(f"<@{self.user.id}>", "").strip()
+        query = _clean_rag_query(message.content, self.user.id if self.user else None)
         if not query:
             return
 
@@ -412,7 +449,12 @@ class YagaPon(discord.Bot):
                 glossary_text=glossary_text,
                 glossary=self.config.get_glossary(guild_id),
             )
-            discord_answer = f"{result.text}\n\n{RAG_FEEDBACK_PROMPT}"
+            decorated_answer = _decorate_rag_answer(
+                result.text,
+                message.guild,
+                no_answer=result.no_answer,
+            )
+            discord_answer = f"{decorated_answer}\n\n{RAG_FEEDBACK_PROMPT}"
             sent_messages = await self.send_split_message(message.channel, discord_answer)
             if result.query_id and sent_messages:
                 self.corpus.rag_store.bind_response_message(
