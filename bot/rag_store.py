@@ -183,6 +183,22 @@ class RagStore:
         terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9_.:/-]{2,}|[0-9a-f]{7,40}", question))
         stripped = re.sub(r"[？?！!。、,\s]", "", question)
         stripped = re.sub(r"(?:について|とは|を教えて|教えてください|知りたい|どうなっている|どうなってる)$", "", stripped)
+        # Japanese questions have no whitespace, so an entire sentence is too
+        # specific for exact matching. Keep subjects such as ``ITラボ`` and
+        # ``整理券管理者`` as lexical fallback terms.
+        segments = re.split(
+            r"(?:について|として|では|には|から|まで|より|って|とは|の|は|が|を|に|で|と|も|へ)",
+            stripped,
+        )
+        for segment in segments:
+            segment = re.sub(
+                r"(?:どんなこと|どこ|いつ|だれ|誰|なぜ|どう|何|教えて|ください|"
+                r"されていますか|していましたか|されますか|しますか|ですか|でしたか).*$",
+                "",
+                segment,
+            )
+            if 2 <= len(segment) <= 24:
+                terms.append(segment)
         if 2 <= len(stripped) <= 40:
             terms.append(stripped)
         unique = []
