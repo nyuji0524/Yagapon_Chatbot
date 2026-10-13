@@ -215,10 +215,14 @@ class SupportDirectory:
                 grade=identity.grade,
                 role_synced=identity.role_synced,
             )
-        user_document = await self._find_user(email)
-        if user_document is None or user_document["name"].rsplit("/", 1)[-1] != expected_uid:
-            return SupportIdentity(status="approval_mismatch")
-        await self._sync_committee_role(user_document["name"])
+        try:
+            user_document = await self._find_user(email)
+            if user_document is None or user_document["name"].rsplit("/", 1)[-1] != expected_uid:
+                return SupportIdentity(status="approval_mismatch")
+            await self._sync_committee_role(user_document["name"])
+        except Exception:
+            log.exception("Yaga Support role synchronization failed uid=%s", expected_uid)
+            return SupportIdentity(status="unavailable")
         return SupportIdentity(
             status="verified",
             uid=identity.uid,

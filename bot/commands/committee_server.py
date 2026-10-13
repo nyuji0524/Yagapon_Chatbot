@@ -441,23 +441,40 @@ class RegistrationModal(discord.ui.Modal):
 
         config = interaction.client.config
         members = config.get_members(guild.id)
+        existing_record = members.get(str(member.id), {})
+        preserve_verified_link = bool(
+            existing_record.get("support_status") == "verified"
+            and existing_record.get("support_uid")
+            and existing_record.get("email") == email
+            and existing_record.get("bureau") == bureau
+            and existing_record.get("grade") == grade
+        )
+        effective_identity = identity
+        if preserve_verified_link:
+            effective_identity = SupportIdentity(
+                status="verified",
+                uid=existing_record["support_uid"],
+                departments=tuple(existing_record.get("support_departments", ())),
+                grade=existing_record.get("support_grade"),
+                role_synced=bool(existing_record.get("support_role_synced")),
+            )
         members[str(member.id)] = {
-            **members.get(str(member.id), {}),
+            **existing_record,
             "name": member.display_name,
             "email": email,
             "bureau": bureau,
             "grade": grade,
             "role": current_position,
-            "support_uid": None,
-            "support_candidate_uid": identity.uid,
-            "support_status": identity.status,
-            "support_departments": list(identity.departments),
-            "support_grade": identity.grade,
-            "support_role_synced": identity.role_synced,
+            "support_uid": effective_identity.uid if preserve_verified_link else None,
+            "support_candidate_uid": None if preserve_verified_link else identity.uid,
+            "support_status": effective_identity.status,
+            "support_departments": list(effective_identity.departments),
+            "support_grade": effective_identity.grade,
+            "support_role_synced": effective_identity.role_synced,
         }
         await config.set_members(guild.id, members)
 
-        if identity.status == "directory_match" and identity.uid:
+        if not preserve_verified_link and identity.status == "directory_match" and identity.uid:
             request_channel = _find_named(guild.text_channels, ROLE_REQUEST_CHANNEL)
             if request_channel:
                 request_embed = discord.Embed(
@@ -487,7 +504,7 @@ class RegistrationModal(discord.ui.Modal):
         )
         embed.add_field(name="所属", value=f"{bureau} / {grade}", inline=True)
         embed.add_field(name="慶應メール", value=email, inline=True)
-        embed.add_field(name="やがサポ", value=_support_status_message(identity), inline=False)
+        embed.add_field(name="やがサポ", value=_support_status_message(effective_identity), inline=False)
         embed.set_footer(text="表示名の変更はDiscordのサーバープロフィールから行ってください")
         await interaction.followup.send(embed=embed, ephemeral=True)
         try:
@@ -497,7 +514,7 @@ class RegistrationModal(discord.ui.Modal):
                 f"**所属:** {bureau} / {grade}\n"
                 f"**慶應メール:** {email}\n\n"
                 "表示名を変える場合は、Discordのサーバープロフィールから自分で変更してください。\n"
-                f"**やがサポ:** {_support_status_message(identity)}"
+                f"**やがサポ:** {_support_status_message(effective_identity)}"
             )
         except discord.HTTPException:
             log.info("Could not send committee registration DM guild=%s member=%s", guild.id, member.id)
@@ -575,6 +592,11 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
                     return
                 desired_roles.append(officer_role)
             await member.edit(roles=desired_roles, reason=f"{interaction.user} による役職承認")
+            members = interaction.client.config.get_members(guild.id)
+            record = members.get(str(member.id), {})
+            record["role"] = role.name
+            members[str(member.id)] = record
+            await interaction.client.config.set_members(guild.id, members)
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロール順を確認してほしいぽん。")
             return
@@ -1096,7 +1118,7 @@ async def bootstrap_committee_server(
     key_report = await ensure_text(
         KEY_REPORT_CHANNEL,
         key_category,
-        topic="現在の貸出状況だけを固定表示し、操作通知は一定時間後に削除します。",
+        topic="現在の貸出状況だけを固定表示し、操作のたびに内容を更新します。",
         read_only=True,
     )
     key_request_overwrites = _private_overwrites(

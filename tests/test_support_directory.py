@@ -100,3 +100,17 @@ async def test_profile_mismatch_never_syncs_role(monkeypatch):
 
     assert identity.status == "profile_mismatch"
     directory._sync_committee_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_role_sync_failure_returns_unavailable_instead_of_raising(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SUPPORT_FIREBASE_PROJECT", "yagamy26th")
+    monkeypatch.setenv("YAGAPON_SUPPORT_ROLE_SYNC_ENABLED", "true")
+    directory = SupportDirectory()
+    directory._find_user = AsyncMock(return_value=_user_document())
+    directory._find_grade = AsyncMock(return_value="2")
+    directory._sync_committee_role = AsyncMock(side_effect=RuntimeError("permission denied"))
+
+    identity = await directory.approve_link("member@keio.jp", "IT局", "2年", "uid-1")
+
+    assert identity.status == "unavailable"
