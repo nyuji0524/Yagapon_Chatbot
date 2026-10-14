@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,8 +20,12 @@ def post_json(url: str, token: str, payload: dict, *, timeout: int = 120) -> dic
         data=json.dumps(payload, ensure_ascii=False).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:2000]
+        raise RuntimeError(f"RAG API request failed: HTTP {exc.code}: {detail}") from exc
 
 
 def main():

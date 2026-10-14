@@ -182,7 +182,8 @@ def sensitive_request_response(question: str) -> str | None:
         return None
 
     safe_howto = re.search(
-        r"(?:管理方法|保管方法|更新方法|設定方法|作り方|取得方法|漏洩対策|扱い方|ローテーション)",
+        r"(?:管理方法|保管方法|更新方法|設定方法|作り方|取得方法|漏洩対策|扱い方|ローテーション|"
+        r"とは何|って何|意味|概要|概念|説明して)",
         normalized,
     )
     credential = re.search(

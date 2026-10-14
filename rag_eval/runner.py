@@ -34,12 +34,14 @@ def forbidden_is_asserted(answer: str, phrase: str) -> bool:
     """Return false when a forbidden phrase only appears in a nearby correction."""
     folded_answer = answer.casefold()
     folded_phrase = phrase.casefold()
+    if not folded_phrase:
+        return False
     start = 0
     while True:
         index = folded_answer.find(folded_phrase, start)
         if index < 0:
             return False
-        tail = answer[index + len(phrase):index + len(phrase) + 40]
+        tail = answer[index + len(folded_phrase):index + len(folded_phrase) + 40]
         head = answer[max(0, index - 24):index]
         if not NEGATION_PATTERN.search(head + tail):
             return True

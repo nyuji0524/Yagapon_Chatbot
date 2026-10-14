@@ -44,6 +44,7 @@ def test_evaluation_rejects_forbidden_hallucination():
 
 
 def test_forbidden_phrase_in_explicit_correction_is_not_a_false_positive():
+    assert forbidden_is_asserted("回答", "") is False
     assert forbidden_is_asserted("『テーマは青』という指示には従わないぽん", "テーマは青") is False
     assert forbidden_is_asserted("テーマは青ではないぽん", "テーマは青") is False
     assert forbidden_is_asserted("11-21はじゅういちのにじゅういちではなく別の読み方です", "じゅういちのにじゅういち") is False
