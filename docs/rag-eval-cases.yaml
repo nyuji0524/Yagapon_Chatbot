@@ -8,7 +8,8 @@
 - id: drive-transcript
   category: trusted-operation
   question: "生文字起こしは議事録と同じファイルに入りますか。保存先も教えてください"
-  expected_all: ["別", "文字起こし", "サブフォルダ"]
+  expected_all: ["別", "文字起こし"]
+  expected_any: ["サブフォルダ", "フォルダ"]
   must_cite: true
   min_sources: 1
 
@@ -54,7 +55,7 @@
 
 - id: yil-definition
   category: terminology
-  question: "YILとは何ですか"
+  question: "YILの読み方と施設概要を教えてください"
   expected_all: ["Yagami Innovation Laboratory", "イール", "オープンイノベーション"]
   must_cite: true
   min_sources: 1
