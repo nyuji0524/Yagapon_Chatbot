@@ -94,9 +94,23 @@ def test_exact_search_includes_global_trusted_documents(tmp_path):
     ]
     store.upsert_document("builtin://drive", "文字起こしは専用フォルダへ保存する", global_metadata)
 
-    hits = store.search_exact(999, ["文字起こし"])
+    hits = store.search_exact(999, ["文字起こし"], festival=28)
 
     assert [hit.document_key for hit in hits] == ["builtin:drive"]
+
+
+def test_year_filter_still_excludes_unlabelled_guild_documents(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "documents/legacy",
+        "文字起こしは昔の場所へ保存する",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "legacy"},
+        ],
+    )
+
+    assert store.search_exact(1, ["文字起こし"], festival=28) == []
 
 
 def test_query_terms_extracts_japanese_subjects_from_natural_questions():

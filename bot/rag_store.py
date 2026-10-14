@@ -232,7 +232,10 @@ class RagStore:
         conditions = ["(guild_id = ? OR guild_id = 0)"]
         params: list[object] = [guild_id]
         if festival is not None:
-            conditions.append("festival = ?")
+            # A built-in reference with no festival is an explicitly reviewed,
+            # year-independent contract. Guild documents with missing festival
+            # remain excluded from year-specific questions.
+            conditions.append("(festival = ? OR (guild_id = 0 AND festival IS NULL))")
             params.append(festival)
         term_conditions = []
         for term in clean_terms:
