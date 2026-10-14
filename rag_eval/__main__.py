@@ -73,16 +73,12 @@ def main():
         "passed": passed,
         "total": len(results),
         "pass_rate": round(passed / len(results), 3) if results else 0,
-        "average_scores": {
-            axis: round(
-                sum(result["scores"][axis] for result in results if result["scores"][axis] is not None)
-                / max(1, sum(result["scores"][axis] is not None for result in results)),
-                2,
-            )
-            for axis in ("content", "routing", "grounding", "safety", "performance", "semantic")
-        },
+        "average_scores": {},
         "results": results,
     }
+    for axis in ("content", "routing", "grounding", "safety", "performance", "semantic"):
+        values = [result["scores"][axis] for result in results if result["scores"][axis] is not None]
+        report["average_scores"][axis] = round(sum(values) / len(values), 2) if values else None
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.output:

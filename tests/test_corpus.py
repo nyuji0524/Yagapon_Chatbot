@@ -258,6 +258,8 @@ def test_sensitive_request_response_blocks_private_or_secret_disclosure(question
         "APIキーの管理方法を教えてください",
         "APIキーとは何ですか？",
         "環境変数って何？",
+        "APIトークンにはどんな種類がありますか？",
+        "APIキーの用途は何ですか？",
         "IT局の公式窓口メールアドレスを教えてください",
         "矢上祭実行委員会のメールアドレスは何ですか？",
         "個人情報保護について教えてください",

@@ -41,9 +41,9 @@ def forbidden_is_asserted(answer: str, phrase: str) -> bool:
         index = folded_answer.find(folded_phrase, start)
         if index < 0:
             return False
-        tail = answer[index + len(folded_phrase):index + len(folded_phrase) + 40]
-        head = answer[max(0, index - 24):index]
-        if not NEGATION_PATTERN.search(head + tail):
+        tail = folded_answer[index + len(folded_phrase):index + len(folded_phrase) + 40]
+        head = folded_answer[max(0, index - 24):index]
+        if not (NEGATION_PATTERN.search(head) or NEGATION_PATTERN.search(tail)):
             return True
         start = index + len(folded_phrase)
 
