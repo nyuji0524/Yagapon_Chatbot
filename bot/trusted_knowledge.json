@@ -14,5 +14,21 @@
     "status": "verified",
     "source_url": "https://github.com/YagamiFes-IT/Yaga_Support/blob/main/docs/queue/queue-verification.md",
     "body": "27th Yaga Supportの整理券（スタンバイパス）権限契約。整理券機能全体の管理、全体設定、対象企画の有効化、執行部タブからの全企画アクセスは、Firestoreのsupport userのrolesに「神」または「整理券管理者」を持つ利用者だけが行う。対象organizationのmemberUidsに含まれる企画メンバーは、企画調整側で自団体の整理券種類・時間枠の作成と編集、QR受付、ニックネームによる手動受付、使用取消、監査ログ閲覧を行える。企画メンバーの操作範囲は自団体に限り、整理券管理者または神は全企画で同じ操作を行える。isAdmin Custom ClaimはFirebase FunctionsとFirestore Rulesの既存互換経路であり、Yaga Supportの画面・ルートをisAdminだけで許可しない。"
+  },
+  {
+    "document_key": "builtin:yil-definition",
+    "title": "YIL公式定義",
+    "festival": null,
+    "status": "current",
+    "source_url": "https://www.keio.ac.jp/ja/press-release/20250410-1/",
+    "body": "YIL（イール）はYagami Innovation Laboratory、矢上イノベーションラボラトリーの略称。慶應義塾大学矢上キャンパスに2025年4月に開設されたオープンイノベーション施設で、科学・技術の知を社会と共有し、産学連携による人材育成、社会課題解決、新産業創出を目指す。人が集い、議論し、学び、挑戦する場所を提供し、ロボットの自動操縦やアプリ開発の試作に挑戦できる常設実験室などを備える。"
+  },
+  {
+    "document_key": "builtin:yagami-room-pronunciation",
+    "title": "矢上キャンパス教室名の読み方",
+    "festival": null,
+    "status": "verified",
+    "source_url": "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/docs/it-terminology.md",
+    "body": "矢上祭実行委員会内で使う矢上キャンパスの教室名の読み方。11-21は「いちいちのにーいち」と読む。11-31は「いちいちのさんいち」と読む。12-105は「いちにーいちまるご」と読む。「11-21」を「じゅういちのにじゅういち」や「11棟21番教室」と読み替えず、内部呼称を優先する。"
   }
 ]

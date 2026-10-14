@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import yaml
+
 from rag_eval.runner import EvalCase, evaluate_answer
 
 
@@ -37,3 +41,18 @@ def test_evaluation_rejects_forbidden_hallucination():
 
     assert result["passed"] is False
     assert "forbidden:テーマは青" in result["failures"]
+
+
+def test_production_evaluation_cases_are_valid_and_unique():
+    path = Path(__file__).parents[1] / "docs" / "rag-eval-cases.yaml"
+    cases = [
+        EvalCase.model_validate(item)
+        for item in yaml.safe_load(path.read_text(encoding="utf-8"))
+    ]
+
+    ids = [case.id for case in cases]
+    assert len(cases) >= 10
+    assert len(ids) == len(set(ids))
+    assert {"terminology", "safety", "no-answer", "historical"}.issubset(
+        {case.category for case in cases}
+    )

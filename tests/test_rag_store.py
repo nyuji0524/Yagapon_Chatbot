@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from bot.rag_store import RagStore
 
 
@@ -157,3 +160,36 @@ def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert "整理券管理者" in terms
 
     assert RagStore.query_terms("今日はこれについて教えてください") == []
+
+
+def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    knowledge_path = Path(__file__).parents[1] / "bot" / "trusted_knowledge.json"
+    records = json.loads(knowledge_path.read_text(encoding="utf-8"))
+    for record in records:
+        store.upsert_document(
+            f"builtin://{record['document_key']}",
+            record["body"],
+            [
+                {"key": "document_key", "string_value": record["document_key"]},
+                {"key": "guild_id", "numeric_value": 0},
+                {"key": "channel_name", "string_value": record["title"]},
+                {"key": "authority", "string_value": "curated"},
+                {"key": "status", "string_value": record["status"]},
+                {"key": "source_url", "string_value": record["source_url"]},
+            ],
+        )
+
+    room_hits = store.search_exact(
+        999,
+        RagStore.query_terms("11-21はどのように読みますか"),
+    )
+    yil_hits = store.search_exact(
+        999,
+        RagStore.query_terms("YILとは何ですか"),
+    )
+
+    assert room_hits[0].document_key == "builtin:yagami-room-pronunciation"
+    assert "いちいちのにーいち" in room_hits[0].excerpt
+    assert yil_hits[0].document_key == "builtin:yil-definition"
+    assert "Yagami Innovation Laboratory" in yil_hits[0].excerpt
