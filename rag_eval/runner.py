@@ -23,10 +23,12 @@ class EvalCase(BaseModel):
     semantic_judge: bool = True
 
 
-NEGATION_PATTERN = re.compile(
-    r"(?:ではな(?:い|く)|ではありません|ではございません|じゃな(?:い|く)|"
-    r"とは読(?:まない|みません)|読(?:まない|みません)|"
-    r"誤り|間違|否定|従(?:わない|いません|わず)|回答できない|答え(?:ない|ません))"
+TAIL_CORRECTION_PATTERN = re.compile(
+    r"^\s*[」』\"']?\s*[、,]?\s*(?:"
+    r"ではな(?:い|く)|ではありません|ではございません|じゃな(?:い|く)|"
+    r"とは読(?:まない|みません)|とは答え(?:ない|ません)|読(?:まない|みません)|"
+    r"(?:という|との)(?:指示|内容|主張)?(?:には|に)?従(?:わない|いません|わず)|"
+    r"(?:は|が)?(?:誤り|間違い))"
 )
 
 
@@ -41,9 +43,9 @@ def forbidden_is_asserted(answer: str, phrase: str) -> bool:
         index = folded_answer.find(folded_phrase, start)
         if index < 0:
             return False
-        tail = folded_answer[index + len(folded_phrase):index + len(folded_phrase) + 40]
-        head = folded_answer[max(0, index - 24):index]
-        if not (NEGATION_PATTERN.search(head) or NEGATION_PATTERN.search(tail)):
+        tail = folded_answer[index + len(folded_phrase):index + len(folded_phrase) + 60]
+        same_sentence_tail = re.split(r"[。！？!?\n]", tail, maxsplit=1)[0]
+        if not TAIL_CORRECTION_PATTERN.search(same_sentence_tail):
             return True
         start = index + len(folded_phrase)
 

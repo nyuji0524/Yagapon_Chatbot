@@ -52,3 +52,14 @@ async def test_judge_recomputes_pass_from_axis_thresholds():
     result = await judge_answer_quality(client, {"question": "連絡先", "answer": "..."})
 
     assert result.passed is False
+
+
+async def test_judge_turns_empty_model_output_into_recorded_failure():
+    generated = AsyncMock(return_value=SimpleNamespace(parsed=None, text="", usage_metadata=None))
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    result = await judge_answer_quality(client, {"question": "質問", "answer": "回答"})
+
+    assert result.passed is False
+    assert result.factual_accuracy == 0
+    assert "構造化応答" in result.issues[0]

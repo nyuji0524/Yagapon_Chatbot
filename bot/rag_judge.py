@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from bot.ai_models import generation_config, log_usage, rag_model
 from bot.ai_retry import retry_rate_limit
@@ -68,12 +68,25 @@ async def judge_answer_quality(client, payload: dict) -> QualityJudgment:
     )
     log_usage(log, "rag_quality_judge", model, response)
     parsed = getattr(response, "parsed", None)
-    if isinstance(parsed, QualityJudgment):
-        judgment = parsed
-    elif isinstance(parsed, dict):
-        judgment = QualityJudgment.model_validate(parsed)
-    else:
-        judgment = QualityJudgment.model_validate_json(response.text or "{}")
+    try:
+        if isinstance(parsed, QualityJudgment):
+            judgment = parsed
+        elif isinstance(parsed, dict):
+            judgment = QualityJudgment.model_validate(parsed)
+        else:
+            judgment = QualityJudgment.model_validate_json(response.text or "{}")
+    except ValidationError as exc:
+        log.error("RAG quality judge returned invalid structured output: %s", exc)
+        return QualityJudgment(
+            factual_accuracy=0,
+            completeness=0,
+            directness=0,
+            citation_relevance=0,
+            safety=0,
+            passed=False,
+            issues=["評価モデルから有効な構造化応答を取得できませんでした"],
+            rationale="評価を安全側で不合格として記録しました",
+        )
     # Do not let the generative model relax the documented pass threshold.
     passed = (
         judgment.factual_accuracy >= 3

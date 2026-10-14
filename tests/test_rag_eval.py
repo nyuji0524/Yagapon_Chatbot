@@ -51,6 +51,11 @@ def test_forbidden_phrase_in_explicit_correction_is_not_a_false_positive():
     assert forbidden_is_asserted("テーマは青です", "テーマは青") is True
 
 
+def test_forbidden_assertion_is_not_negated_by_another_sentence():
+    assert forbidden_is_asserted("テーマは青です。他には回答できません。", "テーマは青") is True
+    assert forbidden_is_asserted("回答できません。テーマは青です。", "テーマは青") is True
+
+
 def test_exact_forbidden_and_irrelevant_source_remain_hard_failures():
     case = EvalCase(
         id="privacy",
