@@ -175,7 +175,8 @@ def sensitive_request_response(question: str) -> str | None:
     """Block direct requests for private contact details and credentials before retrieval."""
     normalized = " ".join(question.casefold().split())
     disclosure_request = re.search(
-        r"(?:教えて|出力|表示|見せて|開示|共有して|送って|一覧|すべて|全部|何|なに|どれ)",
+        r"(?:教えて|教えろ|知りたい|くれ|出力|表示|見せて|開示|共有して|送って|"
+        r"一覧|すべて|全部|何|なに|どれ|[?？]$)",
         normalized,
     )
     if not disclosure_request:
