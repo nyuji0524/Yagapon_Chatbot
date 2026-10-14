@@ -158,6 +158,9 @@ def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert "整理券機能" in terms
     assert "企画メンバー" in terms
     assert "整理券管理者" in terms
+    assert "27th" not in terms
+
+    assert "26th" in RagStore.query_terms("26thの年度区分はいつからいつまでですか")
 
     assert RagStore.query_terms("YILの読み方と施設概要を教えてください") == ["YIL"]
 

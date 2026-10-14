@@ -220,6 +220,21 @@ class RagStore:
             )
             if 3 <= len(segment) <= 24 and segment not in stop_terms:
                 terms.append(segment)
+        # The festival number already drives the metadata filter in the RAG
+        # pipeline.  Treating ``27th`` itself as an exact-search subject makes
+        # the operating-year reference appear beside unrelated 27th topics.
+        # Keep it only when the question is genuinely about period mapping.
+        asks_about_period = re.search(
+            r"(?:年度(?:区分)?|回次|期間|いつから|いつまで|開始日|終了日|切り替|何th)",
+            question,
+            re.IGNORECASE,
+        )
+        if not asks_about_period:
+            terms = [
+                term
+                for term in terms
+                if not re.fullmatch(r"(?:第)?\d{1,3}(?:th|回)", term, re.IGNORECASE)
+            ]
         unique = []
         seen = set()
         for term in terms:
