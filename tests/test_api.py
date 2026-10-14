@@ -58,7 +58,7 @@ def make_client():
     )
     channel.guild = guild
     corpus = SimpleNamespace(
-        _client=SimpleNamespace(),
+        evaluate_answer_quality=AsyncMock(),
         query=AsyncMock(return_value="回答"),
         query_with_trace=AsyncMock(return_value=RagAnswer(
             text="回答",
@@ -155,9 +155,8 @@ def test_rag_evaluate_requires_token_and_uses_server_side_judge(monkeypatch):
         issues=[],
         rationale="正確",
     )
-    judge = AsyncMock(return_value=judgment)
-    monkeypatch.setattr("api.routes.judge_answer_quality", judge)
     client, bot = make_client()
+    bot.corpus.evaluate_answer_quality.return_value = judgment
     body = {
         "question": "11-21の読みは？",
         "answer": "いちいちのにーいち",
@@ -174,8 +173,8 @@ def test_rag_evaluate_requires_token_and_uses_server_side_judge(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["passed"] is True
-    judge.assert_awaited_once()
-    assert judge.await_args.args[0] is bot.corpus._client
+    bot.corpus.evaluate_answer_quality.assert_awaited_once()
+    assert bot.corpus.evaluate_answer_quality.await_args.args[0]["question"] == "11-21の読みは？"
 
 
 def test_backfill_exposes_job_progress(monkeypatch):

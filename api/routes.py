@@ -15,7 +15,7 @@ from bot.corpus import (
     calculate_resumable_incremental_after,
     run_backfill_channels,
 )
-from bot.rag_judge import QualityJudgment, judge_answer_quality
+from bot.rag_judge import QualityJudgment
 
 router = APIRouter()
 log = logging.getLogger("yagapon.api")
@@ -101,10 +101,7 @@ async def ask(request: Request, body: AskRequest):
 )
 async def evaluate_rag(request: Request, body: EvaluateRagRequest):
     """Evaluate an answer against explicit gold facts without exposing the AI key to CI."""
-    return await judge_answer_quality(
-        request.app.state.bot.corpus._client,
-        body.model_dump(),
-    )
+    return await request.app.state.bot.corpus.evaluate_answer_quality(body.model_dump())
 
 
 @router.post("/backfill", dependencies=[Depends(require_api_token)])

@@ -19,6 +19,7 @@ from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, rag_model
 from bot.festival import festival_from_query, festival_metadata_filter, festival_number
+from bot.rag_judge import QualityJudgment, judge_answer_quality
 from bot.rag_store import LexicalHit, RagStore
 
 log = logging.getLogger("yagapon.corpus")
@@ -174,7 +175,7 @@ def sensitive_request_response(question: str) -> str | None:
     """Block direct requests for private contact details and credentials before retrieval."""
     normalized = " ".join(question.casefold().split())
     disclosure_request = re.search(
-        r"(?:教えて|出力|表示|見せて|開示|共有して|送って|一覧|すべて|全部)",
+        r"(?:教えて|出力|表示|見せて|開示|共有して|送って|一覧|すべて|全部|何|なに|どれ)",
         normalized,
     )
     if not disclosure_request:
@@ -280,6 +281,10 @@ class CorpusManager:
         self._active_backfills: set[int] = set()
         # レート制限: {guild_id: {"date": "2026-03-16", "count": 42}}
         self._query_counts: dict[int, dict] = {}
+
+    async def evaluate_answer_quality(self, payload: dict) -> QualityJudgment:
+        """Evaluate a RAG response while keeping the model client encapsulated."""
+        return await judge_answer_quality(self._client, payload)
 
     def _seed_trusted_knowledge(self):
         """Load small, reviewed operational contracts bundled with this release."""
