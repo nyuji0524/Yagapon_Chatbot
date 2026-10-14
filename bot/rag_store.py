@@ -245,7 +245,9 @@ class RagStore:
         params.append(limit * 4)
         sql = (
             "SELECT * FROM documents WHERE " + " AND ".join(conditions)
-            + " ORDER BY end_at DESC LIMIT ?"
+            + " ORDER BY CASE WHEN authority = 'curated' THEN 1 ELSE 0 END DESC, "
+            + "CASE WHEN status IN ('active', 'historical', 'approved', 'verified', 'current') "
+            + "THEN 1 ELSE 0 END DESC, end_at DESC LIMIT ?"
         )
         with self._lock, self._connect() as connection:
             rows = connection.execute(sql, params).fetchall()

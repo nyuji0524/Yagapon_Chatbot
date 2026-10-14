@@ -113,6 +113,38 @@ def test_year_filter_still_excludes_unlabelled_guild_documents(tmp_path):
     assert store.search_exact(1, ["文字起こし"], festival=28) == []
 
 
+def test_curated_global_document_survives_sql_candidate_limit(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "builtin://access",
+        "整理券の確定した権限契約",
+        [
+            {"key": "guild_id", "numeric_value": 0},
+            {"key": "document_key", "string_value": "builtin:access"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "verified"},
+        ],
+    )
+    for index in range(20):
+        store.upsert_document(
+            f"documents/raw-{index}",
+            f"整理券についての会話 {index}",
+            [
+                {"key": "guild_id", "numeric_value": 1},
+                {"key": "document_key", "string_value": f"raw-{index}"},
+                {"key": "festival", "numeric_value": 27},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "status", "string_value": "raw"},
+                {"key": "end_at", "string_value": f"2026-09-{index + 1:02d}"},
+            ],
+        )
+
+    hits = store.search_exact(1, ["整理券"], festival=27, limit=4)
+
+    assert hits[0].document_key == "builtin:access"
+
+
 def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert "ITラボ" in RagStore.query_terms("ITラボではどんなことをしていましたか？")
 
