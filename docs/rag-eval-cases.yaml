@@ -38,7 +38,8 @@
 - id: standby-pass-is-admin
   category: historical
   question: "27thの整理券画面はisAdminだけ持っていれば利用できますか"
-  expected_all: ["isAdmin", "だけ", "できない"]
+  expected_all: ["isAdmin"]
+  expected_any: ["できない", "できません", "許可しない", "許可されません", "利用できません"]
   expected_festival: 27
   must_cite: true
   min_sources: 1

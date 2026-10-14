@@ -183,10 +183,12 @@ def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path)
     room_hits = store.search_exact(
         999,
         RagStore.query_terms("11-21はどのように読みますか"),
+        festival=28,
     )
     yil_hits = store.search_exact(
         999,
         RagStore.query_terms("YILとは何ですか"),
+        festival=28,
     )
 
     assert room_hits[0].document_key == "builtin:yagami-room-pronunciation"
