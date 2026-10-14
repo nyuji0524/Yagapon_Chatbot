@@ -201,7 +201,7 @@ def sensitive_request_response(question: str) -> str | None:
     contact = re.search(r"(?:メールアドレス|e-?mail|電話番号|連絡先|個人住所)", normalized)
     public_contact = re.search(r"(?:公式|代表|公開|窓口|共有アドレス)", normalized)
     individual = re.search(
-        r"(?:個人|本人|メンバー|委員|局長|副局長|企画長|担当者|さん|くん)",
+        r"(?:個人|本人|メンバー|委員(?!会)|局長|副局長|企画長|担当者|さん|くん)",
         normalized,
     )
     if contact and individual and not public_contact:

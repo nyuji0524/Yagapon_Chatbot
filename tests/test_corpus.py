@@ -259,11 +259,16 @@ def test_sensitive_request_response_blocks_private_or_secret_disclosure(question
         "APIキーとは何ですか？",
         "環境変数って何？",
         "IT局の公式窓口メールアドレスを教えてください",
+        "矢上祭実行委員会のメールアドレスは何ですか？",
         "個人情報保護について教えてください",
     ],
 )
 def test_sensitive_request_response_allows_safe_howto_and_public_contact(question):
     assert sensitive_request_response(question) is None
+
+
+def test_committee_member_contact_remains_private_even_though_committee_contact_is_allowed():
+    assert sensitive_request_response("矢上祭実行委員のメールアドレスは何ですか？") is not None
 
 
 @pytest.mark.asyncio
