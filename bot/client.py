@@ -22,13 +22,60 @@ RAG_FEEDBACK_PROMPT = "回答の品質を評価してください：✅ 正し�
 RAG_FEEDBACK_RATINGS = {"✅": "positive", "⚠️": "partial", "❌": "negative"}
 
 
-def _clean_rag_query(content: str, bot_user_id: int | None) -> str:
+def _clean_rag_query(
+    content: str,
+    bot_user_id: int | None,
+    bot_role_ids: tuple[int, ...] = (),
+) -> str:
     """Remove Discord addressing helpers that should not become search terms."""
     query = content
     if bot_user_id:
         query = query.replace(f"<@{bot_user_id}>", "").replace(f"<@!{bot_user_id}>", "")
+    for role_id in bot_role_ids:
+        query = query.replace(f"<@&{role_id}>", "")
     query = re.sub(r"(?i)(?<!\S)@silent(?!\S)", "", query)
     return " ".join(query.split())
+
+
+def _mentioned_bot_role_ids(message: discord.Message, bot_user) -> tuple[int, ...]:
+    """Return mentioned roles assigned to the bot and named after the bot.
+
+    Discord's composer can prefer a role over a user when both have the same
+    display name.  Treat that role mention as an invocation only when the role
+    is actually assigned to this bot, so an unrelated same-name role cannot
+    trigger RAG answers.
+    """
+    guild = getattr(message, "guild", None)
+    bot_member = getattr(guild, "me", None) if guild else None
+    if not bot_user or not bot_member:
+        return ()
+
+    bot_names = {
+        str(name).strip().casefold()
+        for name in (
+            getattr(bot_user, "name", ""),
+            getattr(bot_user, "display_name", ""),
+            getattr(bot_member, "display_name", ""),
+        )
+        if str(name).strip()
+    }
+    assigned_role_ids = {
+        getattr(role, "id", None) for role in getattr(bot_member, "roles", ())
+    }
+    return tuple(
+        role.id
+        for role in getattr(message, "role_mentions", ())
+        if getattr(role, "id", None) in assigned_role_ids
+        and str(getattr(role, "name", "")).strip().casefold() in bot_names
+    )
+
+
+def _is_rag_invocation(message: discord.Message, bot_user) -> bool:
+    """Whether a Discord message explicitly addresses this bot."""
+    return bool(
+        bot_user
+        and (bot_user.mentioned_in(message) or _mentioned_bot_role_ids(message, bot_user))
+    )
 
 
 def _guild_yagapon_emojis(guild) -> dict[str, str]:
@@ -283,7 +330,7 @@ class YagaPon(discord.Bot):
 
         # 未設定
         if not corpus:
-            if self.user.mentioned_in(message):
+            if _is_rag_invocation(message, self.user):
                 await message.channel.send(
                     "まだ設定がされてないぽん！ `/setup` で設定してほしいぽん！",
                     silent=True,
@@ -312,7 +359,7 @@ class YagaPon(discord.Bot):
                 await vc_session.add_reference_from_message(message)
 
         # メンション → RAG回答
-        if self.user.mentioned_in(message):
+        if _is_rag_invocation(message, self.user):
             await self._handle_question(message, corpus, guild_id)
             return
 
@@ -431,7 +478,11 @@ class YagaPon(discord.Bot):
 
     async def _handle_question(self, message: discord.Message, corpus: str, guild_id: int = 0):
         """RAGで質問に回答"""
-        query = _clean_rag_query(message.content, self.user.id if self.user else None)
+        query = _clean_rag_query(
+            message.content,
+            self.user.id if self.user else None,
+            _mentioned_bot_role_ids(message, self.user),
+        )
         if not query:
             return
 
