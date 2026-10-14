@@ -648,9 +648,6 @@ class CorpusManager:
             for hit in lexical_hits
             if hit.authority == "curated" and hit.status in CURATED_STATUSES
         ]
-        # Reviewed references are the source of truth. Raw Discord excerpts are
-        # useful only when no reviewed exact match exists for the question.
-        grounding_hits = curated_hits or lexical_hits
         try:
             system = SYSTEM_INSTRUCTION
             if festival is not None:
@@ -659,67 +656,89 @@ class CorpusManager:
                 system += f"\n\n【メンバー情報】\n{members_info}"
             if glossary_text:
                 system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
-            if grounding_hits:
-                system += (
+
+            def with_lexical_context(instruction: str, hits: list[LexicalHit]) -> str:
+                if not hits:
+                    return instruction
+                return instruction + (
                     "\n\n【完全一致検索の候補】意味検索とは別に取得した原文候補だぽん。"
                     "質問との関係を確認し、関係がないものは使わないぽん。\n"
-                    + self._lexical_context(grounding_hits)
+                    + self._lexical_context(hits)
                 )
 
             model = rag_model()
-            search = types.FileSearch(
-                file_search_store_names=[corpus_store_name],
-                top_k=12,
-                metadata_filter=metadata_filter,
-            )
-            response = await self._client.aio.models.generate_content(
-                model=model,
-                contents=question,
-                config=generation_config(
-                    model,
-                    thinking_level="low",
-                    max_output_tokens=1024,
-                    system_instruction=system,
-                    tools=[types.Tool(file_search=search)],
-                ),
-            )
-            log_usage(log, "rag_query", model, response)
-            raw_answer = (response.text or "").strip()
-            answer = raw_answer or "回答を生成できなかったぽん..."
-            has_answer = bool(raw_answer)
-            # File Search metadata filtering stays disabled while legacy documents are
-            # being migrated.  Enforce the requested festival again on the returned
-            # evidence so an answer can never be presented with citations from a
-            # different year.
-            semantic_sources = self._response_sources(response, expected_festival=festival)
-            sources = [*semantic_sources]
-            sources.extend(self._lexical_sources(grounding_hits, sources))
-            semantic_evidence_rejected = festival is not None and not semantic_sources
-            curated_lexical_evidence = bool(curated_hits)
-            if grounding_hits and (
-                not has_answer
-                or answer_declares_missing_knowledge(answer)
-                or semantic_evidence_rejected
-                or curated_lexical_evidence
-            ):
-                recovered_answer = await self._recover_from_lexical_hits(
+            answer = ""
+            has_answer = False
+            sources: list[str] = []
+            used_lexical_hits: list[LexicalHit] = []
+
+            # Reviewed exact matches are cheaper and more authoritative than a
+            # semantic pass over raw conversations. Try them first and avoid a
+            # second model call when they answer the question.
+            if curated_hits:
+                curated_answer = await self._recover_from_lexical_hits(
                     question=question,
-                    system_instruction=system,
+                    system_instruction=with_lexical_context(system, curated_hits),
                     model=model,
                 )
-                if recovered_answer and not answer_declares_missing_knowledge(recovered_answer):
-                    answer = recovered_answer
+                if curated_answer and not answer_declares_missing_knowledge(curated_answer):
+                    answer = curated_answer
                     has_answer = True
-                    # The recovery pass has no File Search tool. Its answer is
-                    # grounded only in the exact-match excerpts, so do not keep
-                    # unrelated semantic-search citations from the first pass.
-                    sources = self._lexical_sources(grounding_hits, [])
-                elif semantic_evidence_rejected:
-                    # The original prose may have been generated from an
-                    # off-year semantic chunk.  A same-year lexical hit alone
-                    # does not prove that prose, so fail closed if the
-                    # lexical-only retry cannot answer.
-                    has_answer = False
+                    used_lexical_hits = curated_hits
+                    sources = self._lexical_sources(curated_hits, [])
+
+            if not has_answer:
+                raw_hits = [hit for hit in lexical_hits if hit not in curated_hits]
+                search_system = with_lexical_context(system, raw_hits)
+                search = types.FileSearch(
+                    file_search_store_names=[corpus_store_name],
+                    top_k=12,
+                    metadata_filter=metadata_filter,
+                )
+                response = await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=question,
+                    config=generation_config(
+                        model,
+                        thinking_level="low",
+                        max_output_tokens=1024,
+                        system_instruction=search_system,
+                        tools=[types.Tool(file_search=search)],
+                    ),
+                )
+                log_usage(log, "rag_query", model, response)
+                raw_answer = (response.text or "").strip()
+                answer = raw_answer or "回答を生成できなかったぽん..."
+                has_answer = bool(raw_answer)
+                # File Search metadata filtering stays disabled while legacy
+                # documents are migrated. Enforce the festival again on the
+                # returned evidence so off-year citations cannot support an answer.
+                semantic_sources = self._response_sources(
+                    response, expected_festival=festival
+                )
+                sources = [*semantic_sources]
+                sources.extend(self._lexical_sources(raw_hits, sources))
+                used_lexical_hits = raw_hits
+                semantic_evidence_rejected = festival is not None and not semantic_sources
+                if raw_hits and (
+                    not has_answer
+                    or answer_declares_missing_knowledge(answer)
+                    or semantic_evidence_rejected
+                ):
+                    recovered_answer = await self._recover_from_lexical_hits(
+                        question=question,
+                        system_instruction=search_system,
+                        model=model,
+                    )
+                    if recovered_answer and not answer_declares_missing_knowledge(
+                        recovered_answer
+                    ):
+                        answer = recovered_answer
+                        has_answer = True
+                        # The retry used exact excerpts only.
+                        sources = self._lexical_sources(raw_hits, [])
+                    elif semantic_evidence_rejected:
+                        has_answer = False
             no_answer = not sources or not has_answer or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
@@ -742,7 +761,7 @@ class CorpusManager:
                     festival=festival,
                     metadata_filter=metadata_filter,
                     citations=sources,
-                    lexical_keys=[hit.document_key for hit in grounding_hits],
+                    lexical_keys=[hit.document_key for hit in used_lexical_hits],
                     latency_ms=round((time.monotonic() - started) * 1000),
                     no_answer=no_answer,
                 )
