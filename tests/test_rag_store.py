@@ -79,6 +79,70 @@ def test_exact_search_reranks_curated_documents(tmp_path):
 
     assert [hit.document_key for hit in hits] == ["curated", "raw"]
     assert hits[0].score > hits[1].score
+    assert hits[0].authority == "curated"
+    assert hits[0].status == "approved"
+
+
+def test_exact_search_includes_global_trusted_documents(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    global_metadata = [
+        {"key": "guild_id", "numeric_value": 0},
+        {"key": "document_key", "string_value": "builtin:drive"},
+        {"key": "channel_name", "string_value": "Bot運用仕様"},
+        {"key": "authority", "string_value": "curated"},
+        {"key": "status", "string_value": "current"},
+    ]
+    store.upsert_document("builtin://drive", "文字起こしは専用フォルダへ保存する", global_metadata)
+
+    hits = store.search_exact(999, ["文字起こし"], festival=28)
+
+    assert [hit.document_key for hit in hits] == ["builtin:drive"]
+
+
+def test_year_filter_still_excludes_unlabelled_guild_documents(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "documents/legacy",
+        "文字起こしは昔の場所へ保存する",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "legacy"},
+        ],
+    )
+
+    assert store.search_exact(1, ["文字起こし"], festival=28) == []
+
+
+def test_curated_global_document_survives_sql_candidate_limit(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "builtin://access",
+        "整理券の確定した権限契約",
+        [
+            {"key": "guild_id", "numeric_value": 0},
+            {"key": "document_key", "string_value": "builtin:access"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "verified"},
+        ],
+    )
+    for index in range(20):
+        store.upsert_document(
+            f"documents/raw-{index}",
+            f"整理券についての会話 {index}",
+            [
+                {"key": "guild_id", "numeric_value": 1},
+                {"key": "document_key", "string_value": f"raw-{index}"},
+                {"key": "festival", "numeric_value": 27},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "status", "string_value": "raw"},
+                {"key": "end_at", "string_value": f"2026-09-{index + 1:02d}"},
+            ],
+        )
+
+    hits = store.search_exact(1, ["整理券"], festival=27, limit=4)
+
+    assert hits[0].document_key == "builtin:access"
 
 
 def test_query_terms_extracts_japanese_subjects_from_natural_questions():

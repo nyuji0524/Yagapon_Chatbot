@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import hashlib
 import io
+import json
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from google import genai
@@ -40,6 +42,9 @@ JST = ZoneInfo("Asia/Tokyo")
 DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
 BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
 BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
+BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
+BUILTIN_SOURCE_TYPE = "builtin_reference"
+CURATED_STATUSES = {"active", "historical", "approved", "verified", "current"}
 
 
 def backfill_channel_concurrency() -> int:
@@ -150,7 +155,9 @@ def answer_declares_missing_knowledge(answer: str) -> bool:
         r"(?:見当たら(?:ない|ず|なかった|なく|ません(?:でした)?)|"
         r"見つけられ(?:ない|ず|なかった|なく|ません(?:でした)?)|"
         r"見つか(?:ら(?:ない|ず|なかった|なく)|りません(?:でした)?)|"
-        r"確認でき(?:ない|ず|なかった|なく|ません(?:でした)?))"
+        r"確認でき(?:ない|ず|なかった|なく|ません(?:でした)?)|"
+        r"残ってい(?:ない|ず|なかった|なく|ません(?:でした)?)|"
+        r"記載されてい(?:ない|ず|なかった|なく|ません(?:でした)?))"
     )
     patterns = (
         rf"(?:情報|記録|根拠|記憶).{{0,40}}{missing_expression}",
@@ -222,12 +229,41 @@ class CorpusManager:
         api_key = os.environ.get("GOOGLE_API_KEY", "")
         self._client = genai.Client(api_key=api_key)
         self.rag_store = RagStore()
+        self._seed_trusted_knowledge()
         self._buffers: dict[tuple[int, int], MessageBuffer] = {}
         self._upload_semaphore = asyncio.Semaphore(5)
         self._flush_task: asyncio.Task | None = None
         self._active_backfills: set[int] = set()
         # レート制限: {guild_id: {"date": "2026-03-16", "count": 42}}
         self._query_counts: dict[int, dict] = {}
+
+    def _seed_trusted_knowledge(self):
+        """Load small, reviewed operational contracts bundled with this release."""
+        try:
+            records = json.loads(BUILTIN_KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+            self.rag_store.delete_source_documents(BUILTIN_SOURCE_TYPE)
+            for record in records:
+                metadata = [
+                    {"key": "document_key", "string_value": record["document_key"]},
+                    {"key": "guild_id", "numeric_value": 0},
+                    {"key": "channel_name", "string_value": record["title"]},
+                    {"key": "source_type", "string_value": BUILTIN_SOURCE_TYPE},
+                    {"key": "status", "string_value": record["status"]},
+                    {"key": "authority", "string_value": "curated"},
+                    {"key": "source_url", "string_value": record["source_url"]},
+                ]
+                if record.get("festival") is not None:
+                    metadata.append(
+                        {"key": "festival", "numeric_value": record["festival"]}
+                    )
+                self.rag_store.upsert_document(
+                    f"builtin://{record['document_key']}",
+                    record["body"],
+                    metadata,
+                )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            # A bad optional reference bundle must not take Discord offline.
+            log.error("Failed to load trusted knowledge bundle: %s", exc)
 
     # ------ lifecycle ------
 
@@ -607,6 +643,11 @@ class CorpusManager:
         metadata_filter = festival_metadata_filter(festival) if festival_filter_enabled() else None
         terms = self.rag_store.query_terms(question, glossary)
         lexical_hits = self.rag_store.search_exact(guild_id, terms, festival=festival, limit=4) if guild_id else []
+        curated_hits = [
+            hit
+            for hit in lexical_hits
+            if hit.authority == "curated" and hit.status in CURATED_STATUSES
+        ]
         try:
             system = SYSTEM_INSTRUCTION
             if festival is not None:
@@ -615,64 +656,89 @@ class CorpusManager:
                 system += f"\n\n【メンバー情報】\n{members_info}"
             if glossary_text:
                 system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
-            if lexical_hits:
-                system += (
+
+            def with_lexical_context(instruction: str, hits: list[LexicalHit]) -> str:
+                if not hits:
+                    return instruction
+                return instruction + (
                     "\n\n【完全一致検索の候補】意味検索とは別に取得した原文候補だぽん。"
-                    "質問との関係を確認し、関係がないものは使わないぽん。\n" + self._lexical_context(lexical_hits)
+                    "質問との関係を確認し、関係がないものは使わないぽん。\n"
+                    + self._lexical_context(hits)
                 )
 
             model = rag_model()
-            search = types.FileSearch(
-                file_search_store_names=[corpus_store_name],
-                top_k=12,
-                metadata_filter=metadata_filter,
-            )
-            response = await self._client.aio.models.generate_content(
-                model=model,
-                contents=question,
-                config=generation_config(
-                    model,
-                    thinking_level="low",
-                    max_output_tokens=1024,
-                    system_instruction=system,
-                    tools=[types.Tool(file_search=search)],
-                ),
-            )
-            log_usage(log, "rag_query", model, response)
-            raw_answer = (response.text or "").strip()
-            answer = raw_answer or "回答を生成できなかったぽん..."
-            has_answer = bool(raw_answer)
-            # File Search metadata filtering stays disabled while legacy documents are
-            # being migrated.  Enforce the requested festival again on the returned
-            # evidence so an answer can never be presented with citations from a
-            # different year.
-            semantic_sources = self._response_sources(response, expected_festival=festival)
-            sources = [*semantic_sources]
-            sources.extend(self._lexical_sources(lexical_hits, sources))
-            semantic_evidence_rejected = festival is not None and not semantic_sources
-            if lexical_hits and (
-                not has_answer
-                or answer_declares_missing_knowledge(answer)
-                or semantic_evidence_rejected
-            ):
-                recovered_answer = await self._recover_from_lexical_hits(
+            answer = ""
+            has_answer = False
+            sources: list[str] = []
+            used_lexical_hits: list[LexicalHit] = []
+
+            # Reviewed exact matches are cheaper and more authoritative than a
+            # semantic pass over raw conversations. Try them first and avoid a
+            # second model call when they answer the question.
+            if curated_hits:
+                curated_answer = await self._recover_from_lexical_hits(
                     question=question,
-                    system_instruction=system,
+                    system_instruction=with_lexical_context(system, curated_hits),
                     model=model,
                 )
-                if recovered_answer and not answer_declares_missing_knowledge(recovered_answer):
-                    answer = recovered_answer
+                if curated_answer and not answer_declares_missing_knowledge(curated_answer):
+                    answer = curated_answer
                     has_answer = True
-                    # The recovery pass has no File Search tool. Its answer is
-                    # grounded only in the exact-match excerpts, so do not keep
-                    # unrelated semantic-search citations from the first pass.
-                    sources = self._lexical_sources(lexical_hits, [])
-                elif semantic_evidence_rejected:
-                    # The original prose may have been generated from an
-                    # off-year semantic chunk.  A same-year lexical hit alone
-                    # does not prove that prose, so fail closed if the
-                    # lexical-only retry cannot answer.
-                    has_answer = False
+                    used_lexical_hits = curated_hits
+                    sources = self._lexical_sources(curated_hits, [])
+
+            if not has_answer:
+                raw_hits = [hit for hit in lexical_hits if hit not in curated_hits]
+                search_system = with_lexical_context(system, raw_hits)
+                search = types.FileSearch(
+                    file_search_store_names=[corpus_store_name],
+                    top_k=12,
+                    metadata_filter=metadata_filter,
+                )
+                response = await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=question,
+                    config=generation_config(
+                        model,
+                        thinking_level="low",
+                        max_output_tokens=1024,
+                        system_instruction=search_system,
+                        tools=[types.Tool(file_search=search)],
+                    ),
+                )
+                log_usage(log, "rag_query", model, response)
+                raw_answer = (response.text or "").strip()
+                answer = raw_answer or "回答を生成できなかったぽん..."
+                has_answer = bool(raw_answer)
+                # File Search metadata filtering stays disabled while legacy
+                # documents are migrated. Enforce the festival again on the
+                # returned evidence so off-year citations cannot support an answer.
+                semantic_sources = self._response_sources(
+                    response, expected_festival=festival
+                )
+                sources = [*semantic_sources]
+                sources.extend(self._lexical_sources(raw_hits, sources))
+                used_lexical_hits = raw_hits
+                semantic_evidence_rejected = festival is not None and not semantic_sources
+                if raw_hits and (
+                    not has_answer
+                    or answer_declares_missing_knowledge(answer)
+                    or semantic_evidence_rejected
+                ):
+                    recovered_answer = await self._recover_from_lexical_hits(
+                        question=question,
+                        system_instruction=search_system,
+                        model=model,
+                    )
+                    if recovered_answer and not answer_declares_missing_knowledge(
+                        recovered_answer
+                    ):
+                        answer = recovered_answer
+                        has_answer = True
+                        # The retry used exact excerpts only.
+                        sources = self._lexical_sources(raw_hits, [])
+                    elif semantic_evidence_rejected:
+                        has_answer = False
             no_answer = not sources or not has_answer or answer_declares_missing_knowledge(answer)
             if no_answer:
                 answer = (
@@ -695,7 +761,7 @@ class CorpusManager:
                     festival=festival,
                     metadata_filter=metadata_filter,
                     citations=sources,
-                    lexical_keys=[hit.document_key for hit in lexical_hits],
+                    lexical_keys=[hit.document_key for hit in used_lexical_hits],
                     latency_ms=round((time.monotonic() - started) * 1000),
                     no_answer=no_answer,
                 )
@@ -751,7 +817,8 @@ class CorpusManager:
     def _lexical_context(hits: list[LexicalHit]) -> str:
         return "\n\n".join(
             f"[exact:{hit.document_key} #{hit.channel_name} "
-            f"{f'{hit.festival}th' if hit.festival is not None else '年度不明'}]\n{hit.excerpt}"
+            f"{f'{hit.festival}th' if hit.festival is not None else '年度共通'} "
+            f"{hit.authority or 'unknown'}/{hit.status or 'unknown'}]\n{hit.excerpt}"
             for hit in hits
         )
 
@@ -760,7 +827,8 @@ class CorpusManager:
         rendered = []
         seen_labels = set()
         for hit in hits:
-            label = f"完全一致: #{hit.channel_name or '記録'}"
+            prefix = "確定仕様" if getattr(hit, "authority", "") == "curated" else "完全一致"
+            label = f"{prefix}: #{hit.channel_name or '記録'}"
             if label in seen_labels:
                 continue
             value = f"[{label}]({hit.source_url})" if hit.source_url else label

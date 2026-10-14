@@ -401,6 +401,100 @@ async def test_query_rebuilds_answer_from_same_festival_lexical_evidence(
 
 
 @pytest.mark.asyncio
+async def test_query_prefers_reviewed_lexical_evidence(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    corpus_manager.rag_store.upsert_document(
+        "builtin://access",
+        "整理券の全体管理は神または整理券管理者、自団体の受付は企画メンバーが行える。",
+        [
+            {"key": "document_key", "string_value": "builtin:access"},
+            {"key": "guild_id", "numeric_value": 0},
+            {"key": "channel_name", "string_value": "整理券権限契約"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "verified"},
+        ],
+    )
+    recovered_response = SimpleNamespace(
+        text="全体管理は神または整理券管理者、自団体の受付は企画メンバーだぽん。",
+        usage_metadata=None,
+        candidates=[],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=recovered_response
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券管理者と企画メンバーの権限は？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "企画メンバー" in result.text
+    assert result.citations == ("確定仕様: #整理券権限契約",)
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
+    assert config.tools is None
+
+
+@pytest.mark.asyncio
+async def test_query_drops_curated_source_when_curated_answer_fails(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    corpus_manager.rag_store.upsert_document(
+        "builtin://partial",
+        "整理券という語だけの不十分な確定仕様。",
+        [
+            {"key": "document_key", "string_value": "builtin:partial"},
+            {"key": "guild_id", "numeric_value": 0},
+            {"key": "channel_name", "string_value": "不十分な仕様"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "verified"},
+        ],
+    )
+    missing_response = SimpleNamespace(
+        text="その件の記録は確認できなかったぽん。",
+        usage_metadata=None,
+        candidates=[],
+    )
+    semantic_context = SimpleNamespace(
+        title="運用記録",
+        uri=None,
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "当日運用"},
+            {"key": "festival", "numeric_value": 27},
+        ],
+    )
+    semantic_response = SimpleNamespace(
+        text="整理券は当日受付で利用したぽん。",
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[
+                        SimpleNamespace(retrieved_context=semantic_context)
+                    ]
+                )
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[missing_response, semantic_response]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券は当日どう使いましたか？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert result.citations == ("#当日運用 [27th]",)
+    assert "不十分な仕様" not in result.text
+
+
+@pytest.mark.asyncio
 async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpus_manager, tmp_path):
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
     corpus_manager.rag_store.upsert_document(
