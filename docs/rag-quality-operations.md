@@ -96,9 +96,12 @@ python -m rag_eval \
   --output data/rag-eval-report.json
 ```
 
-サンプルの`docs/rag-eval-cases.example.yaml`を複製し、正答に必ず含む語、禁止語、
-期待年度、出典必須、情報なし質問を実データに合わせて定義する。モデル変更・全backfill・
-Knowledge大量更新の前後で同じ質問セットを実行して比較する。
+評価ケースには、正答語・禁止された主張・期待年度・情報なし状態に加え、正解の根拠となる
+`reference_facts`と期待する出典名`expected_source_any`を定義する。実行時は決定的チェックを
+内容・ルーティング・根拠・安全性・性能に分け、`/rag/evaluate`の参照事実ベース意味評価も
+独立ゲートとして併用する。禁止語が訂正・否定の文脈にだけ現れた場合は誤検知しない一方、
+メールドメインなど文字列自体を許可できないものは`forbidden_exact`で検査する。モデル変更・
+全backfill・Knowledge大量更新の前後で同じ質問セットを実行して比較する。
 GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のときだけ
 手動または毎週実行される。URL/Guild IDはVariables、API tokenはSecretに保存する。
 

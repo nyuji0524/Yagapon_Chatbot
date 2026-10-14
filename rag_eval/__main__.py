@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,20 @@ from pathlib import Path
 import yaml
 
 from rag_eval.runner import EvalCase, evaluate_answer
+
+
+def post_json(url: str, token: str, payload: dict, *, timeout: int = 120) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:2000]
+        raise RuntimeError(f"RAG API request failed: HTTP {exc.code}: {detail}") from exc
 
 
 def main():
@@ -29,17 +44,28 @@ def main():
     cases = [EvalCase.model_validate(item) for item in yaml.safe_load(args.cases.read_text(encoding="utf-8"))]
     results = []
     for case in cases:
-        body = json.dumps({"guild_id": args.guild_id, "query": case.question}).encode()
-        request = urllib.request.Request(
-            args.base_url.rstrip("/") + "/ask",
-            data=body,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
         started = time.monotonic()
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310
-            payload = json.load(response)
+        payload = post_json(
+            args.base_url.rstrip("/") + "/ask",
+            token,
+            {"guild_id": args.guild_id, "query": case.question},
+        )
         payload["latency_ms"] = int((time.monotonic() - started) * 1000)
-        results.append(evaluate_answer(case, payload))
+        judgment = None
+        if case.semantic_judge:
+            judgment = post_json(
+                args.base_url.rstrip("/") + "/rag/evaluate",
+                token,
+                {
+                    "question": case.question,
+                    "answer": payload.get("response", ""),
+                    "sources": payload.get("sources", []),
+                    "reference_facts": case.reference_facts,
+                    "expected_no_answer": case.expect_no_answer,
+                    "category": case.category,
+                },
+            )
+        results.append(evaluate_answer(case, payload, judgment))
 
     passed = sum(result["passed"] for result in results)
     report = {
@@ -47,8 +73,12 @@ def main():
         "passed": passed,
         "total": len(results),
         "pass_rate": round(passed / len(results), 3) if results else 0,
+        "average_scores": {},
         "results": results,
     }
+    for axis in ("content", "routing", "grounding", "safety", "performance", "semantic"):
+        values = [result["scores"][axis] for result in results if result["scores"][axis] is not None]
+        report["average_scores"][axis] = round(sum(values) / len(values), 2) if values else None
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.output:
