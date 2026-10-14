@@ -30,5 +30,13 @@
     "status": "verified",
     "source_url": "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/docs/it-terminology.md",
     "body": "矢上祭実行委員会内で使う矢上キャンパスの教室名の読み方。11-21は「いちいちのにーいち」と読む。11-31は「いちいちのさんいち」と読む。12-105は「いちにーいちまるご」と読む。「11-21」を「じゅういちのにじゅういち」や「11棟21番教室」と読み替えず、内部呼称を優先する。"
+  },
+  {
+    "document_key": "builtin:festival-operating-year",
+    "title": "矢上祭の年度区分",
+    "festival": null,
+    "status": "verified",
+    "source_url": "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/docs/festival-operating-year.md",
+    "body": "矢上祭実行委員会の年度区分は毎年10月1日に切り替え、翌年9月30日までを同じ回次として扱う。26thは2024年10月1日から2025年9月30日、27thは2025年10月1日から2026年9月30日、28thは2026年10月1日から2027年9月30日。一般にN thの開始年はN+1998年である。この年度区分は検索・記録分類の契約であり、実際の引継ぎや担当交代の日付とは区別する。"
   }
 ]

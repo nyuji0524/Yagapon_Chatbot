@@ -15,6 +15,7 @@ from bot.corpus import (
     calculate_resumable_incremental_after,
     run_backfill_channels,
 )
+from bot.rag_judge import QualityJudgment, judge_answer_quality
 
 router = APIRouter()
 log = logging.getLogger("yagapon.api")
@@ -41,6 +42,15 @@ class BackfillRequest(BaseModel):
     mode: Literal["incremental", "rebuild"] = "incremental"
     days: int | None = Field(default=30, ge=1, le=3650)
     dry_run: bool = False
+
+
+class EvaluateRagRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    answer: str = Field(min_length=1, max_length=12000)
+    sources: list[str] = Field(default_factory=list, max_length=20)
+    reference_facts: list[str] = Field(default_factory=list, max_length=30)
+    expected_no_answer: bool = False
+    category: str = Field(default="general", max_length=100)
 
 
 @router.get("/health")
@@ -81,6 +91,19 @@ async def ask(request: Request, body: AskRequest):
         festival=result.festival,
         no_answer=result.no_answer,
         timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.post(
+    "/rag/evaluate",
+    response_model=QualityJudgment,
+    dependencies=[Depends(require_api_token)],
+)
+async def evaluate_rag(request: Request, body: EvaluateRagRequest):
+    """Evaluate an answer against explicit gold facts without exposing the AI key to CI."""
+    return await judge_answer_quality(
+        request.app.state.bot.corpus._client,
+        body.model_dump(),
     )
 
 

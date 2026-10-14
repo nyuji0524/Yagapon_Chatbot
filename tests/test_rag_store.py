@@ -159,6 +159,8 @@ def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert "企画メンバー" in terms
     assert "整理券管理者" in terms
 
+    assert RagStore.query_terms("YILの読み方と施設概要を教えてください") == ["YIL"]
+
     assert RagStore.query_terms("今日はこれについて教えてください") == []
 
 
@@ -200,3 +202,11 @@ def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path)
     assert "いちいちのにーいち" in room_hits[0].excerpt
     assert yil_hits[0].document_key == "builtin:yil-definition"
     assert "Yagami Innovation Laboratory" in yil_hits[0].excerpt
+
+    year_hits = store.search_exact(
+        999,
+        RagStore.query_terms("26thの年度区分はいつからいつまでですか"),
+        festival=26,
+    )
+    assert year_hits[0].document_key == "builtin:festival-operating-year"
+    assert "2024年10月1日から2025年9月30日" in year_hits[0].excerpt

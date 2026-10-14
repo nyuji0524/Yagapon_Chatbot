@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.server import create_app
 from bot.corpus import BackfillResult, RagAnswer
+from bot.rag_judge import QualityJudgment
 from bot.recording_replay import RecordingArtifact, ReplayJob
 
 
@@ -57,6 +58,7 @@ def make_client():
     )
     channel.guild = guild
     corpus = SimpleNamespace(
+        _client=SimpleNamespace(),
         query=AsyncMock(return_value="回答"),
         query_with_trace=AsyncMock(return_value=RagAnswer(
             text="回答",
@@ -139,6 +141,41 @@ def test_ask_requires_token_and_passes_guild_context(monkeypatch):
     )
     assert response.json()["query_id"] == "query-1"
     assert response.json()["sources"] == ["source"]
+
+
+def test_rag_evaluate_requires_token_and_uses_server_side_judge(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    judgment = QualityJudgment(
+        factual_accuracy=4,
+        completeness=4,
+        directness=4,
+        citation_relevance=4,
+        safety=4,
+        passed=True,
+        issues=[],
+        rationale="正確",
+    )
+    judge = AsyncMock(return_value=judgment)
+    monkeypatch.setattr("api.routes.judge_answer_quality", judge)
+    client, bot = make_client()
+    body = {
+        "question": "11-21の読みは？",
+        "answer": "いちいちのにーいち",
+        "sources": ["教室名の読み方"],
+        "reference_facts": ["11-21はいちいちのにーいち"],
+    }
+
+    assert client.post("/rag/evaluate", json=body).status_code == 401
+    response = client.post(
+        "/rag/evaluate",
+        headers={"Authorization": "Bearer secret"},
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["passed"] is True
+    judge.assert_awaited_once()
+    assert judge.await_args.args[0] is bot.corpus._client
 
 
 def test_backfill_exposes_job_progress(monkeypatch):
