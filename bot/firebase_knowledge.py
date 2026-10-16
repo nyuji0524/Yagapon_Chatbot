@@ -248,7 +248,7 @@ class FirebaseKnowledgeReader:
     def _terms(question: str) -> list[str]:
         question = re.sub(r"(?:第\s*)?\d+(?:th|回)", " ", question, flags=re.IGNORECASE)
         stripped = re.sub(
-            r"整理券|企画|イベント|通知|お知らせ|現在|今|公開中?|開催状況|状況|一覧|最新|確認|すべて|全部|設定|どうなって(?:いる|る)|教えて|[？?。、\s]",
+            r"整理券|企画|イベント|通知|お知らせ|現在|今|公開中?|開催状況|状況|一覧|最新|確認|すべて|全部|設定|どうなって(?:いる|る)|教えて|知りたい|見たい|したい|[？?。、\s]",
             " ",
             question,
         )
