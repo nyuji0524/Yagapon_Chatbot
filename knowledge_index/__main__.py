@@ -15,6 +15,7 @@ from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 
 log = logging.getLogger("yagapon.knowledge_index")
+ALLOWED_AUTHORITIES = {"canonical", "curated", "reviewed_record"}
 
 
 def load_state(path: Path) -> dict:
@@ -52,13 +53,16 @@ def metadata_for(root: Path, path: Path, front_matter: dict, guild_id: int, dige
     relative = path.relative_to(root).as_posix()
     base_url = os.environ.get("YAGAPON_KNOWLEDGE_BASE_URL", "").rstrip("/")
     source_url = f"{base_url}/{relative}" if base_url else relative
+    authority = str(front_matter.get("authority") or "curated")
+    if authority not in ALLOWED_AUTHORITIES:
+        authority = "curated"
     metadata = [
         {"key": "source", "string_value": "knowledge"},
         {"key": "source_type", "string_value": str(front_matter.get("type") or "knowledge")[:500]},
         {"key": "schema", "string_value": "knowledge-v1"},
         {"key": "guild_id", "string_value": str(guild_id)},
         {"key": "status", "string_value": str(front_matter.get("status") or "unknown")[:500]},
-        {"key": "authority", "string_value": "curated"},
+        {"key": "authority", "string_value": authority},
         {"key": "document_key", "string_value": hashlib.sha256(relative.encode()).hexdigest()[:24]},
         {"key": "source_url", "string_value": source_url[:500]},
         {"key": "content_sha256", "string_value": digest[:64]},

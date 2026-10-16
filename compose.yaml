@@ -23,6 +23,10 @@ services:
       YAGAPON_SUPPORT_FIREBASE_PROJECT: ${YAGAPON_SUPPORT_FIREBASE_PROJECT:-demo-yagapon-support}
       YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST: ${YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST:-support-firestore:8080}
       YAGAPON_SUPPORT_ROLE_SYNC_ENABLED: ${YAGAPON_SUPPORT_ROLE_SYNC_ENABLED:-false}
+      YAGAPON_FIREBASE_KNOWLEDGE_ENABLED: ${YAGAPON_FIREBASE_KNOWLEDGE_ENABLED:-false}
+      YAGAPON_FIREBASE_KNOWLEDGE_BACKEND: ${YAGAPON_FIREBASE_KNOWLEDGE_BACKEND:-public}
+      YAGAPON_FIREBASE_KNOWLEDGE_PROJECT: ${YAGAPON_FIREBASE_KNOWLEDGE_PROJECT:-}
+      YAGAPON_FIREBASE_KNOWLEDGE_API_KEY: ${YAGAPON_FIREBASE_KNOWLEDGE_API_KEY:-}
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"
     volumes:
@@ -48,6 +52,26 @@ services:
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
     command: ["python", "-m", "knowledge_sync"]
+    healthcheck:
+      disable: true
+
+  source-index-watch:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      YAGAPON_CONFIG_PATH: /data/server_config.json
+      YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
+      YAGAPON_SOURCE_INDEX_STATE: /data/source-index-state.json
+      YAGAPON_RELEASE_METADATA: /data/releases/current.json
+      YAGAPON_SOURCE_INDEX_ENABLED: ${YAGAPON_SOURCE_INDEX_ENABLED:-false}
+      YAGAPON_KNOWLEDGE_GUILD_ID: ${YAGAPON_KNOWLEDGE_GUILD_ID:-0}
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    command: ["python", "-m", "source_index", "--watch-interval", "900"]
     healthcheck:
       disable: true
 

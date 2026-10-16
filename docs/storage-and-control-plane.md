@@ -14,6 +14,7 @@ GCEでは永続ディスクの `/var/lib/yagapon` をコンテナの `/data` に
 | Knowledge送信待ち | `/data/knowledge-outbox` | GitHub Draft PR作成前後の再送可能データ |
 | Drive同期状態 | `/data/drive-sync-state.json` | change token、ハッシュ、削除状態 |
 | Knowledge索引状態 | `/data/knowledge-index-state.json` | GitHub文書とFile Search文書の対応 |
+| ソース索引状態 | `/data/source-index-state.json` | リポジトリcommit・コードチャンクとFile Search文書の対応 |
 
 秘密情報は `/etc/yagapon/yagapon.env` と Google Secret Manager に置き、上記データや
 将来の管理画面からは分離する。

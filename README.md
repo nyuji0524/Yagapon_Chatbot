@@ -8,6 +8,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 ### 会話学習 & RAG回答
 - Discordの会話をバッチ学習（100メッセージ or 2時間ごと）
 - Gemini File Search + ローカル完全一致索引によるハイブリッド検索
+- 正式文書・本番実装・GitHubソース・Firebase現在値・会話を質問種別ごとに順位付け
 - 10月1日切替の矢上祭年度、根拠リンク、「情報なし」判定
 - ✅/⚠️/❌の回答評価と認証付き品質ダッシュボード
 - メンション or DMで質問可能（DMは登録メンバーのみ）
@@ -203,8 +204,21 @@ YAGAPON_KNOWLEDGE_REPO_PATH=../YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_URL=https://github.com/YagamiFes-IT/YagamiFes-IT-Knowledge/blob/main
 YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
 YAGAPON_KNOWLEDGE_INDEX_STATE=/data/knowledge-index-state.json
+YAGAPON_SOURCE_INDEX_ENABLED=false
+YAGAPON_SOURCE_INDEX_STATE=/data/source-index-state.json
+YAGAPON_SOURCE_GITHUB_TOKEN=
+YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025
+YAGAPON_FIREBASE_KNOWLEDGE_ENABLED=false
+YAGAPON_FIREBASE_KNOWLEDGE_BACKEND=public
+YAGAPON_FIREBASE_KNOWLEDGE_PROJECT=yagamy26th
+YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=
 YAGAPON_KNOWLEDGE_INDEX_STATUSES=approved,verified,current
 ```
+
+Firebase現在値の`public` backendは未認証RESTを使うため、Firestore Security Rulesが適用される。
+`firestore`を指定した場合はADCがRulesを迂回するため、専用サービスアカウントと最小権限を使う。
+非公開リポジトリをソース索引へ含める場合、`YAGAPON_SOURCE_GITHUB_TOKEN`には対象リポジトリの
+Contents readだけを許可したfine-grained tokenを使う。個人の広権限な`gh` OAuth tokenは本番へ置かない。
 
 `YAGAPON_MINUTES_IMAGE_URL` はGoogle Docs APIから認証なしで取得できる公開URLが必要です。
 既定値は公開リポジトリ上の画像です。リポジトリを非公開化する場合は、Cloud Storageなどの
@@ -297,6 +311,14 @@ File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質
 [RAG品質・年度・評価](docs/rag-quality-operations.md)を参照。
 既存文書から用語・人名候補を一括生成し、管理画面から確認・編集するための仕様は
 [用語・人名カタログ](docs/knowledge-catalog.md)を参照。
+
+承認済みGitHubリポジトリのソース同期は`python -m source_index --dry-run`で対象を確認してから
+`YAGAPON_SOURCE_INDEX_ENABLED=true`にする。privateリポジトリの読み取りには
+`YAGAPON_SOURCE_GITHUB_TOKEN`を使い、未設定時は既存の`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`へ
+フォールバックする。tokenはcontents readだけを付与し、ソース本文やログへ出力しない。
+
+Firebaseの現在値照会はFile Searchへ保存せず、質問時にallowlist済みの公開運用コレクションだけを
+読み取る。`support/functions/users`、申請、整理券取得者、利用ログ、会計情報は対象外である。
 
 ## マルチギルド対応
 

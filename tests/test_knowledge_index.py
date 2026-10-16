@@ -43,3 +43,16 @@ def test_metadata_contains_festival_status_and_stable_key(tmp_path, monkeypatch)
     assert values["source_type"] == "decision"
     assert values["source_url"] == "https://example.com/knowledge/years/27th/decision.md"
     assert len(values["document_key"]) == 24
+
+
+def test_metadata_accepts_only_reviewed_authority_classes(tmp_path):
+    path = tmp_path / "policy.md"
+    path.write_text("text", encoding="utf-8")
+
+    canonical = metadata_for(tmp_path, path, {"status": "approved", "authority": "canonical"}, 1, "a" * 64)
+    unsafe = metadata_for(tmp_path, path, {"status": "approved", "authority": "live_data"}, 1, "a" * 64)
+    canonical_values = {item["key"]: item.get("string_value") for item in canonical}
+    unsafe_values = {item["key"]: item.get("string_value") for item in unsafe}
+
+    assert canonical_values["authority"] == "canonical"
+    assert unsafe_values["authority"] == "curated"

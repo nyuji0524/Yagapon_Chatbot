@@ -120,7 +120,12 @@ for _ in $(seq 1 30); do
   if [[ -n "$container_id" ]]; then
     running_image=$(docker inspect --format '{{.Config.Image}}' "$container_id")
   fi
+  source_index_id=$(docker compose \
+    --project-directory "$app_dir" \
+    --env-file "$deploy_env" \
+    ps --status running --quiet source-index-watch)
   if [[ "$running_image" == "$image" ]] \
+    && [[ -n "$source_index_id" ]] \
     && systemctl is-active --quiet yagapon \
     && curl --fail --silent --show-error "http://127.0.0.1:${host_port}/health" >/dev/null; then
     trap - ERR

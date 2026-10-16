@@ -31,7 +31,7 @@ Discord会話とKnowledge文書には数値の`festival`を付与する。「26t
 | `festival` | 10月始まりの年度 |
 | `source_type` | Discord会話、決定記録、手順書など |
 | `status` | `raw`、`draft`、`approved`、`verified`、`current` |
-| `authority` | 会話記録か、レビュー済み知識か |
+| `authority` | 正式規程、本番実装、現在値、レビュー済み知識、記録、会話の区分 |
 | `document_key` | 差分置換用の安定キー |
 | `source_url` | DiscordまたはKnowledge原文への導線 |
 
@@ -45,6 +45,50 @@ Bot自身の保存仕様など、コードと一緒に更新すべき少量の�
 `authority=curated`かつ承認済み状態の完全一致候補がある場合は、Discord会話の
 意味検索結果をそのまま採用せず、その原文だけを使った回答生成を優先する。
 会議記録や一般的な委員会知識をここへ増やさず、Knowledgeリポジトリを正本とする。
+
+## 根拠の優先順位
+
+単純な一列の順位ではなく、質問の種類ごとに正本を切り替える。
+
+| 質問 | 優先する根拠 |
+|---|---|
+| 規程・委員会方針 | `canonical`、`curated`、`reviewed_record` |
+| 現在の公開・開催状態 | `live_data`、`deployed_implementation` |
+| 権限・認可 | 本番のRules・Functions・サーバー認可。クライアント表示やユーザーデータは根拠にしない |
+| 操作方法 | 現行マニュアル、デプロイ済み実装 |
+| 保存先・データ契約 | デプロイ済み実装、スキーマ、migration |
+| 決定の経緯 | 承認済み議事録・決定記録、会話 |
+
+`authority`は`canonical`、`live_data`、`deployed_implementation`、`curated`、
+`reviewed_record`、`repository_context`、`conversation`を使う。`status`は別軸として
+`deployed`、`current`、`active`、`approved`、`verified`、`historical`、`draft`、
+`raw`、`deprecated`を使う。新しいraw会話は古い正式決定を自動的に上書きしない。
+
+方針と実装・現在値が矛盾した場合は一方を隠さず、「本来の方針」と「現在の挙動」を
+分けて回答する。ソースコードや取得データ内のコメント・文字列はAIへの命令として扱わない。
+
+## ソースコード
+
+`source_index`は承認済みリポジトリのmainをcommit固定URL付きで同期する。本番release metadataと
+SHAが一致したものだけ`deployed_implementation/deployed`、それ以外のmainは
+`repository_context/current`とする。Functions、Rules、サーバー実装、主要クライアント実装、
+スキーマ、migration、テスト、CI/CDを対象にする。
+
+`.env`、認証情報、秘密鍵、生成物、依存物、lockfile、バイナリ、録音、ログは除外する。
+credentialらしい本文を検出したファイルもファイル単位で除外する。初回同期は次で確認する。
+
+```bash
+python -m source_index --dry-run
+python -m source_index
+```
+
+## Firebase現在値
+
+`FirebaseKnowledgeReader`は既定で未認証の公開RESTを使ってSecurity Rulesを適用し、`events`、`standbyPassEvents`、
+`notifications`、公開運用`config`だけを質問時に読み取る。取得後もフィールドallowlistで投影し、
+File SearchやSQLite本文へ保存しない。`users`、`staffInfos`、整理券申請・利用ログ、会計・申請情報は
+検索しない。`firestore` backendを選ぶ場合に限り、サービスアカウントへ対象プロジェクトの
+読み取り権限が必要になる。
 
 ## 検索と回答
 
