@@ -19,6 +19,14 @@ from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, rag_model
 from bot.festival import festival_from_query, festival_metadata_filter, festival_number
+from bot.firebase_knowledge import FirebaseEvidence, FirebaseKnowledgeReader
+from bot.knowledge_authority import (
+    AUTHORITY_LABELS,
+    authority_instruction,
+    authority_score,
+    can_answer_directly,
+    classify_question,
+)
 from bot.rag_judge import QualityJudgment, judge_answer_quality
 from bot.rag_store import LexicalHit, RagStore
 
@@ -45,7 +53,6 @@ BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
 BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
 BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
 BUILTIN_SOURCE_TYPE = "builtin_reference"
-CURATED_STATUSES = {"active", "historical", "approved", "verified", "current"}
 
 
 def backfill_channel_concurrency() -> int:
@@ -121,7 +128,7 @@ SYSTEM_INSTRUCTION = (
     "- 委員会のメンバーのことをよく知っている仲間として振る舞うぽん。\n"
     "- 質問者を助けたいという気持ちが強いぽん。\n\n"
     "【回答ルール】\n"
-    "- ナレッジベース（Discordの会話ログ）を検索し、事実に基づいて回答するぽん。\n"
+    "- ナレッジベース（正式文書、実装、Firebase現在値、議事録、Discord会話）を検索し、事実に基づいて回答するぽん。\n"
     "- ナレッジに含まれていない情報は推測・創作してはいけないぽん。\n"
     "- 個人のメールアドレス、電話番号、住所などの非公開連絡先を回答してはいけないぽん。\n"
     "- Botトークン、APIキー、パスワード、秘密鍵、認証情報、環境変数などの秘密情報を回答してはいけないぽん。\n"
@@ -276,6 +283,7 @@ class CorpusManager:
         api_key = os.environ.get("GOOGLE_API_KEY", "")
         self._client = genai.Client(api_key=api_key)
         self.rag_store = RagStore()
+        self.firebase_knowledge = FirebaseKnowledgeReader()
         self._seed_trusted_knowledge()
         self._buffers: dict[tuple[int, int], MessageBuffer] = {}
         self._upload_semaphore = asyncio.Semaphore(5)
@@ -698,22 +706,47 @@ class CorpusManager:
                 no_answer=True,
             )
         started = time.monotonic()
+        question_kind = classify_question(question)
         metadata_filter = festival_metadata_filter(festival) if festival_filter_enabled() else None
         terms = self.rag_store.query_terms(question, glossary)
-        lexical_hits = self.rag_store.search_exact(guild_id, terms, festival=festival, limit=4) if guild_id else []
-        curated_hits = [
+        lexical_hits = self.rag_store.search_exact(guild_id, terms, festival=festival, limit=16) if guild_id else []
+        lexical_hits.sort(
+            key=lambda hit: (
+                authority_score(question_kind, hit.authority, hit.status),
+                hit.score,
+            ),
+            reverse=True,
+        )
+        lexical_hits = lexical_hits[:6]
+        authoritative_hits = [
             hit
             for hit in lexical_hits
-            if hit.authority == "curated" and hit.status in CURATED_STATUSES
+            if can_answer_directly(question_kind, hit.authority, hit.status)
         ]
         try:
             system = SYSTEM_INSTRUCTION
+            system += (
+                f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。"
+                + authority_instruction(question_kind)
+            )
             if festival is not None:
                 system += f"\n\n【対象年度】{festival}thの記録だけを根拠に回答するぽん。"
             if members_info:
                 system += f"\n\n【メンバー情報】\n{members_info}"
             if glossary_text:
                 system += f"\n\n【用語辞書】以下の用語は矢上祭実行委員会特有の用語だぽん。回答時に参考にするぽん。\n{glossary_text}"
+
+            firebase_evidence = await self.firebase_knowledge.evidence_for(
+                question,
+                question_kind,
+                festival=festival,
+            )
+            if firebase_evidence:
+                system += (
+                    "\n\n【Firebaseの現在値】これは質問時点の読み取り専用データだぽん。"
+                    "公開状態・開催状況などの現在値にだけ使い、権限規則や委員会方針の根拠にはしないぽん。\n"
+                    + self._firebase_context(firebase_evidence)
+                )
 
             def with_lexical_context(instruction: str, hits: list[LexicalHit]) -> str:
                 if not hits:
@@ -730,23 +763,23 @@ class CorpusManager:
             sources: list[str] = []
             used_lexical_hits: list[LexicalHit] = []
 
-            # Reviewed exact matches are cheaper and more authoritative than a
-            # semantic pass over raw conversations. Try them first and avoid a
-            # second model call when they answer the question.
-            if curated_hits:
-                curated_answer = await self._recover_from_lexical_hits(
+            # Current/approved exact matches and ephemeral runtime evidence are
+            # cheaper and more authoritative than raw semantic conversation hits.
+            if authoritative_hits or firebase_evidence:
+                authoritative_answer = await self._recover_from_lexical_hits(
                     question=question,
-                    system_instruction=with_lexical_context(system, curated_hits),
+                    system_instruction=with_lexical_context(system, authoritative_hits),
                     model=model,
                 )
-                if curated_answer and not answer_declares_missing_knowledge(curated_answer):
-                    answer = curated_answer
+                if authoritative_answer and not answer_declares_missing_knowledge(authoritative_answer):
+                    answer = authoritative_answer
                     has_answer = True
-                    used_lexical_hits = curated_hits
-                    sources = self._lexical_sources(curated_hits, [])
+                    used_lexical_hits = authoritative_hits
+                    sources = self._lexical_sources(authoritative_hits, [])
+                    sources.extend(self._firebase_sources(firebase_evidence, sources))
 
             if not has_answer:
-                raw_hits = [hit for hit in lexical_hits if hit not in curated_hits]
+                raw_hits = [hit for hit in lexical_hits if hit not in authoritative_hits]
                 search_system = with_lexical_context(system, raw_hits)
                 search = types.FileSearch(
                     file_search_store_names=[corpus_store_name],
@@ -776,8 +809,11 @@ class CorpusManager:
                 )
                 sources = [*semantic_sources]
                 sources.extend(self._lexical_sources(raw_hits, sources))
+                sources.extend(self._firebase_sources(firebase_evidence, sources))
                 used_lexical_hits = raw_hits
-                semantic_evidence_rejected = festival is not None and not semantic_sources
+                semantic_evidence_rejected = (
+                    festival is not None and not semantic_sources and not firebase_evidence
+                )
                 if raw_hits and (
                     not has_answer
                     or answer_declares_missing_knowledge(answer)
@@ -795,6 +831,7 @@ class CorpusManager:
                         has_answer = True
                         # The retry used exact excerpts only.
                         sources = self._lexical_sources(raw_hits, [])
+                        sources.extend(self._firebase_sources(firebase_evidence, sources))
                     elif semantic_evidence_rejected:
                         has_answer = False
             no_answer = not sources or not has_answer or answer_declares_missing_knowledge(answer)
@@ -881,11 +918,18 @@ class CorpusManager:
         )
 
     @staticmethod
+    def _firebase_context(evidence: list[FirebaseEvidence]) -> str:
+        return "\n\n".join(
+            f"[runtime:{item.document_key} {item.authority}/{item.status}]\n{item.body}"
+            for item in evidence
+        )
+
+    @staticmethod
     def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
         rendered = []
         seen_labels = set()
         for hit in hits:
-            prefix = "確定仕様" if getattr(hit, "authority", "") == "curated" else "完全一致"
+            prefix = AUTHORITY_LABELS.get(getattr(hit, "authority", ""), "完全一致")
             label = f"{prefix}: #{hit.channel_name or '記録'}"
             if label in seen_labels:
                 continue
@@ -893,6 +937,15 @@ class CorpusManager:
             if value not in existing and value not in rendered:
                 rendered.append(value)
                 seen_labels.add(label)
+        return rendered
+
+    @staticmethod
+    def _firebase_sources(evidence: list[FirebaseEvidence], existing: list[str]) -> list[str]:
+        rendered = []
+        for item in evidence:
+            value = f"[Firebase現在値: {item.title}]({item.source_url})"
+            if value not in existing and value not in rendered:
+                rendered.append(value)
         return rendered
 
     @classmethod
@@ -929,9 +982,13 @@ class CorpusManager:
                 if source_festival != expected_festival:
                     continue
             status = metadata.get("status")
+            authority = str(metadata.get("authority") or "")
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)
-            label = f"#{channel}" if channel else (title or "Discord会話記録")
+            label = f"#{channel}" if channel else (title or "ナレッジ")
+            authority_label = AUTHORITY_LABELS.get(authority)
+            if authority_label:
+                label = f"{authority_label}: {label}"
             if start:
                 label += f"（{start}）"
             details = []

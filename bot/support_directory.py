@@ -36,9 +36,24 @@ def _field_value(value: dict[str, Any] | None) -> Any:
     if "stringValue" in value:
         return value["stringValue"]
     if "integerValue" in value:
-        return value["integerValue"]
+        return int(value["integerValue"])
+    if "doubleValue" in value:
+        return float(value["doubleValue"])
+    if "booleanValue" in value:
+        return bool(value["booleanValue"])
+    if "timestampValue" in value:
+        return value["timestampValue"]
+    if "nullValue" in value:
+        return None
     if "arrayValue" in value:
         return tuple(_field_value(item) for item in value["arrayValue"].get("values", ()))
+    if "mapValue" in value:
+        return {
+            key: _field_value(item)
+            for key, item in value["mapValue"].get("fields", {}).items()
+        }
+    if "referenceValue" in value:
+        return value["referenceValue"].rsplit("/documents/", 1)[-1]
     return None
 
 
