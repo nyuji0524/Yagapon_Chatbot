@@ -19,6 +19,13 @@ def test_source_path_allowlist_excludes_generated_credentials_and_lockfiles():
     assert not safe_source_path(".env", includes, 100)
 
 
+def test_source_path_allowlist_respects_file_and_directory_boundaries():
+    assert safe_source_path("bot/corpus.py", ("bot/",), 100)
+    assert not safe_source_path("bottle/corpus.py", ("bot/",), 100)
+    assert safe_source_path("main.py", ("main.py",), 100)
+    assert not safe_source_path("main.py.backup", ("main.py",), 100)
+
+
 def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert not contains_secret('token = os.environ.get("GITHUB_TOKEN", "")')
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')

@@ -206,7 +206,10 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
         return False
     if pure.suffix.lower() not in ALLOWED_EXTENSIONS and pure.name not in ALLOWED_FILENAMES:
         return False
-    return any(path == prefix or path.startswith(prefix) for prefix in includes)
+    return any(
+        path.startswith(prefix) if prefix.endswith("/") else path == prefix
+        for prefix in includes
+    )
 
 
 def contains_secret(text: str) -> bool:
