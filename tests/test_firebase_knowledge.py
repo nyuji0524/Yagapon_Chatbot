@@ -112,6 +112,30 @@ async def test_one_firebase_collection_failure_keeps_other_evidence(monkeypatch)
     assert "isEnabled" in result[0].body
 
 
+async def test_missing_festival_uses_current_operating_year(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    monkeypatch.setattr("bot.firebase_knowledge.current_festival", lambda: 28)
+    reader = FirebaseKnowledgeReader()
+    captured_paths = []
+
+    async def collection(_name, path, _statuses):
+        captured_paths.append(path)
+        return []
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    result = await reader.evidence_for(
+        "整理券のFirestore構造を教えて",
+        QuestionKind.DATA_CONTRACT,
+        festival=None,
+    )
+
+    assert result == []
+    assert captured_paths == ["yagamy/28/standbyPassEvents"]
+
+
 def test_generic_festival_runtime_question_does_not_become_a_false_search_term():
     assert FirebaseKnowledgeReader._terms("27thの現在の整理券") == []
     assert FirebaseKnowledgeReader._terms("最新の通知をすべて一覧で確認") == []

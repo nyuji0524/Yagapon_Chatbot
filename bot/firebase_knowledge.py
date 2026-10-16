@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-from bot.festival import festival_number
+from bot.festival import current_festival
 from bot.knowledge_authority import QuestionKind
 from bot.support_directory import SupportDirectory, _document_fields
 
@@ -120,7 +120,7 @@ class FirebaseKnowledgeReader:
         ]
         if not selected:
             return []
-        year = festival or festival_number()
+        year = festival or current_festival()
         evidence: list[FirebaseEvidence] = []
         try:
             results = await asyncio.gather(
