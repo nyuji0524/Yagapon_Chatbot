@@ -54,6 +54,38 @@ SOURCE_SECRET_PATTERNS = {
 SOURCE_SECRET_PATTERNS["literal-secret"] = re.compile(
     r"(?i)(?:password|passwd|secret|api[_ -]?key|token)\s*[:=]\s*['\"][^'\"\n]{16,}['\"]"
 )
+DEFAULT_REPOSITORY_MANIFEST = {
+    "repositories": [
+        {
+            "name": "nyuji0524/Yagapon_Chatbot",
+            "ref": "main",
+            "include": [
+                "bot/", "api/", "knowledge_index/", "knowledge_sync/",
+                "knowledge_catalog/", "rag_eval/", "reviewer/", "source_index/",
+                "deploy/", ".github/workflows/", "main.py", "compose.yaml", "Dockerfile",
+            ],
+        },
+        {
+            "name": "YagamiFes-IT/Yaga_Support",
+            "ref": "main",
+            "include": ["lib/", "test/", "docs/current_spec/", "pubspec.yaml", "firebase.json"],
+        },
+        {
+            "name": "YagamiFes-IT/yagamifes-firebase",
+            "ref": "main",
+            "include": ["functions/", "firestore.rules", "firestore.indexes.json", "firebase.json"],
+        },
+        {
+            "name": "YagamiFes-IT/Yagamifes_Web_2025",
+            "ref": "main",
+            "fetch": "tree",
+            "include": [
+                "src/", "app/", "pages/", "components/", "lib/", "public/",
+                "package.json", "next.config.js", "next.config.mjs",
+            ],
+        },
+    ]
+}
 
 
 @dataclass(frozen=True)
@@ -177,7 +209,11 @@ class GitHubSourceClient:
 
 
 def load_repositories(path: Path) -> list[Repository]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if path.exists():
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    else:
+        log.warning("Source manifest is missing at %s; using the built-in approved list", path)
+        payload = DEFAULT_REPOSITORY_MANIFEST
     allowed_env = {
         item.strip().casefold()
         for item in os.environ.get("YAGAPON_SOURCE_REPOSITORIES", "").split(",")
@@ -236,6 +272,7 @@ def chunks_for(
 ) -> list[SourceChunk]:
     lines = content.splitlines()
     chunks = []
+    festival = inferred_festival(path, content)
     start = 0
     while start < len(lines):
         end = start
@@ -260,7 +297,7 @@ def chunks_for(
             end_line=end,
             text=header + body,
             content_sha256=hashlib.sha256(body.encode()).hexdigest(),
-            festival=inferred_festival(path, body),
+            festival=festival,
             authority=authority,
             status=status,
         ))

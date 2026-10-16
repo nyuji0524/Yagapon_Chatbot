@@ -83,5 +83,32 @@ async def test_public_backend_uses_rules_compatible_status_query(monkeypatch):
     ]
 
 
+async def test_one_firebase_collection_failure_keeps_other_evidence(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": "projects/demo/databases/(default)/documents/yagamy/28/config/standbyPass",
+        "fields": {"isEnabled": {"booleanValue": True}},
+    }
+
+    async def collection(name, _path, _statuses):
+        if name == "standbyPassEvents":
+            raise RuntimeError("temporary failure")
+        return [document]
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    result = await reader.evidence_for(
+        "整理券の公開設定",
+        QuestionKind.RUNTIME,
+        festival=28,
+    )
+
+    assert len(result) == 1
+    assert "isEnabled" in result[0].body
+
+
 def test_generic_festival_runtime_question_does_not_become_a_false_search_term():
     assert FirebaseKnowledgeReader._terms("27thの現在の整理券") == []

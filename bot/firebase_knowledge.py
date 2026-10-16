@@ -130,9 +130,13 @@ class FirebaseKnowledgeReader:
                         tuple(config.get("public_statuses", ())),
                     )
                     for name, config in selected
-                )
+                ),
+                return_exceptions=True,
             )
             for (name, config), documents in zip(selected, results, strict=True):
+                if isinstance(documents, BaseException):
+                    log.warning("Firebase collection lookup failed for %s: %s", name, documents)
+                    continue
                 evidence.extend(self._rank(question, name, config["fields"], documents, year))
         except Exception:
             # Firestore availability must not take Discord answering offline.
@@ -236,7 +240,7 @@ class FirebaseKnowledgeReader:
     def _terms(question: str) -> list[str]:
         question = re.sub(r"(?:第\s*)?\d+(?:th|回)", " ", question, flags=re.IGNORECASE)
         stripped = re.sub(
-            r"整理券|企画|イベント|通知|お知らせ|現在|今|公開中|開催状況|設定|どうなって(?:いる|る)|教えて|[？?。、\s]",
+            r"整理券|企画|イベント|通知|お知らせ|現在|今|公開中?|開催状況|設定|どうなって(?:いる|る)|教えて|[？?。、\s]",
             " ",
             question,
         )

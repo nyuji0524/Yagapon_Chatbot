@@ -2,6 +2,7 @@ from source_index.__main__ import (
     chunks_for,
     contains_secret,
     inferred_festival,
+    load_repositories,
     metadata_for,
     safe_source_path,
 )
@@ -57,3 +58,29 @@ def test_source_without_year_uses_current_operating_year(monkeypatch):
     monkeypatch.setattr("source_index.__main__.current_festival", lambda: 28)
 
     assert inferred_festival("bot/corpus.py", "plain source") == 28
+
+
+def test_chunks_use_one_festival_for_the_whole_source_file(monkeypatch):
+    monkeypatch.setattr("source_index.__main__.CHUNK_CHARS", 40)
+    content = "plain source\n" * 5 + 'const path = "festival/27/events";'
+
+    chunks = chunks_for(
+        "example/repo",
+        "a" * 40,
+        "src/events.js",
+        content,
+        authority="repository_context",
+        status="current",
+    )
+
+    assert len(chunks) > 1
+    assert {chunk.festival for chunk in chunks} == {27}
+
+
+def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
+    repositories = load_repositories(tmp_path / "missing.yaml")
+
+    assert {repository.name for repository in repositories} >= {
+        "nyuji0524/Yagapon_Chatbot",
+        "YagamiFes-IT/yagamifes-firebase",
+    }
