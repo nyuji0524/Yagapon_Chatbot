@@ -56,11 +56,12 @@ async def test_public_backend_uses_rules_compatible_status_query(monkeypatch):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_API_KEY", "firebase-public-key")
     reader = FirebaseKnowledgeReader()
     captured = {}
 
-    async def request(method, url, *, payload=None):
-        captured.update(method=method, url=url, payload=payload)
+    async def request(method, url, *, payload=None, headers=None):
+        captured.update(method=method, url=url, payload=payload, headers=headers)
         return []
 
     monkeypatch.setattr(reader._directory, "_request", request)
@@ -73,6 +74,7 @@ async def test_public_backend_uses_rules_compatible_status_query(monkeypatch):
 
     assert captured["method"] == "POST"
     assert captured["url"].endswith("/yagamy/28:runQuery")
+    assert captured["headers"] == {"X-Goog-Api-Key": "firebase-public-key"}
     field_filter = captured["payload"]["structuredQuery"]["where"]["fieldFilter"]
     assert field_filter["field"]["fieldPath"] == "status"
     assert field_filter["op"] == "IN"

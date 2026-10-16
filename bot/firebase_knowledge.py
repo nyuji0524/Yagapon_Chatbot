@@ -80,6 +80,7 @@ class FirebaseKnowledgeReader:
         self.enabled = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "false").lower() == "true"
         self.limit = max(1, min(int(os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_LIMIT", "100")), 200))
         self.cache_seconds = max(10, int(os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_CACHE_SECONDS", "60")))
+        self.api_key = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_API_KEY", "").strip()
         self._directory = SupportDirectory()
         knowledge_project = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "").strip()
         if knowledge_project:
@@ -171,6 +172,7 @@ class FirebaseKnowledgeReader:
             response = await self._directory._request(
                 "POST",
                 self._directory._documents_url(f"/{parent}:runQuery"),
+                headers=self._public_headers(),
                 payload={
                     "structuredQuery": {
                         "from": [{"collectionId": collection_id}],
@@ -190,11 +192,17 @@ class FirebaseKnowledgeReader:
             payload = await self._directory._request(
                 "GET",
                 self._directory._documents_url(f"/{path}?pageSize={self.limit}"),
+                headers=self._public_headers(),
             )
             documents = list((payload or {}).get("documents", ()))
         async with self._cache_lock:
             self._cache[cache_key] = (now, documents)
         return documents
+
+    def _public_headers(self) -> dict[str, str] | None:
+        if self._directory.backend == "public" and self.api_key:
+            return {"X-Goog-Api-Key": self.api_key}
+        return None
 
     def _rank(
         self,

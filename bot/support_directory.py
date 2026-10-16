@@ -118,13 +118,14 @@ class SupportDirectory:
         url: str,
         *,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
-        headers = {}
+        request_headers = dict(headers or {})
         if self.backend == "firestore":
             token = await self._token()
-            headers["Authorization"] = f"Bearer {token}"
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            request_headers["Authorization"] = f"Bearer {token}"
+        async with aiohttp.ClientSession(timeout=timeout, headers=request_headers) as session:
             async with session.request(method, url, json=payload) as response:
                 if response.status == 404:
                     return None

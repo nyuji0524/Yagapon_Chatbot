@@ -168,7 +168,12 @@ class GitHubSourceClient:
         result = self._request(repository, f"/commits/{urllib.parse.quote(ref, safe='')}")
         return str(result["sha"])
 
-    def archive(self, repository: str, commit: str) -> list[tuple[str, bytes]]:
+    def archive(
+        self,
+        repository: str,
+        commit: str,
+        includes: tuple[str, ...],
+    ) -> list[tuple[str, bytes]]:
         data = self._request_bytes(repository, f"/tarball/{commit}")
         files = []
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
@@ -180,6 +185,8 @@ class GitHubSourceClient:
                 if len(parts) < 2:
                     continue
                 path = PurePosixPath(*parts[1:]).as_posix()
+                if not safe_source_path(path, includes, member.size):
+                    continue
                 extracted = archive.extractfile(member)
                 if extracted is not None:
                     files.append((path, extracted.read(MAX_FILE_BYTES + 1)))
@@ -402,7 +409,12 @@ async def sync_once(args) -> dict:
                 repository.include,
             )
         else:
-            archive = await asyncio.to_thread(client.archive, repository.name, commit)
+            archive = await asyncio.to_thread(
+                client.archive,
+                repository.name,
+                commit,
+                repository.include,
+            )
         pending: list[tuple[SourceChunk, str, dict | None]] = []
         for path, raw in archive:
             if not safe_source_path(path, repository.include, len(raw)):
