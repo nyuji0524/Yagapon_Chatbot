@@ -114,3 +114,4 @@ async def test_one_firebase_collection_failure_keeps_other_evidence(monkeypatch)
 
 def test_generic_festival_runtime_question_does_not_become_a_false_search_term():
     assert FirebaseKnowledgeReader._terms("27thの現在の整理券") == []
+    assert FirebaseKnowledgeReader._terms("最新の通知をすべて一覧で確認") == []
