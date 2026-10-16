@@ -96,9 +96,16 @@ class VoiceSession:
         if user_id not in self._speaker_labels:
             name = ""
             guild = getattr(self.channel, "guild", None)
-            if guild is None and hasattr(self.bot, "get_guild"):
-                guild = self.bot.get_guild(self.guild_id)
-            member = guild.get_member(user_id) if guild else None
+            member = None
+            get_member = getattr(guild, "get_member", None)
+            if callable(get_member):
+                member = get_member(user_id)
+            if member is None:
+                get_guild = getattr(self.bot, "get_guild", None)
+                resolved_guild = get_guild(self.guild_id) if callable(get_guild) else None
+                resolved_get_member = getattr(resolved_guild, "get_member", None)
+                if callable(resolved_get_member):
+                    member = resolved_get_member(user_id)
             name = str(
                 getattr(member, "display_name", "")
                 or getattr(member, "name", "")

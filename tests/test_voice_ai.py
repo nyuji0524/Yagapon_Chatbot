@@ -319,6 +319,28 @@ def test_voice_uses_registered_name_when_member_cache_is_unavailable():
     assert session._speaker_label(42) == "Discord確定: 毛蟹"
 
 
+def test_voice_speaker_label_handles_replay_guild_proxy_without_member_lookup():
+    config = SimpleNamespace(
+        get_member=lambda _guild_id, user_id: {"name": "毛蟹"} if user_id == 42 else None
+    )
+    resolved_guild = SimpleNamespace(
+        get_member=lambda user_id: SimpleNamespace(display_name="Discord表示名")
+        if user_id == 42 else None
+    )
+    bot = SimpleNamespace(
+        config=config,
+        get_guild=lambda guild_id: resolved_guild if guild_id == 1 else None,
+    )
+    session = VoiceSession(
+        bot,
+        1,
+        SimpleNamespace(guild=SimpleNamespace(id=1)),
+        VoiceMode.LISTEN,
+    )
+
+    assert session._speaker_label(42) == "Discord確定: Discord表示名"
+
+
 @pytest.mark.asyncio
 async def test_final_reprocess_replaces_incremental_transcript_only_after_full_success():
     guild = SimpleNamespace(
