@@ -930,7 +930,13 @@ class CorpusManager:
         seen_labels = set()
         for hit in hits:
             prefix = AUTHORITY_LABELS.get(getattr(hit, "authority", ""), "完全一致")
-            label = f"{prefix}: #{hit.channel_name or '記録'}"
+            name = hit.channel_name or "記録"
+            if getattr(hit, "authority", "") not in {
+                "deployed_implementation",
+                "repository_context",
+            }:
+                name = f"#{name}"
+            label = f"{prefix}: {name}"
             if label in seen_labels:
                 continue
             value = f"[{label}]({hit.source_url})" if hit.source_url else label
@@ -983,9 +989,15 @@ class CorpusManager:
                     continue
             status = metadata.get("status")
             authority = str(metadata.get("authority") or "")
+            source_type = str(metadata.get("source_type") or "")
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)
-            label = f"#{channel}" if channel else (title or "ナレッジ")
+            label = (
+                str(channel)
+                if channel and source_type == "source_code"
+                else f"#{channel}" if channel
+                else (title or "ナレッジ")
+            )
             authority_label = AUTHORITY_LABELS.get(authority)
             if authority_label:
                 label = f"{authority_label}: {label}"

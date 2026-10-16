@@ -157,7 +157,7 @@ class FirebaseKnowledgeReader:
             cached = self._cache.get(cache_key)
             if cached and now - cached[0] < self.cache_seconds:
                 return cached[1]
-        if self._directory.backend == "public" and public_statuses:
+        if public_statuses:
             parent, collection_id = path.rsplit("/", 1)
             if len(public_statuses) == 1:
                 value = {"stringValue": public_statuses[0]}
