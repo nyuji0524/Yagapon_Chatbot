@@ -9,6 +9,7 @@ import os
 import discord
 
 from bot.authorization import require_guild_admin
+from bot.gdrive import DOCS_SCOPE, DRIVE_FILE_SCOPE
 from bot.knowledge_intake import (
     DiscordMessageSource,
     build_discord_intake_bundle,
@@ -288,6 +289,8 @@ def register(bot):
                 DriveReader,
                 os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None,
                 "",
+                None,
+                [DRIVE_FILE_SCOPE, DOCS_SCOPE],
             )
             document = await asyncio.to_thread(reader.get_document, file_id)
             source_text = await asyncio.to_thread(reader.read_text, document)
