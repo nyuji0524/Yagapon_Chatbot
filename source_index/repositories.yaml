@@ -12,3 +12,10 @@ repositories:
     ref: main
     fetch: tree
     include: [src/, app/, pages/, components/, lib/, public/, package.json, next.config.js, next.config.mjs]
+  - name: YagamiFes-IT/YagamiFes-IT-Knowledge
+    ref: main
+    fetch: gcs
+    authority: curated
+    status: current
+    front_matter_statuses: [active, historical]
+    include: [knowledge/, roles/, checklists/, years/, sources/]

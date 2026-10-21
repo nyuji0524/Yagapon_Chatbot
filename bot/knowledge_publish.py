@@ -17,6 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
+from bot.gcs import GCSClient
+from bot.secret_value import read_secret
+
 log = logging.getLogger("yagapon.knowledge_publish")
 
 DEFAULT_REPOSITORY = "YagamiFes-IT/YagamiFes-IT-Knowledge"
@@ -169,6 +172,35 @@ def _sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _meeting_front_matter(
+    *,
+    title: str,
+    festival: int,
+    date: str,
+    guild_id: int,
+    session_id: str,
+    channel_name: str,
+    tags: str,
+) -> str:
+    return (
+        "---\n"
+        f"title: {_yaml_string(title)}\n"
+        "type: source\n"
+        f"festival: {festival}\n"
+        f"date: {_yaml_string(date)}\n"
+        f"last_updated: {_yaml_string(datetime.now(JST).date().isoformat())}\n"
+        "status: draft\n"
+        "contributors: []\n"
+        f"tags: [{tags}]\n"
+        "sources:\n"
+        "  - kind: discord-voice\n"
+        f"    ref: {_yaml_string(f'discord-guild:{guild_id}/session:{session_id}')}\n"
+        f"    locator: {_yaml_string(channel_name)}\n"
+        f"    accessed_on: {_yaml_string(date)}\n"
+        "---\n"
+    )
+
+
 def _sensitive_labels(files: dict[str, str]) -> list[str]:
     labels = set()
     for content in files.values():
@@ -197,22 +229,14 @@ def build_meeting_bundle(
     root = f"sources/meetings/yagapon/{festival}th/{date}/{session_id}"
     title = f"{date} {channel_name} 生文字起こし"
 
-    front_matter = (
-        "---\n"
-        f"title: {_yaml_string(title)}\n"
-        "type: source\n"
-        f"festival: {festival}\n"
-        f"date: {_yaml_string(date)}\n"
-        f"last_updated: {_yaml_string(datetime.now(JST).date().isoformat())}\n"
-        "status: draft\n"
-        "contributors: []\n"
-        "tags: [meeting, transcript, yagapon, needs-human-review]\n"
-        "sources:\n"
-        "  - kind: discord-voice\n"
-        f"    ref: {_yaml_string(f'discord-guild:{guild_id}/session:{session_id}')}\n"
-        f"    locator: {_yaml_string(channel_name)}\n"
-        f"    accessed_on: {_yaml_string(date)}\n"
-        "---\n"
+    front_matter = _meeting_front_matter(
+        title=title,
+        festival=festival,
+        date=date,
+        guild_id=guild_id,
+        session_id=session_id,
+        channel_name=channel_name,
+        tags="meeting, transcript, yagapon, needs-human-review",
     )
     transcript_document = (
         f"{front_matter}\n# {title}\n\n"
@@ -229,15 +253,19 @@ def build_meeting_bundle(
     files = {f"{root}/transcript.md": transcript_document}
 
     if summary and summary.strip():
+        summary_title = f"AI要約（要確認）: {date} {channel_name}"
         files[f"{root}/summary.md"] = (
-            f"# AI要約（要確認）: {date} {channel_name}\n\n"
+            f"{_meeting_front_matter(title=summary_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, tags='meeting, summary, yagapon, needs-human-review')}\n"
+            f"# {summary_title}\n\n"
             "> 生文字起こしから自動生成した参考資料です。事実・決定・担当・期限は"
             "transcript.mdと人間の確認を優先してください。\n\n"
             f"{summary.strip()}\n"
         )
     if include_minutes and minutes and minutes.strip():
+        minutes_title = f"AI議事録（要確認）: {date} {channel_name}"
         files[f"{root}/minutes.md"] = (
-            f"# AI議事録（要確認）: {date} {channel_name}\n\n"
+            f"{_meeting_front_matter(title=minutes_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, tags='meeting, minutes, yagapon, needs-human-review')}\n"
+            f"# {minutes_title}\n\n"
             "> 生文字起こしから自動生成した詳細議事録です。未確認のdraftです。\n\n"
             f"{minutes.strip()}\n"
         )
@@ -308,7 +336,12 @@ def _write_outbox(
     body: str,
 ) -> Path:
     bundle_path = PurePosixPath(bundle_id)
-    if bundle_path.is_absolute() or len(bundle_path.parts) != 1 or bundle_id in {".", ".."}:
+    if (
+        not re.fullmatch(r"[0-9A-Za-z._-]{1,160}", bundle_id)
+        or bundle_path.is_absolute()
+        or len(bundle_path.parts) != 1
+        or bundle_id in {".", ".."}
+    ):
         raise ValueError("Invalid Knowledge bundle ID")
     for repository_path in files:
         path = PurePosixPath(repository_path)
@@ -418,13 +451,72 @@ async def publish_knowledge_bundle(
             status="blocked-sensitive-content",
         )
 
-    token = os.environ.get("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "").strip()
-    if not token:
-        log.warning("Knowledge GitHub token is not configured; bundle retained at %s", outbox_dir)
-        return KnowledgePublishResult(session_id=bundle_id, outbox_dir=outbox_dir)
-
     repository = os.environ.get("YAGAPON_KNOWLEDGE_REPOSITORY", DEFAULT_REPOSITORY)
     base_branch = os.environ.get("YAGAPON_KNOWLEDGE_BASE_BRANCH", "main")
+    queue_bucket = os.environ.get("YAGAPON_KNOWLEDGE_GCS_BUCKET", "").strip()
+    if queue_bucket:
+        object_name = f"pending/{bundle_id}.json"
+        queue_payload = {
+            "schemaVersion": 1,
+            "bundleId": bundle_id,
+            "repository": repository,
+            "baseBranch": base_branch,
+            "repositoryRoot": repository_root,
+            "branch": branch,
+            "title": title,
+            "body": body,
+            "files": files,
+            "manifest": manifest,
+            "queuedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            await asyncio.to_thread(
+                GCSClient(queue_bucket).upload_json,
+                object_name,
+                queue_payload,
+                if_absent=True,
+            )
+        except Exception as exc:
+            payload = _delivery_payload(
+                status="failed",
+                bundle_id=bundle_id,
+                manifest=manifest,
+                repository_root=repository_root,
+                branch=branch,
+                title=title,
+                body=body,
+                errorType=type(exc).__name__,
+            )
+            await asyncio.to_thread(_write_delivery, outbox_dir, payload)
+            log.exception("Knowledge queue upload failed; bundle remains at %s", outbox_dir)
+            return KnowledgePublishResult(
+                session_id=bundle_id,
+                outbox_dir=outbox_dir,
+                status="failed",
+            )
+        payload = _delivery_payload(
+            status="queued",
+            bundle_id=bundle_id,
+            manifest=manifest,
+            repository_root=repository_root,
+            branch=branch,
+            title=title,
+            body=body,
+            repository=repository,
+            queueObject=object_name,
+        )
+        await asyncio.to_thread(_write_delivery, outbox_dir, payload)
+        return KnowledgePublishResult(
+            session_id=bundle_id,
+            outbox_dir=outbox_dir,
+            status="queued",
+        )
+
+    token = read_secret("YAGAPON_KNOWLEDGE_GITHUB_TOKEN")
+    if not token:
+        log.warning("Knowledge delivery is not configured; bundle retained at %s", outbox_dir)
+        return KnowledgePublishResult(session_id=bundle_id, outbox_dir=outbox_dir)
+
     publisher = GitHubKnowledgePublisher(token, repository, base_branch=base_branch)
     try:
         url = await asyncio.to_thread(

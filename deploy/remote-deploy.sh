@@ -92,6 +92,15 @@ with open(sys.argv[1]) as source:
 required = {"client_id", "client_secret", "refresh_token"}
 if value.get("type") not in (None, "authorized_user") or not required.issubset(value):
     raise SystemExit("Secret must contain authorized-user OAuth credentials")
+required_scopes = {
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/documents",
+}
+raw_scopes = value.get("scopes") or value.get("scope") or ()
+scopes = set(raw_scopes.split() if isinstance(raw_scopes, str) else raw_scopes)
+if not required_scopes.issubset(scopes):
+    raise SystemExit("OAuth credential must include drive.readonly, drive.file, and documents scopes")
 ' "$oauth_tmp"
   install -o 10001 -g 10001 -m 0600 \
     "$oauth_tmp" /var/lib/yagapon/google-drive-oauth.json

@@ -38,9 +38,24 @@ def test_meeting_bundle_requires_transcript_and_keeps_minutes_optional():
     assert f"{root}/summary.md" in files
     assert f"{root}/minutes.md" not in files
     assert "status: draft" in files[f"{root}/transcript.md"]
+    assert "status: draft" in files[f"{root}/summary.md"]
     assert "[Speaker 1]: 提案します" in files[f"{root}/transcript.md"]
     assert manifest["festival"] == 28
     assert manifest["rawAudio"]["published"] is False
+
+
+def test_meeting_bundle_marks_optional_minutes_as_draft():
+    root, files, _manifest = build_meeting_bundle(
+        session_id="20261010T075451Z-minutes",
+        guild_id=123,
+        channel_name="全体会議部屋",
+        mode="listen",
+        transcript="[Speaker 1]: 提案します",
+        minutes="詳細議事録",
+        include_minutes=True,
+    )
+
+    assert "status: draft" in files[f"{root}/minutes.md"]
 
 
 @pytest.mark.asyncio
@@ -62,6 +77,58 @@ async def test_publish_without_token_retains_complete_outbox(tmp_path, monkeypat
     assert delivery["status"] == "pending"
     assert list(result.outbox_dir.rglob("transcript.md"))
     assert list(result.outbox_dir.rglob("manifest.json"))
+
+
+@pytest.mark.asyncio
+async def test_publish_queues_bundle_without_github_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_GCS_BUCKET", "knowledge-intake")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", raising=False)
+    uploads = []
+
+    class FakeGCS:
+        def __init__(self, bucket):
+            assert bucket == "knowledge-intake"
+
+        def upload_json(self, name, payload, *, if_absent=False):
+            uploads.append((name, payload, if_absent))
+            return True
+
+    monkeypatch.setattr("bot.knowledge_publish.GCSClient", FakeGCS)
+    root = "sources/discord/inbox/28th/discord-queued"
+    result = await publish_knowledge_bundle(
+        bundle_id="discord-queued",
+        repository_root=root,
+        files={f"{root}/source.md": "draft"},
+        manifest={"source": "discord", "guildId": "123"},
+        branch="yagapon/intake-discord-queued",
+        title="source: queued",
+        body="review",
+    )
+
+    assert result.status == "queued"
+    assert uploads[0][0] == "pending/discord-queued.json"
+    assert uploads[0][1]["files"] == {f"{root}/source.md": "draft"}
+    assert uploads[0][2] is True
+    delivery = json.loads((result.outbox_dir / "delivery.json").read_text())
+    assert delivery["status"] == "queued"
+    assert delivery["queueObject"] == "pending/discord-queued.json"
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_bundle_id_not_accepted_by_intake(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+
+    with pytest.raises(ValueError, match="bundle ID"):
+        await publish_knowledge_bundle(
+            bundle_id="unsafe bundle",
+            repository_root="sources/discord/inbox/28th/unsafe",
+            files={"sources/discord/inbox/28th/unsafe/source.md": "draft"},
+            manifest={"source": "discord"},
+            branch="yagapon/intake-unsafe",
+            title="source: unsafe",
+            body="review",
+        )
 
 
 @pytest.mark.asyncio

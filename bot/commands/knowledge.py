@@ -46,6 +46,12 @@ def _result_message(result: KnowledgePublishResult) -> str:
             f"申請ID: `{result.session_id}`\n"
             "サーバー上の候補を管理者が確認・修正するまで再送できないぽん。"
         )
+    if result.status == "queued":
+        return (
+            "📤 Knowledge登録キューへ安全に送ったぽん！\n"
+            f"申請ID: `{result.session_id}`\n"
+            "KnowledgeリポジトリのパイプラインがDraft PRを作るので、内容をレビューしてほしいぽん。"
+        )
     if result.status == "failed":
         return (
             "⚠️ 候補は安全に保存したけれど、Draft PRの作成に失敗したぽん。\n"

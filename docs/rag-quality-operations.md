@@ -36,7 +36,7 @@ Discord会話とKnowledge文書には数値の`festival`を付与する。「26t
 | `source_url` | DiscordまたはKnowledge原文への導線 |
 
 Discordの会話は`status=raw`、`authority=conversation`とする。Knowledgeリポジトリは
-`active,historical,approved,verified,current`を自動索引し、`authority=curated`として完全一致検索で
+タクソノミで確認済みの`active,historical`だけを自動索引し、`authority=curated`として完全一致検索で
 会話記録より優先する。draftやneeds-reviewを回答根拠へ自動昇格させない。
 
 Bot自身の保存仕様など、コードと一緒に更新すべき少量の確定事項は
@@ -73,6 +73,9 @@ Bot自身の保存仕様など、コードと一緒に更新すべき少量の�
 SHAが一致したものだけ`deployed_implementation/deployed`、それ以外のmainは
 `repository_context/current`とする。Functions、Rules、サーバー実装、主要クライアント実装、
 スキーマ、migration、テスト、CI/CDを対象にする。
+
+Knowledgeリポジトリも同じ常駐同期へ含めるが、front matterのstatus allowlistを必須とし、
+承認済み文書だけを文書自身のstatusと`curated`/`reviewed_record` authorityで登録する。
 
 `.env`、認証情報、秘密鍵、生成物、依存物、lockfile、バイナリ、録音、ログは除外する。
 credentialらしい本文を検出したファイルもファイル単位で除外する。初回同期は次で確認する。

@@ -63,7 +63,8 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 
 | 状態 | 意味 | 対応 |
 |---|---|---|
-| `pending` | outbox保存済み、GitHub資格情報なし | サービス資格情報を設定して再送 |
+| `pending` | outbox保存済み、配信先未設定 | 配信先を設定して再送 |
+| `queued` | 非公開intakeへ送信済み、Draft PR作成待ち | 通常は待機。滞留時はActionsとGCSを確認 |
 | `published` | Draft PR作成済み | PRを人が確認 |
 | `failed` | GitHub API等で送信失敗 | 原因修正後に再送 |
 | `blocked-sensitive-content` | 認証情報らしき内容を検出 | outbox上で管理者が確認・除去。コマンドからの再送は禁止 |
@@ -90,13 +91,14 @@ Knowledge用AIレビューは真偽を決めず、front matter、分類、状態
 
 ## 本番設定
 
-Draft PRを作るサービス資格情報には、対象Knowledgeリポジトリだけの
-`Contents: Read and write`と`Pull requests: Read and write`を付ける。
+Botは専用GCS intake bucketへのObject Creatorだけを持つ。Knowledgeリポジトリの
+GitHub ActionsはOIDC/WIFで同bucketを読み、リポジトリ自身の`GITHUB_TOKEN`でDraft PRを作る。
 
 ```dotenv
 YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_BRANCH=main
-YAGAPON_KNOWLEDGE_GITHUB_TOKEN=<fine-grained service credential>
+YAGAPON_KNOWLEDGE_GCS_BUCKET=yagamiatlas-yagapon-knowledge-intake
+YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET=yagamiatlas-yagapon-knowledge-approved
 YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
 YAGAPON_KNOWLEDGE_GUILD_ID=<IT Division Guild ID>
 YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS=<登録を許可するGuild ID。複数はカンマ区切り>
@@ -104,5 +106,9 @@ YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS=<選考等の除外チャンネルID>
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS=選考
 ```
 
-個人用の`gh`認証を本番VMへコピーしない。Secretは`/etc/yagapon/yagapon.env`または
-Secret Managerに置き、リポジトリ、outbox、ログ、管理画面へ保存しない。
+個人用の`gh`認証やPATを本番VMへコピーしない。キューobjectは機密検査済みの候補だけを含み、
+パイプライン処理後に`processed/`へ移動する。Draft PRは人が確認するまでマージしない。
+
+承認後にKnowledge PRがmainへ入ると、`source-index-watch`がcommit SHAの変更を検出する。
+front matterのstatusが`active`または`historical`の文書だけを
+File Searchへ差分反映する。`draft`と`needs-review`はマージされても索引対象外である。
