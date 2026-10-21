@@ -76,3 +76,10 @@ def test_yearless_leap_day_resolves_to_the_latest_valid_occurrence():
     now = datetime(2025, 2, 28, tzinfo=timezone.utc)
 
     assert calendar_date_from_query("2月29日の会議", now) == date(2024, 2, 29)
+
+
+@pytest.mark.parametrize("query", ["10/9は何が決まった？", "10月9日は何があった？", "10/9が会議日です"])
+def test_yearless_date_accepts_common_japanese_particles(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert calendar_date_from_query(query, now) == date(2026, 10, 9)

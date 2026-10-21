@@ -41,6 +41,11 @@ def _meeting_body(
 ) -> str:
     local = meeting_datetime(started_at)
     label = "生文字起こし" if artifact_type == "transcript" else "AI議事録（未確認）"
+    fallback_source = (
+        "サーバー内の保存済み文字起こし"
+        if artifact_type == "transcript"
+        else "サーバー内の自動生成議事録"
+    )
     return (
         f"資料種別: {label}\n"
         f"会議名: {meeting_name(channel_name)}\n"
@@ -48,7 +53,7 @@ def _meeting_body(
         f"開催日: {local:%Y-%m-%d} ({local.month}/{local.day}, {local.month}月{local.day}日)\n"
         f"矢上祭年度: {festival_number(local)}th\n"
         f"セッションID: {session_id}\n"
-        f"原本: {source_url or 'サーバー内の保存済み文字起こし'}\n\n"
+        f"原本: {source_url or fallback_source}\n\n"
         f"{content.strip()}\n"
     )
 
