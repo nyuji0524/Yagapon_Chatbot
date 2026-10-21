@@ -19,6 +19,7 @@ from bot.knowledge_intake import (
 )
 from bot.knowledge_publish import (
     KnowledgePublishResult,
+    get_knowledge_delivery,
     list_knowledge_deliveries,
     publish_knowledge_bundle,
     retry_knowledge_delivery,
@@ -72,7 +73,13 @@ def _protected_channel(channel) -> bool:
         for value in os.environ.get("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "").split(",")
         if value.strip()
     }
-    related = [channel, getattr(channel, "parent", None)]
+    parent = getattr(channel, "parent", None)
+    related = [
+        channel,
+        parent,
+        getattr(channel, "category", None),
+        getattr(parent, "category", None),
+    ]
     if any(str(getattr(item, "id", "")) in channel_ids for item in related if item):
         return True
     protected_terms = {
@@ -373,15 +380,9 @@ def register(bot):
             return
         if not await _require_knowledge_guild(ctx):
             return
-        entries = await asyncio.to_thread(
-            list_knowledge_deliveries,
-            guild_id=ctx.guild_id,
-            limit=50,
-        )
-        if not any(
-            (entry.get("bundleId") or entry.get("sessionId")) == bundle_id
-            for entry in entries
-        ):
+        entry = await asyncio.to_thread(get_knowledge_delivery, bundle_id)
+        manifest = (entry or {}).get("manifest") or {}
+        if str(manifest.get("guildId") or "") != str(ctx.guild_id):
             await ctx.respond("❌ このサーバーの申請IDではないぽん。", ephemeral=True)
             return
         await ctx.defer(ephemeral=True)

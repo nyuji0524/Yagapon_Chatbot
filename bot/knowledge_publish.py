@@ -469,16 +469,29 @@ def list_knowledge_deliveries(*, guild_id: int | None = None, limit: int = 10) -
     return deliveries[: max(1, min(limit, 50))]
 
 
+def get_knowledge_delivery(bundle_id: str) -> dict | None:
+    """Read one delivery by its safe ID for authorization and retry."""
+    if not re.fullmatch(r"[0-9A-Za-z._-]{1,160}", bundle_id):
+        return None
+    root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox"))
+    path = root / bundle_id / "delivery.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 async def retry_knowledge_delivery(bundle_id: str) -> KnowledgePublishResult:
     """Retry a durable pending/failed bundle without regenerating its content."""
     if not re.fullmatch(r"[0-9A-Za-z._-]{1,160}", bundle_id):
         raise ValueError("Invalid Knowledge bundle ID")
     root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox"))
     outbox_dir = root / bundle_id
-    delivery_path = outbox_dir / "delivery.json"
-    if not delivery_path.is_file():
+    payload = await asyncio.to_thread(get_knowledge_delivery, bundle_id)
+    if payload is None:
         raise FileNotFoundError(bundle_id)
-    payload = json.loads(delivery_path.read_text(encoding="utf-8"))
     if payload.get("status") == "blocked-sensitive-content":
         raise RuntimeError("Sensitive content must be reviewed before retrying")
     required = ("repositoryRoot", "branch", "title", "body", "manifest")

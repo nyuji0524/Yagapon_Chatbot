@@ -31,6 +31,17 @@ def test_protected_channel_matches_id_parent_and_default_term(monkeypatch):
     assert _protected_channel(channel) is True
 
 
+def test_protected_channel_matches_category_for_text_and_thread(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "30")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
+    category = SimpleNamespace(id=30, name="IT局員選考")
+    text_channel = SimpleNamespace(id=31, name="応募者対応", parent=category, category=category)
+    thread = SimpleNamespace(id=32, name="応募者A", parent=text_channel, category=None)
+
+    assert _protected_channel(text_channel) is True
+    assert _protected_channel(thread) is True
+
+
 def test_protected_channel_allows_unmatched_channel(monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "20")
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考,人事")

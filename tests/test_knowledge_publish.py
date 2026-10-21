@@ -7,6 +7,7 @@ from bot.knowledge_publish import (
     GitHubKnowledgePublisher,
     build_meeting_bundle,
     festival_number,
+    get_knowledge_delivery,
     list_knowledge_deliveries,
     publish_knowledge_bundle,
     publish_meeting_knowledge,
@@ -107,6 +108,9 @@ async def test_generic_bundle_can_be_listed_and_retried(tmp_path, monkeypatch):
     assert len(entries) == 1
     assert entries[0]["bundleId"] == "discord-1-hash"
     assert list_knowledge_deliveries(guild_id=999) == []
+    assert get_knowledge_delivery("discord-1-hash")["manifest"]["guildId"] == "123"
+    assert get_knowledge_delivery("../escape") is None
+    assert get_knowledge_delivery("missing") is None
 
     class FakePublisher(GitHubKnowledgePublisher):
         def publish(self, **kwargs):
