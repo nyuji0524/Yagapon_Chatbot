@@ -14,7 +14,14 @@ def meeting_datetime(value: datetime | str | None = None) -> datetime:
         try:
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            value = None
+            session_time = re.match(r"(\d{8}T\d{6}Z)", value)
+            value = (
+                datetime.strptime(session_time.group(1), "%Y%m%dT%H%M%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+                if session_time
+                else None
+            )
     if value is None:
         value = datetime.now(timezone.utc)
     if value.tzinfo is None:

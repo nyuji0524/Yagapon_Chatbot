@@ -55,7 +55,7 @@ def classify_question(question: str) -> QuestionKind:
         ),
         (
             QuestionKind.HISTORY,
-            r"経緯|なぜ|以前|過去|当時|議事録|決まった理由|変更履歴",
+            r"経緯|なぜ|以前|過去|当時|議事録|会議(?:内容|記録)|反省会|決まった理由|変更履歴",
         ),
         (
             QuestionKind.PEOPLE,
