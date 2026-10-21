@@ -320,6 +320,51 @@ def test_lexical_sources_deduplicates_the_same_channel_label(corpus_manager):
     ]
 
 
+def test_meeting_sources_use_meeting_label_and_deduplicate_drive_url(corpus_manager):
+    hit = SimpleNamespace(
+        channel_name="全体会議部屋",
+        source_url="https://docs.example/transcript",
+        source_type="meeting_transcript",
+        authority="conversation",
+    )
+
+    assert corpus_manager._lexical_sources([hit], []) == [
+        "[会議記録: 全体会議部屋](https://docs.example/transcript)"
+    ]
+    assert corpus_manager._lexical_sources(
+        [hit], ["[会議記録: 全体会議部屋](https://docs.example/transcript)"]
+    ) == []
+
+
+def test_semantic_meeting_source_uses_meeting_label(corpus_manager):
+    context = SimpleNamespace(
+        title="Meeting transcript",
+        uri=None,
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "全体会議部屋"},
+            {"key": "source_type", "string_value": "meeting_transcript"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "start_at", "string_value": "2026-10-09T18:00:00+09:00"},
+            {"key": "source_url", "string_value": "https://docs.example/transcript"},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == [
+        "[会議記録: 全体会議部屋（2026-10-09） [28th / raw]](https://docs.example/transcript)"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_query_marks_model_declared_missing_knowledge_as_no_answer(corpus_manager, tmp_path):
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
