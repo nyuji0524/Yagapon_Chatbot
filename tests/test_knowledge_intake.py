@@ -109,6 +109,29 @@ def test_discord_bundle_is_draft_with_selected_message_and_traceable_source():
     assert "周辺メッセージ: 2件" in body
 
 
+def test_discord_default_title_uses_jst_date():
+    selected = DiscordMessageSource(
+        message_id=11,
+        author_id=2,
+        author_name="委員B",
+        content="朝の発言",
+        timestamp=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        jump_url="https://discord.com/channels/1/2/11",
+    )
+
+    _, root, files, _, _, title, _ = build_discord_intake_bundle(
+        guild_id=1,
+        channel_id=2,
+        channel_name="一般",
+        selected_message_id=11,
+        requested_by=3,
+        messages=[selected],
+    )
+
+    assert "2026-10-21" in title
+    assert "2026-10-21" in files[f"{root}/source.md"]
+
+
 def test_drive_bundle_keeps_original_as_reference_not_authoritative_content():
     document = DriveDocument(
         file_id="drive-file-id",
@@ -133,6 +156,7 @@ def test_drive_bundle_keeps_original_as_reference_not_authoritative_content():
         source_text="原文",
         structured=structured,
         redaction_count=1,
+        access_mode="drive.readonly",
     )
 
     source = files[f"{root}/source.md"]
@@ -141,6 +165,7 @@ def test_drive_bundle_keeps_original_as_reference_not_authoritative_content():
     assert root.startswith("sources/drive/inbox/")
     assert front_matter["status"] == "draft"
     assert manifest["redactionCount"] == 1
+    assert manifest["driveAccessMode"] == "drive.readonly"
     assert manifest["sourceSha256"]
     assert branch.startswith("yagapon/intake-drive-")
     assert "運用資料" in title

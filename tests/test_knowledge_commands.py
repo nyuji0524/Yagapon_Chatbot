@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from bot.commands.knowledge import _knowledge_guild_allowed, _protected_channel
+from bot.commands.knowledge import (
+    _knowledge_guild_allowed,
+    _protected_channel,
+    _read_drive_source,
+)
+from bot.google_credentials import GoogleCredentialScopeError
 
 
 def test_knowledge_guild_allowlist_uses_explicit_list(monkeypatch):
@@ -48,3 +53,28 @@ def test_protected_channel_allows_unmatched_channel(monkeypatch):
     channel = SimpleNamespace(id=21, name="開発全般", parent=None)
 
     assert _protected_channel(channel) is False
+
+
+def test_drive_source_falls_back_when_readonly_scope_was_not_granted(monkeypatch):
+    calls = []
+    document = SimpleNamespace(file_id="doc")
+
+    class FakeReader:
+        def __init__(self, _credentials, _drive_id, *, scopes=None):
+            calls.append(scopes)
+            if scopes is None:
+                raise GoogleCredentialScopeError("missing drive.readonly")
+
+        def get_document(self, file_id):
+            assert file_id == "doc"
+            return document
+
+        def read_text(self, source):
+            assert source is document
+            return "本文"
+
+    monkeypatch.setattr("bot.commands.knowledge.DriveReader", FakeReader)
+
+    assert _read_drive_source("doc") == (document, "本文", "drive.file")
+    assert calls[0] is None
+    assert len(calls[1]) == 2

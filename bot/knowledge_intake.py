@@ -180,7 +180,8 @@ def build_discord_intake_bundle(
     )
     if selected is None:
         raise ValueError("登録対象のメッセージが取得範囲に含まれていません")
-    resolved_title = (title or "").strip() or f"{channel_name} Discord会話 {selected.timestamp.date()}"
+    selected_date = selected.timestamp.astimezone(JST).date()
+    resolved_title = (title or "").strip() or f"{channel_name} Discord会話 {selected_date}"
     document, festival, date = _discord_document(
         title=resolved_title,
         guild_id=guild_id,
@@ -232,6 +233,7 @@ def build_drive_intake_bundle(
     source_text: str,
     structured: StructuredDraft,
     redaction_count: int,
+    access_mode: str | None = None,
 ) -> tuple[str, str, dict[str, str], dict, str, str, str]:
     """Return publish arguments for a Google Drive source registration."""
     rendered = render_source_draft(document, source_text, structured, redaction_count)
@@ -253,6 +255,7 @@ def build_drive_intake_bundle(
         "requestedBy": str(requested_by),
         "humanReviewed": False,
         "redactionCount": redaction_count,
+        "driveAccessMode": access_mode,
         "sourceSha256": _source_hash(source_text),
     }
     files = {

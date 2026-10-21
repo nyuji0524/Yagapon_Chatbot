@@ -48,7 +48,9 @@ merge後の文書 ─ status確認 ─ Knowledge差分索引 ─ RAGの整理済
 - APIキー、GitHub token、秘密鍵らしき値はモデル入力前に除外し、除外件数を記録する。
 - 原本本文をGitへそのまま複製せず、Drive URL、file ID、更新日時、SHA-256を残す。
 
-BotのGoogle資格情報に対象ファイルの閲覧権限が必要である。現在の`drive.file` OAuthでは、
+BotのGoogle資格情報に対象ファイルの閲覧権限が必要である。コマンドは`drive.readonly`を優先する。
+現在の資格情報がこのscopeを持たない場合だけ`drive.file + documents`へ限定フォールバックする。
+現在の`drive.file` OAuthでは、
 やがぽんが作成した資料やアプリへ明示的に許可された資料を読める。任意の既存資料・共有ドライブを
 対象にする場合はDrive read-only scopeで再認証する。サービスアカウントを使う場合は対象資料または
 共有ドライブへの明示共有を使う。

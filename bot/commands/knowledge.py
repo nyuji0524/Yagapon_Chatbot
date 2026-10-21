@@ -10,6 +10,7 @@ import discord
 
 from bot.authorization import require_guild_admin
 from bot.gdrive import DOCS_SCOPE, DRIVE_FILE_SCOPE
+from bot.google_credentials import GoogleCredentialScopeError
 from bot.knowledge_intake import (
     DiscordMessageSource,
     build_discord_intake_bundle,
@@ -173,6 +174,23 @@ async def _discord_messages(channel, selected, limit: int) -> list[DiscordMessag
     return result
 
 
+def _read_drive_source(file_id: str):
+    """Prefer full read-only access, then retain current drive.file compatibility."""
+    credentials_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None
+    try:
+        reader = DriveReader(credentials_path, "")
+        document = reader.get_document(file_id)
+        return document, reader.read_text(document), "drive.readonly"
+    except GoogleCredentialScopeError:
+        reader = DriveReader(
+            credentials_path,
+            "",
+            scopes=[DRIVE_FILE_SCOPE, DOCS_SCOPE],
+        )
+        document = reader.get_document(file_id)
+        return document, reader.read_text(document), "drive.file"
+
+
 def register(bot):
     group = bot.create_group("knowledge", "正式ナレッジへの登録候補を管理するぽん")
 
@@ -292,15 +310,10 @@ def register(bot):
             return
         await ctx.defer(ephemeral=True)
         try:
-            reader = await asyncio.to_thread(
-                DriveReader,
-                os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None,
-                "",
-                None,
-                [DRIVE_FILE_SCOPE, DOCS_SCOPE],
+            document, source_text, access_mode = await asyncio.to_thread(
+                _read_drive_source,
+                file_id,
             )
-            document = await asyncio.to_thread(reader.get_document, file_id)
-            source_text = await asyncio.to_thread(reader.read_text, document)
             if source_text is None:
                 await ctx.followup.send(
                     "❌ この資料形式は直接テキスト化できないぽん。"
@@ -321,6 +334,7 @@ def register(bot):
                 source_text=source_text,
                 structured=structured,
                 redaction_count=redaction_count,
+                access_mode=access_mode,
             )
             await _publish(bot, ctx, args)
         except Exception as exc:
@@ -381,9 +395,19 @@ def register(bot):
         if not await _require_knowledge_guild(ctx):
             return
         entry = await asyncio.to_thread(get_knowledge_delivery, bundle_id)
+        if entry is None:
+            await ctx.respond("❌ 指定された申請IDが見つからないぽん。", ephemeral=True)
+            return
         manifest = (entry or {}).get("manifest") or {}
         if str(manifest.get("guildId") or "") != str(ctx.guild_id):
             await ctx.respond("❌ このサーバーの申請IDではないぽん。", ephemeral=True)
+            return
+        if entry.get("status") == "blocked-sensitive-content":
+            await ctx.respond(
+                "🛑 この申請は機密検知で停止中だぽん。サーバー上の候補から該当内容を除去し、"
+                "管理者が確認するまで再送できないぽん。",
+                ephemeral=True,
+            )
             return
         await ctx.defer(ephemeral=True)
         try:
