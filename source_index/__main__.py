@@ -24,7 +24,9 @@ import yaml
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 from bot.festival import current_festival
+from bot.gcs import GCSClient
 from bot.knowledge_publish import SENSITIVE_PATTERNS
+from bot.secret_value import read_secret
 
 log = logging.getLogger("yagapon.source_index")
 
@@ -84,6 +86,18 @@ DEFAULT_REPOSITORY_MANIFEST = {
                 "package.json", "next.config.js", "next.config.mjs",
             ],
         },
+        {
+            "name": "YagamiFes-IT/YagamiFes-IT-Knowledge",
+            "ref": "main",
+            "fetch": "gcs",
+            "authority": "curated",
+            "status": "current",
+            "front_matter_statuses": [
+                "active",
+                "historical",
+            ],
+            "include": ["knowledge/", "roles/", "checklists/", "years/", "sources/"],
+        },
     ]
 }
 
@@ -94,6 +108,9 @@ class Repository:
     ref: str
     include: tuple[str, ...]
     fetch: str = "archive"
+    authority: str | None = None
+    status: str | None = None
+    front_matter_statuses: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -233,6 +250,11 @@ def load_repositories(path: Path) -> list[Repository]:
             ref=str(item.get("ref") or "main"),
             include=tuple(str(value) for value in item.get("include", ())),
             fetch=str(item.get("fetch") or "archive"),
+            authority=str(item["authority"]) if item.get("authority") else None,
+            status=str(item["status"]) if item.get("status") else None,
+            front_matter_statuses=tuple(
+                str(value) for value in item.get("front_matter_statuses", ())
+            ),
         )
         if not allowed_env or repository.name.casefold() in allowed_env:
             repositories.append(repository)
@@ -257,6 +279,54 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
 
 def contains_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values())
+
+
+def document_policy(repository: Repository, path: str, text: str) -> tuple[str, str] | None:
+    """Resolve authority/status and exclude unapproved curated documents."""
+    authority = repository.authority or "repository_context"
+    status = repository.status or "current"
+    if not repository.front_matter_statuses:
+        return authority, status
+    if not path.endswith(".md") or not text.startswith("---\n") or "\n---\n" not in text[4:]:
+        return None
+    front_matter = text[4:].split("\n---\n", 1)[0]
+    payload = yaml.safe_load(front_matter) or {}
+    document_status = str(payload.get("status") or "")
+    if document_status not in repository.front_matter_statuses:
+        return None
+    document_authority = str(payload.get("authority") or authority)
+    if document_authority not in {
+        "canonical",
+        "curated",
+        "reviewed_record",
+        "repository_context",
+    }:
+        document_authority = authority
+    return document_authority, document_status
+
+
+def gcs_snapshot(repository: Repository) -> tuple[str, list[tuple[str, bytes]]]:
+    bucket = os.environ.get("YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET", "").strip()
+    object_name = os.environ.get(
+        "YAGAPON_KNOWLEDGE_SNAPSHOT_OBJECT", "snapshots/main.json"
+    ).strip()
+    if not bucket or not object_name:
+        raise RuntimeError("Knowledge snapshot bucket/object is not configured")
+    payload = GCSClient(bucket).download_json(object_name)
+    if payload.get("repository") != repository.name:
+        raise RuntimeError("Knowledge snapshot repository does not match the manifest")
+    commit = str(payload.get("commit") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise RuntimeError("Knowledge snapshot commit is invalid")
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, dict):
+        raise RuntimeError("Knowledge snapshot files are invalid")
+    files = []
+    for path, content in raw_files.items():
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise RuntimeError("Knowledge snapshot contains a non-text file")
+        files.append((path, content.encode("utf-8")))
+    return commit, files
 
 
 def inferred_festival(path: str, text: str) -> int:
@@ -368,7 +438,9 @@ def metadata_for(chunk: SourceChunk, guild_id: int, digest: str) -> list[dict]:
 async def sync_once(args) -> dict:
     if os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() != "true":
         return {"disabled": True}
-    token = os.environ.get("YAGAPON_SOURCE_GITHUB_TOKEN") or os.environ.get("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "")
+    token = read_secret("YAGAPON_SOURCE_GITHUB_TOKEN") or read_secret(
+        "YAGAPON_KNOWLEDGE_GITHUB_TOKEN"
+    )
     client = GitHubSourceClient(token)
     repositories = load_repositories(args.manifest)
     config = ConfigManager()
@@ -383,10 +455,16 @@ async def sync_once(args) -> dict:
     indexed = unchanged = removed = skipped = 0
 
     for repository in repositories:
-        commit = await asyncio.to_thread(client.resolve, repository.name, repository.ref)
+        archive = None
+        if repository.fetch == "gcs":
+            commit, archive = await asyncio.to_thread(gcs_snapshot, repository)
+        else:
+            commit = await asyncio.to_thread(client.resolve, repository.name, repository.ref)
         is_deployed = deployed.get(repository.name) == commit
-        authority = "deployed_implementation" if is_deployed else "repository_context"
-        status = "deployed" if is_deployed else "current"
+        authority = repository.authority or (
+            "deployed_implementation" if is_deployed else "repository_context"
+        )
+        status = repository.status or ("deployed" if is_deployed else "current")
         previous_repository = state["repositories"].get(repository.name, {})
         if (
             previous_repository.get("commit") == commit
@@ -401,7 +479,9 @@ async def sync_once(args) -> dict:
             live_keys.update(existing)
             unchanged += len(existing)
             continue
-        if repository.fetch == "tree":
+        if archive is not None:
+            pass
+        elif repository.fetch == "tree":
             archive = await asyncio.to_thread(
                 client.selected_files,
                 repository.name,
@@ -427,8 +507,18 @@ async def sync_once(args) -> dict:
                 log.warning("Skipping source with credential-like content: %s:%s", repository.name, path)
                 skipped += 1
                 continue
+            policy = document_policy(repository, path, content)
+            if policy is None:
+                skipped += 1
+                continue
+            document_authority, document_status = policy
             for chunk in chunks_for(
-                repository.name, commit, path, content, authority=authority, status=status
+                repository.name,
+                commit,
+                path,
+                content,
+                authority=document_authority,
+                status=document_status,
             ):
                 live_keys.add(chunk.key)
                 digest = hashlib.sha256(chunk.text.encode()).hexdigest()
@@ -436,8 +526,8 @@ async def sync_once(args) -> dict:
                 if (
                     previous
                     and previous.get("content_sha256") == chunk.content_sha256
-                    and previous.get("authority") == authority
-                    and previous.get("status") == status
+                    and previous.get("authority") == chunk.authority
+                    and previous.get("status") == chunk.status
                 ):
                     unchanged += 1
                     continue

@@ -35,6 +35,10 @@ YAGAPON_HOST_PORT=8000
 YAGAPON_GCP_PROJECT_ID=PROJECT
 YAGAPON_GOOGLE_OAUTH_SECRET=yagapon-google-drive-oauth
 YAGAPON_GOOGLE_OAUTH_FILE=/data/google-drive-oauth.json
+YAGAPON_KNOWLEDGE_GCS_BUCKET=PROJECT-yagapon-knowledge-intake
+YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET=PROJECT-yagapon-knowledge-approved
+YAGAPON_SOURCE_REPOSITORIES=YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_SOURCE_INDEX_ENABLED=true
 EOF
 sudo chown -R 10001:10001 /var/lib/yagapon
 sudo systemctl daemon-reload
@@ -93,7 +97,7 @@ Secretが未設定の場合、保護対象APIはfail-closedで拒否する。
 Googleアカウントのauthorized-user OAuth認証情報を使う。OAuthクライアントはDesktop appとして
 作成し、次のスコープでoffline accessを許可する。
 
-- `https://www.googleapis.com/auth/drive.file`
+- `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/documents`
 
 authorized-user JSONはリポジトリやGitHub Secretsへ置かず、Secret Managerの
@@ -104,3 +108,11 @@ authorized-user JSONはリポジトリやGitHub Secretsへ置かず、Secret Man
 
 OAuth同意画面がTestingの間はrefresh tokenが7日で失効するため、常設運用前にProductionへ
 変更する。認証情報の失効時は新しいSecret versionを追加して再デプロイする。
+
+## Knowledge登録キュー
+
+BotはGitHub tokenを持たず、専用GCS bucketへ機密検査済み候補をcreate-onlyで登録する。
+KnowledgeリポジトリのGitHub Actionsだけが候補を読み、専用branchとDraft PRを作成する。
+mainへマージされた承認済み文書は別のread-only snapshot bucketへ公開され、
+`source-index-watch`が差分同期する。VMサービスアカウントへはintake bucketのObject Creatorと
+snapshot bucketのObject Viewerだけを付与する。

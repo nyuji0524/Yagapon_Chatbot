@@ -200,6 +200,7 @@ YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
 YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_BRANCH=main
 YAGAPON_KNOWLEDGE_GITHUB_TOKEN=
+YAGAPON_KNOWLEDGE_GITHUB_TOKEN_FILE=
 YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=false
 YAGAPON_MAX_RECORDING_BYTES=4294967296
 YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
@@ -214,12 +215,15 @@ YAGAPON_KNOWLEDGE_INDEX_STATE=/data/knowledge-index-state.json
 YAGAPON_SOURCE_INDEX_ENABLED=false
 YAGAPON_SOURCE_INDEX_STATE=/data/source-index-state.json
 YAGAPON_SOURCE_GITHUB_TOKEN=
-YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025
+YAGAPON_SOURCE_GITHUB_TOKEN_FILE=
+YAGAPON_SOURCE_REPOSITORIES=YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_KNOWLEDGE_GCS_BUCKET=
+YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET=
 YAGAPON_FIREBASE_KNOWLEDGE_ENABLED=false
 YAGAPON_FIREBASE_KNOWLEDGE_BACKEND=public
 YAGAPON_FIREBASE_KNOWLEDGE_PROJECT=yagamy26th
 YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=
-YAGAPON_KNOWLEDGE_INDEX_STATUSES=approved,verified,current
+YAGAPON_KNOWLEDGE_INDEX_STATUSES=active,historical
 ```
 
 Firebase現在値の`public` backendは未認証RESTを使うため、Firestore Security Rulesが適用される。
@@ -254,7 +258,11 @@ docker compose up --build
 
 `/recording replay`は、保存済み文字起こし、または障害復旧用に残っているPCMを使い、元の録音やオフセットを更新せずに長時間議事録を再生成する。結果は実行先Discordチャンネルと、設定済みの場合はGoogle Driveへ出力する。テスト出力はKnowledgeに自動投稿しない。
 
-VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`が設定されている場合は、privateなKnowledgeリポジトリの`draft`資料として専用ブランチへ1コミットし、Draft PRを作る。詳細なAI議事録は`YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true`の場合だけ含める。GitHub送信に失敗してもoutboxを削除しない。
+VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。本番では
+`YAGAPON_KNOWLEDGE_GCS_BUCKET`へcreate-onlyで候補を送り、Knowledgeリポジトリ自身の
+GitHub Actionsが専用ブランチとDraft PRを作る。BotへGitHub tokenは渡さない。
+詳細なAI議事録は`YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true`の場合だけ含める。
+キュー送信に失敗してもoutboxを削除しない。
 
 Discord会話とDrive資料の正式ナレッジ化は、無条件の自動昇格ではなく
 [`/knowledge`登録フロー](docs/knowledge-registration-flow.md)を使う。登録内容は必ず`status: draft`で
@@ -328,7 +336,10 @@ File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質
 承認済みGitHubリポジトリのソース同期は`python -m source_index --dry-run`で対象を確認してから
 `YAGAPON_SOURCE_INDEX_ENABLED=true`にする。privateリポジトリの読み取りには
 `YAGAPON_SOURCE_GITHUB_TOKEN`を使い、未設定時は既存の`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`へ
-フォールバックする。tokenはcontents readだけを付与し、ソース本文やログへ出力しない。
+フォールバックする。`*_FILE`を使えばSecret Managerから0600でmountした値を環境変数へ
+展開せずに利用できる。Knowledgeリポジトリはfront matterが`active`または
+`historical`の文書だけを`curated`として同期し、`draft`と
+`needs-review`は検索対象へ昇格させない。tokenは必要なリポジトリだけに限定し、本文やログへ出力しない。
 
 Firebaseの現在値照会はFile Searchへ保存せず、質問時にallowlist済みの公開運用コレクションだけを
 読み取る。`support/functions/users`、申請、整理券取得者、利用ログ、会計情報は対象外である。

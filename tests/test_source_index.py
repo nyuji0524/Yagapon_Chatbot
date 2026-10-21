@@ -1,11 +1,25 @@
 from source_index.__main__ import (
+    Repository,
     chunks_for,
     contains_secret,
+    document_policy,
+    gcs_snapshot,
     inferred_festival,
     load_repositories,
     metadata_for,
     safe_source_path,
 )
+
+
+def curated_repository() -> Repository:
+    return Repository(
+        name="YagamiFes-IT/YagamiFes-IT-Knowledge",
+        ref="main",
+        include=("knowledge/",),
+        authority="curated",
+        status="current",
+        front_matter_statuses=("active", "historical"),
+    )
 
 
 def test_source_path_allowlist_excludes_generated_credentials_and_lockfiles():
@@ -30,6 +44,44 @@ def test_source_path_allowlist_respects_file_and_directory_boundaries():
 def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert not contains_secret('token = os.environ.get("GITHUB_TOKEN", "")')
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')
+
+
+def test_curated_document_policy_allows_only_approved_front_matter():
+    source = "---\nstatus: active\nauthority: reviewed_record\n---\n本文"
+
+    assert document_policy(curated_repository(), "knowledge/example.md", source) == (
+        "reviewed_record",
+        "active",
+    )
+
+
+def test_curated_document_policy_rejects_draft_and_missing_front_matter():
+    draft = "---\nstatus: draft\n---\n本文"
+
+    assert document_policy(curated_repository(), "knowledge/draft.md", draft) is None
+    assert document_policy(curated_repository(), "knowledge/plain.md", "本文") is None
+
+
+def test_gcs_snapshot_validates_repository_and_commit(monkeypatch):
+    class FakeGCS:
+        def __init__(self, bucket):
+            assert bucket == "approved-bucket"
+
+        def download_json(self, name):
+            assert name == "snapshots/main.json"
+            return {
+                "repository": "YagamiFes-IT/YagamiFes-IT-Knowledge",
+                "commit": "a" * 40,
+                "files": {"knowledge/example.md": "本文"},
+            }
+
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET", "approved-bucket")
+    monkeypatch.setattr("source_index.__main__.GCSClient", FakeGCS)
+
+    commit, files = gcs_snapshot(curated_repository())
+
+    assert commit == "a" * 40
+    assert files == [("knowledge/example.md", "本文".encode())]
 
 
 def test_source_chunk_has_commit_pinned_url_and_authority_metadata():
