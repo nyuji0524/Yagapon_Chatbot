@@ -291,9 +291,14 @@ def document_policy(
     status = repository.status or "current"
     if not repository.front_matter_statuses:
         return authority, status, None
-    if not path.endswith(".md") or not text.startswith("---\n") or "\n---\n" not in text[4:]:
+    normalized = text.replace("\r\n", "\n")
+    if (
+        not path.endswith(".md")
+        or not normalized.startswith("---\n")
+        or "\n---\n" not in normalized[4:]
+    ):
         return None
-    front_matter = text[4:].split("\n---\n", 1)[0]
+    front_matter = normalized[4:].split("\n---\n", 1)[0]
     payload = yaml.safe_load(front_matter) or {}
     if not isinstance(payload, dict):
         return None
@@ -339,7 +344,9 @@ def gcs_snapshot(repository: Repository) -> tuple[str, list[tuple[str, bytes]]]:
     for path, content in raw_files.items():
         if not isinstance(path, str) or not isinstance(content, str):
             raise RuntimeError("Knowledge snapshot contains a non-text file")
-        files.append((path, content.encode("utf-8")))
+        raw = content.encode("utf-8")
+        if safe_source_path(path, repository.include, len(raw)):
+            files.append((path, raw))
     return commit, files
 
 

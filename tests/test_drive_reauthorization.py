@@ -28,4 +28,5 @@ def test_authorization_url_requires_offline_readonly_pkce():
     assert query["prompt"] == ["consent"]
     assert query["code_challenge_method"] == ["S256"]
     assert "https://www.googleapis.com/auth/drive.readonly" in query["scope"][0]
+    assert "https://www.googleapis.com/auth/drive.file" in query["scope"][0]
     assert query["redirect_uri"] == ["http://127.0.0.1:1/"]

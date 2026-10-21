@@ -98,6 +98,7 @@ Googleアカウントのauthorized-user OAuth認証情報を使う。OAuthクラ
 作成し、次のスコープでoffline accessを許可する。
 
 - `https://www.googleapis.com/auth/drive.readonly`
+- `https://www.googleapis.com/auth/drive.file`
 - `https://www.googleapis.com/auth/documents`
 
 authorized-user JSONはリポジトリやGitHub Secretsへ置かず、Secret Managerの

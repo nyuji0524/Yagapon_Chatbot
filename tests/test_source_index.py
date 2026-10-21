@@ -69,6 +69,16 @@ def test_curated_document_policy_rejects_non_mapping_front_matter():
     assert document_policy(curated_repository(), "knowledge/invalid.md", source) is None
 
 
+def test_curated_document_policy_accepts_crlf_front_matter():
+    source = "---\r\nstatus: historical\r\nfestival: 27\r\n---\r\n本文"
+
+    assert document_policy(curated_repository(), "knowledge/history.md", source) == (
+        "curated",
+        "historical",
+        27,
+    )
+
+
 def test_chunks_use_front_matter_festival_override():
     chunk = chunks_for(
         "YagamiFes-IT/YagamiFes-IT-Knowledge",
