@@ -24,6 +24,7 @@ merge後の文書 ─ status確認 ─ Knowledge差分索引 ─ RAGの整理済
 ```
 
 - URLと同じGuildだけを許可する。
+- 登録可能Guildが未設定の場合はコマンドを拒否し、暗黙に全Guildを許可しない。
 - 実行者が閲覧・履歴閲覧でき、やがぽんも読めるチャンネルだけを取得する。
 - `/ignore`対象のチャンネルと、その配下スレッドは登録しない。
 - `YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS`または`YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS`

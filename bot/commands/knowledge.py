@@ -63,7 +63,7 @@ def _knowledge_guild_allowed(guild_id: int) -> bool:
     if not configured:
         configured = os.environ.get("YAGAPON_KNOWLEDGE_GUILD_ID", "").strip()
     if not configured:
-        return True
+        return False
     allowed = {value.strip() for value in configured.split(",") if value.strip()}
     return str(guild_id) in allowed
 
@@ -143,7 +143,6 @@ async def _discord_messages(channel, selected, limit: int) -> list[DiscordMessag
     async for message in channel.history(
         limit=max(1, min(limit, 50)),
         around=selected,
-        oldest_first=True,
     ):
         fetched.append(message)
     if all(message.id != selected.id for message in fetched):
@@ -153,7 +152,7 @@ async def _discord_messages(channel, selected, limit: int) -> list[DiscordMessag
     for message in sorted(unique.values(), key=lambda item: (item.created_at, item.id)):
         if not str(getattr(message, "content", "") or "").strip() and not getattr(
             message, "attachments", None
-        ):
+        ) and message.id != selected.id:
             continue
         author = getattr(message, "author", None)
         result.append(

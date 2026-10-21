@@ -1,6 +1,10 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from bot.commands.knowledge import (
+    _discord_messages,
     _knowledge_guild_allowed,
     _protected_channel,
     _read_drive_source,
@@ -22,6 +26,13 @@ def test_knowledge_guild_allowlist_falls_back_to_index_guild(monkeypatch):
 
     assert _knowledge_guild_allowed(3) is True
     assert _knowledge_guild_allowed(4) is False
+
+
+def test_knowledge_guild_allowlist_fails_closed_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", raising=False)
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_GUILD_ID", raising=False)
+
+    assert _knowledge_guild_allowed(1) is False
 
 
 def test_protected_channel_matches_id_parent_and_default_term(monkeypatch):
@@ -78,3 +89,30 @@ def test_drive_source_falls_back_when_readonly_scope_was_not_granted(monkeypatch
     assert _read_drive_source("doc") == (document, "本文", "drive.file")
     assert calls[0] is None
     assert len(calls[1]) == 2
+
+
+@pytest.mark.asyncio
+async def test_discord_messages_keeps_empty_selected_message_without_oldest_first():
+    selected = SimpleNamespace(
+        id=1,
+        created_at=datetime(2026, 10, 21, tzinfo=timezone.utc),
+        content="",
+        attachments=[],
+        author=SimpleNamespace(id=2, display_name="委員"),
+        jump_url="https://discord.com/channels/1/2/1",
+    )
+
+    class FakeChannel:
+        def history(self, **kwargs):
+            assert "oldest_first" not in kwargs
+
+            async def values():
+                yield selected
+
+            return values()
+
+    messages = await _discord_messages(FakeChannel(), selected, 21)
+
+    assert len(messages) == 1
+    assert messages[0].message_id == 1
+    assert messages[0].content == ""
