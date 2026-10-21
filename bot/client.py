@@ -235,6 +235,17 @@ class YagaPon(discord.Bot):
 
             if not minutes:
                 await session.publish_knowledge()
+                from bot.meeting_index import index_bot_meeting
+
+                await index_bot_meeting(
+                    self,
+                    guild_id=member.guild.id,
+                    session_id=session.session_id,
+                    channel_name=session.channel.name,
+                    started_at=session.started_at,
+                    transcript=session.transcript_text,
+                    transcript_url=transcript_url,
+                )
                 session.mark_delivered(transcript_url=transcript_url)
                 return
 
@@ -269,6 +280,19 @@ class YagaPon(discord.Bot):
                     knowledge_url = await session.publish_knowledge(
                         summary=summary,
                         minutes=minutes,
+                    )
+                    from bot.meeting_index import index_bot_meeting
+
+                    await index_bot_meeting(
+                        self,
+                        guild_id=member.guild.id,
+                        session_id=session.session_id,
+                        channel_name=session.channel.name,
+                        started_at=session.started_at,
+                        transcript=session.transcript_text,
+                        minutes=minutes,
+                        transcript_url=transcript_url,
+                        minutes_url=drive_url,
                     )
 
                     embed = discord.Embed(

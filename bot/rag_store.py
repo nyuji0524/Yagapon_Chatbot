@@ -177,6 +177,14 @@ class RagStore:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM documents WHERE source_type = ?", (source_type,))
 
+    def get_document(self, document_key: str) -> dict | None:
+        """Return the local mirror row used to make remote replacement idempotent."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM documents WHERE document_key = ?", (document_key,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     @staticmethod
     def query_terms(question: str, glossary: dict | None = None) -> list[str]:
         terms = []
@@ -250,6 +258,7 @@ class RagStore:
         terms: list[str],
         *,
         festival: int | None = None,
+        target_date: str | None = None,
         limit: int = 4,
     ) -> list[LexicalHit]:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
@@ -265,6 +274,9 @@ class RagStore:
             # remain excluded from year-specific questions.
             conditions.append("(festival = ? OR (guild_id = 0 AND festival IS NULL))")
             params.append(festival)
+        if target_date is not None:
+            conditions.append("substr(start_at, 1, 10) = ?")
+            params.append(target_date)
         term_conditions = []
         for term in clean_terms:
             term_conditions.append("instr(lower(body), lower(?)) > 0")

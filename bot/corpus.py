@@ -18,7 +18,12 @@ from google import genai
 from google.genai import types
 
 from bot.ai_models import generation_config, log_usage, rag_model
-from bot.festival import festival_from_query, festival_metadata_filter, festival_number
+from bot.festival import (
+    calendar_date_from_query,
+    festival_from_query,
+    festival_metadata_filter,
+    festival_number,
+)
 from bot.firebase_knowledge import FirebaseEvidence, FirebaseKnowledgeReader
 from bot.knowledge_authority import (
     AUTHORITY_LABELS,
@@ -162,7 +167,9 @@ SYSTEM_INSTRUCTION = (
 
 def answer_declares_missing_knowledge(answer: str) -> bool:
     """Detect a model-declared no-answer even when File Search returned tangential sources."""
-    opening = answer[:500]
+    # The model sometimes explains surrounding context first and only admits
+    # the requested record is missing near the end of a long answer.
+    inspected = answer[:8000]
     missing_expression = (
         r"(?:見当たら(?:ない|ず|なかった|なく|ません(?:でした)?)|"
         r"見つけられ(?:ない|ず|なかった|なく|ません(?:でした)?)|"
@@ -175,7 +182,7 @@ def answer_declares_missing_knowledge(answer: str) -> bool:
         rf"(?:情報|記録|根拠|記憶).{{0,40}}{missing_expression}",
         rf"{missing_expression}.{{0,30}}(?:情報|記録|根拠|記憶)",
     )
-    return any(re.search(pattern, opening, re.DOTALL) for pattern in patterns)
+    return any(re.search(pattern, inspected, re.DOTALL) for pattern in patterns)
 
 
 def sensitive_request_response(question: str) -> str | None:
@@ -690,6 +697,7 @@ class CorpusManager:
         glossary_text: str = "",
         glossary: dict | None = None,
     ) -> RagAnswer:
+        target_date = calendar_date_from_query(question)
         festival = festival_from_query(question)
         sensitive_response = sensitive_request_response(question)
         if sensitive_response:
@@ -709,7 +717,17 @@ class CorpusManager:
         question_kind = classify_question(question)
         metadata_filter = festival_metadata_filter(festival) if festival_filter_enabled() else None
         terms = self.rag_store.query_terms(question, glossary)
-        lexical_hits = self.rag_store.search_exact(guild_id, terms, festival=festival, limit=16) if guild_id else []
+        lexical_hits = (
+            self.rag_store.search_exact(
+                guild_id,
+                terms,
+                festival=festival,
+                target_date=target_date.isoformat() if target_date else None,
+                limit=16,
+            )
+            if guild_id
+            else []
+        )
         lexical_hits.sort(
             key=lambda hit: (
                 authority_score(question_kind, hit.authority, hit.status),
@@ -731,6 +749,11 @@ class CorpusManager:
             )
             if festival is not None:
                 system += f"\n\n【対象年度】{festival}thの記録だけを根拠に回答するぽん。"
+            if target_date is not None:
+                system += (
+                    f"\n【対象日】{target_date.isoformat()}の記録だけを根拠に回答するぽん。"
+                    "同じ月日の別年度や、前後日の記録を混ぜてはいけないぽん。"
+                )
             if members_info:
                 system += f"\n\n【メンバー情報】\n{members_info}"
             if glossary_text:
@@ -805,14 +828,18 @@ class CorpusManager:
                 # documents are migrated. Enforce the festival again on the
                 # returned evidence so off-year citations cannot support an answer.
                 semantic_sources = self._response_sources(
-                    response, expected_festival=festival
+                    response,
+                    expected_festival=festival,
+                    expected_date=target_date.isoformat() if target_date else None,
                 )
                 sources = [*semantic_sources]
                 sources.extend(self._lexical_sources(raw_hits, sources))
                 sources.extend(self._firebase_sources(firebase_evidence, sources))
                 used_lexical_hits = raw_hits
                 semantic_evidence_rejected = (
-                    festival is not None and not semantic_sources and not firebase_evidence
+                    (festival is not None or target_date is not None)
+                    and not semantic_sources
+                    and not firebase_evidence
                 )
                 if raw_hits and (
                     not has_answer
@@ -961,6 +988,7 @@ class CorpusManager:
         limit: int = 5,
         *,
         expected_festival: int | None = None,
+        expected_date: str | None = None,
     ) -> list[str]:
         """File Search grounding metadataをDiscord上で読める参照一覧へ変換する。"""
         candidates = getattr(response, "candidates", None) or []
@@ -987,6 +1015,8 @@ class CorpusManager:
                     continue
                 if source_festival != expected_festival:
                     continue
+            if expected_date is not None and start != expected_date:
+                continue
             status = metadata.get("status")
             authority = str(metadata.get("authority") or "")
             source_type = str(metadata.get("source_type") or "")

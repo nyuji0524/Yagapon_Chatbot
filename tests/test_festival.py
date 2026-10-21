@@ -1,6 +1,11 @@
 from datetime import date, datetime, timezone
 
-from bot.festival import festival_from_query, festival_number, festival_period
+from bot.festival import (
+    calendar_date_from_query,
+    festival_from_query,
+    festival_number,
+    festival_period,
+)
 
 
 def test_festival_changes_on_october_first():
@@ -40,3 +45,19 @@ def test_query_resolves_explicit_and_relative_festival():
     assert festival_from_query("今年度の担当", now) == 28
     assert festival_from_query("昨年度の担当", now) == 27
     assert festival_from_query("MovingTasksとは", now) is None
+
+
+def test_query_resolves_yearless_meeting_date_to_latest_occurrence():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert calendar_date_from_query("10/9の会議内容", now) == date(2026, 10, 9)
+    assert calendar_date_from_query("12月1日の会議内容", now) == date(2025, 12, 1)
+    assert calendar_date_from_query("2025-10-09の会議", now) == date(2025, 10, 9)
+    assert festival_from_query("10/9の会議内容", now) == 28
+    assert festival_from_query("12月1日の会議内容", now) == 27
+
+
+def test_invalid_calendar_date_does_not_create_a_filter():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert calendar_date_from_query("2/30の会議", now) is None

@@ -27,6 +27,24 @@ def test_exact_search_honors_festival_filter(tmp_path):
     assert "担当を確認" in hits[0].excerpt
 
 
+def test_exact_search_honors_calendar_date_filter(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    first = metadata(28) + [
+        {"key": "document_key", "string_value": "meeting-2025"},
+        {"key": "start_at", "string_value": "2025-10-09T18:00:00+09:00"},
+    ]
+    second = metadata(28) + [
+        {"key": "document_key", "string_value": "meeting-2026"},
+        {"key": "start_at", "string_value": "2026-10-09T18:00:00+09:00"},
+    ]
+    store.upsert_document("documents/2025", "10/9のIT局反省会", first)
+    store.upsert_document("documents/2026", "10/9のIT局反省会", second)
+
+    hits = store.search_exact(1, ["IT局反省会"], festival=28, target_date="2026-10-09")
+
+    assert [hit.document_key for hit in hits] == ["meeting-2026"]
+
+
 def test_feedback_is_aggregated_without_storing_content_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("YAGAPON_RAG_TRACE_CONTENT", raising=False)
     store = RagStore(tmp_path / "rag.sqlite3")

@@ -225,14 +225,14 @@ def test_response_sources_deduplicates_discord_links(corpus_manager):
     assert corpus_manager._response_sources(response) == ["[#開発（2026-10-05）](https://discord.com/channels/1/2/3)"]
 
 
-def test_answer_declares_missing_knowledge_checks_the_opening_section():
+def test_answer_declares_missing_knowledge_checks_the_entire_answer():
     assert answer_declares_missing_knowledge("具体的な保存場所の情報は、今のボクの記憶には見当たらないぽん。")
     assert answer_declares_missing_knowledge("該当する記録は確認できなかったぽん。\n\n周辺情報はあるぽん。")
     assert answer_declares_missing_knowledge("確認するぽん！\n\n該当する記録は確認できなかったぽん。")
     assert answer_declares_missing_knowledge("該当する記録は、\n確認できませんでした。")
     assert answer_declares_missing_knowledge("該当する情報は見つかりませんでした。")
     assert answer_declares_missing_knowledge("記録は確認できませんでした。")
-    assert not answer_declares_missing_knowledge("回答だぽん。" + "x" * 500 + "記録は確認できなかったぽん。")
+    assert answer_declares_missing_knowledge("回答だぽん。" + "x" * 500 + "記録は確認できなかったぽん。")
 
 
 @pytest.mark.parametrize(
@@ -417,6 +417,35 @@ def test_response_sources_keep_only_the_expected_festival(corpus_manager):
     )
 
     assert corpus_manager._response_sources(response, expected_festival=28) == ["#記録 [28th]"]
+
+
+def test_response_sources_keep_only_the_expected_calendar_date(corpus_manager):
+    def chunk(day):
+        return SimpleNamespace(
+            retrieved_context=SimpleNamespace(
+                title=f"{day} record",
+                uri=None,
+                custom_metadata=[
+                    {"key": "channel_name", "string_value": "会議"},
+                    {"key": "festival", "numeric_value": 28},
+                    {"key": "start_at", "string_value": f"{day}T18:00:00+09:00"},
+                ],
+            )
+        )
+
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[chunk("2025-10-09"), chunk("2026-10-09")]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(
+        response, expected_festival=28, expected_date="2026-10-09"
+    ) == ["#会議（2026-10-09） [28th]"]
 
 
 @pytest.mark.asyncio
