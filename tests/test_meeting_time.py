@@ -14,3 +14,4 @@ def test_meeting_name_falls_back_for_blank_values():
 
 def test_meeting_document_name_accepts_recording_session_id():
     assert document_name("全体会議", "20261009T093251Z-d030a069") == "261009全体会議"
+    assert document_name("全体会議", "replay-20261009T093251Z-d030a069") == "261009全体会議"

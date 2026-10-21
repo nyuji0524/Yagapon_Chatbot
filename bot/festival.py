@@ -52,19 +52,23 @@ def festival_from_query(query: str, now: datetime | None = None) -> int | None:
     if dated:
         return festival_number(date(int(dated.group(1)), int(dated.group(2)), 1))
 
-    target_date = calendar_date_from_query(normalized, now)
-    if target_date:
-        return festival_number(target_date)
-
     current = current_festival(now)
     if re.search(r"今年度|今年|今期|現在|今の|今回", normalized):
         return current
     if re.search(r"昨年度|去年|昨年|前回", normalized):
         return current - 1
+    target_date = calendar_date_from_query(normalized, now)
+    if target_date:
+        return festival_number(target_date)
     return None
 
 
-def calendar_date_from_query(query: str, now: datetime | None = None) -> date | None:
+def calendar_date_from_query(
+    query: str,
+    now: datetime | None = None,
+    *,
+    festival: int | None = None,
+) -> date | None:
     """Resolve an explicit or yearless calendar date to the latest occurrence.
 
     Committee questions commonly abbreviate a recent meeting as ``10/9``.  A
@@ -89,7 +93,8 @@ def calendar_date_from_query(query: str, now: datetime | None = None) -> date | 
     month_day = re.search(
         r"(?<![\d/])(1[0-2]|0?[1-9])\s*"
         r"(?:月\s*(3[01]|[12]\d|0?[1-9])\s*日|/\s*(3[01]|[12]\d|0?[1-9]))"
-        r"(?=\s*(?:$|[、。?？]|[のにはがをもで]|開催|会議|ミーティング|反省会))",
+        r"(?=\s*(?:[（(][月火水木金土日](?:曜)?[)）]\s*)?"
+        r"(?:$|[、。?？]|[のにはがをもで]|開催|会議|ミーティング|反省会))",
         normalized,
     )
     if not month_day:
@@ -98,6 +103,13 @@ def calendar_date_from_query(query: str, now: datetime | None = None) -> date | 
     current = (now or datetime.now(JST)).astimezone(JST).date()
     month = int(month_day.group(1))
     day = int(month_day.group(2) or month_day.group(3))
+    if festival is not None:
+        period = festival_period(festival)
+        year = period.starts_on.year if month >= 10 else period.ends_on.year
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
     for year in range(current.year, current.year - 8, -1):
         try:
             candidate = date(year, month, day)

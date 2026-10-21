@@ -83,3 +83,19 @@ def test_yearless_date_accepts_common_japanese_particles(query):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
 
     assert calendar_date_from_query(query, now) == date(2026, 10, 9)
+
+
+def test_yearless_date_uses_explicit_or_relative_festival_period():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_from_query("昨年度の10/9の会議", now) == 27
+    assert calendar_date_from_query("昨年度の10/9の会議", now, festival=27) == date(2025, 10, 9)
+    assert festival_from_query("27thの3/1の会議", now) == 27
+    assert calendar_date_from_query("27thの3/1の会議", now, festival=27) == date(2026, 3, 1)
+
+
+@pytest.mark.parametrize("query", ["10/9(金)の会議", "10月9日（金）の会議"])
+def test_yearless_date_accepts_weekday_suffix(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert calendar_date_from_query(query, now) == date(2026, 10, 9)

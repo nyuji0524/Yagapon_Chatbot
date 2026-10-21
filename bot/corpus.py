@@ -697,8 +697,8 @@ class CorpusManager:
         glossary_text: str = "",
         glossary: dict | None = None,
     ) -> RagAnswer:
-        target_date = calendar_date_from_query(question)
         festival = festival_from_query(question)
+        target_date = calendar_date_from_query(question, festival=festival)
         sensitive_response = sensitive_request_response(question)
         if sensitive_response:
             return RagAnswer(
