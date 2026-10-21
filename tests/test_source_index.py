@@ -2,6 +2,7 @@ from source_index.__main__ import (
     Repository,
     chunks_for,
     contains_secret,
+    deployed_refs,
     document_policy,
     gcs_snapshot,
     inferred_festival,
@@ -173,3 +174,14 @@ def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
         "nyuji0524/Yagapon_Chatbot",
         "YagamiFes-IT/yagamifes-firebase",
     }
+
+
+def test_unreadable_release_metadata_is_non_fatal(tmp_path, monkeypatch):
+    release = tmp_path / "releases" / "current.json"
+
+    def denied(_self):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("pathlib.Path.exists", denied)
+
+    assert deployed_refs(release) == {}
