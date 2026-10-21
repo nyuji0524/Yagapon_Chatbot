@@ -6,7 +6,7 @@ from knowledge_sync.draft import (
     render_source_draft,
     stable_filename,
 )
-from knowledge_sync.drive import DriveDocument
+from knowledge_sync.drive import DriveDocument, DriveReader
 
 
 def document():
@@ -52,3 +52,23 @@ def test_rendered_document_is_always_unverified_draft():
     assert metadata["type"] == "source"
     assert metadata["sources"][0]["locator"].endswith("drive-file-id")
     assert "確定情報や現在の推奨として扱いません" in output
+
+
+def test_drive_reader_can_use_explicit_oauth_scopes(monkeypatch):
+    captured = {}
+
+    def fake_credentials(scopes, configured=None):
+        captured["scopes"] = scopes
+        captured["configured"] = configured
+        return object(), "test"
+
+    monkeypatch.setattr("knowledge_sync.drive.load_google_credentials", fake_credentials)
+    monkeypatch.setattr("knowledge_sync.drive.build", lambda *args, **kwargs: object())
+
+    reader = DriveReader("credentials.json", "", scopes=["drive.file", "documents"])
+
+    assert reader.credential_source == "test"
+    assert captured == {
+        "scopes": ["drive.file", "documents"],
+        "configured": "credentials.json",
+    }

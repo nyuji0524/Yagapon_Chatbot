@@ -35,13 +35,20 @@ class DriveChangeTokenExpired(RuntimeError):
 
 
 class DriveReader:
-    def __init__(self, credentials_path: str | None, drive_id: str, folder_id: str | None = None):
+    def __init__(
+        self,
+        credentials_path: str | None,
+        drive_id: str,
+        folder_id: str | None = None,
+        scopes: list[str] | None = None,
+    ):
+        scopes = scopes or [READONLY_SCOPE]
         if credentials_path:
             credentials, self.credential_source = load_google_credentials(
-                [READONLY_SCOPE], credentials_path
+                scopes, credentials_path
             )
         else:
-            credentials, self.credential_source = load_google_credentials([READONLY_SCOPE])
+            credentials, self.credential_source = load_google_credentials(scopes)
         self._service = build("drive", "v3", credentials=credentials, cache_discovery=False)
         self.drive_id = drive_id
         self.folder_id = folder_id
@@ -66,6 +73,17 @@ class DriveReader:
             "drive": drive,
             "folder": folder,
         }
+
+    def get_document(self, file_id: str) -> DriveDocument:
+        """Resolve one explicitly submitted Drive file, including Shared Drives."""
+        item = self._service.files().get(
+            fileId=file_id,
+            fields="id,name,mimeType,modifiedTime,webViewLink,parents,trashed",
+            supportsAllDrives=True,
+        ).execute(num_retries=5)
+        if item.get("trashed"):
+            raise FileNotFoundError(file_id)
+        return self._to_document(item)
 
     def get_start_page_token(self) -> str:
         response = self._service.changes().getStartPageToken(driveId=self.drive_id).execute(num_retries=5)

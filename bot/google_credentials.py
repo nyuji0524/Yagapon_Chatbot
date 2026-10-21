@@ -9,6 +9,10 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 
 
+class GoogleCredentialScopeError(RuntimeError):
+    """Configured user OAuth credentials do not include a required scope."""
+
+
 def _load_json(value: str, label: str) -> tuple[dict, str]:
     """Load an inline JSON object or a JSON file without logging secret contents."""
     if value.startswith("{"):
@@ -29,6 +33,16 @@ def load_google_credentials(scopes: list[str], configured: str | None = None):
         info, source = _load_json(user_oauth, "user-oauth")
         if info.get("type") not in (None, "authorized_user"):
             raise RuntimeError("GOOGLE_OAUTH_AUTHORIZED_USER_JSON must contain authorized-user credentials")
+        granted_scopes = info.get("scopes") or info.get("scope")
+        if granted_scopes:
+            if isinstance(granted_scopes, str):
+                granted_scopes = granted_scopes.split()
+            missing = set(scopes) - set(granted_scopes)
+            if missing:
+                raise GoogleCredentialScopeError(
+                    "Google OAuth credentials are missing required scopes: "
+                    + ", ".join(sorted(missing))
+                )
         return Credentials.from_authorized_user_info(info, scopes=scopes), source
 
     configured = (

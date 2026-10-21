@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("yagapon.knowledge_publish")
@@ -36,6 +36,7 @@ class KnowledgePublishResult:
     session_id: str
     outbox_dir: Path
     pull_request_url: str | None = None
+    status: str = "pending"
 
 
 class GitHubKnowledgePublisher:
@@ -47,7 +48,14 @@ class GitHubKnowledgePublisher:
         self.base_branch = base_branch
         self.api_root = f"https://api.github.com/repos/{repository}"
 
-    def _request(self, method: str, path: str, payload: dict | None = None):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        *,
+        allow_not_found: bool = False,
+    ):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(
             f"{self.api_root}{path}",
@@ -65,6 +73,8 @@ class GitHubKnowledgePublisher:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            if allow_not_found and exc.code == 404:
+                return None
             details = exc.read().decode("utf-8", errors="replace")[:1000]
             raise RuntimeError(f"GitHub API {method} {path} failed: {exc.code} {details}") from exc
 
@@ -107,11 +117,24 @@ class GitHubKnowledgePublisher:
                 "parents": [base_sha],
             },
         )
-        self._request(
-            "POST",
-            "/git/refs",
-            {"ref": f"refs/heads/{branch}", "sha": commit["sha"]},
+        branch_path = urllib.parse.quote(branch, safe="/")
+        existing_ref = self._request(
+            "GET",
+            f"/git/ref/heads/{branch_path}",
+            allow_not_found=True,
         )
+        if existing_ref:
+            self._request(
+                "PATCH",
+                f"/git/refs/heads/{branch_path}",
+                {"sha": commit["sha"], "force": True},
+            )
+        else:
+            self._request(
+                "POST",
+                "/git/refs",
+                {"ref": f"refs/heads/{branch}", "sha": commit["sha"]},
+            )
         pull_request = self._request(
             "POST",
             "/pulls",
@@ -247,8 +270,51 @@ def build_meeting_bundle(
     return root, files, manifest
 
 
-def _write_outbox(session_id: str, files: dict[str, str], manifest: dict) -> Path:
-    root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox")) / session_id
+def _delivery_payload(
+    *,
+    status: str,
+    bundle_id: str,
+    manifest: dict,
+    repository_root: str,
+    branch: str,
+    title: str,
+    body: str,
+    **extra,
+) -> dict:
+    return {
+        "status": status,
+        "bundleId": bundle_id,
+        # Keep the legacy key so already deployed operational tooling can read
+        # meeting deliveries while generic knowledge sources are introduced.
+        "sessionId": bundle_id,
+        "manifest": manifest,
+        "repositoryRoot": repository_root,
+        "branch": branch,
+        "title": title,
+        "body": body,
+        "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **extra,
+    }
+
+
+def _write_outbox(
+    bundle_id: str,
+    files: dict[str, str],
+    manifest: dict,
+    *,
+    repository_root: str,
+    branch: str,
+    title: str,
+    body: str,
+) -> Path:
+    bundle_path = PurePosixPath(bundle_id)
+    if bundle_path.is_absolute() or len(bundle_path.parts) != 1 or bundle_id in {".", ".."}:
+        raise ValueError("Invalid Knowledge bundle ID")
+    for repository_path in files:
+        path = PurePosixPath(repository_path)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise ValueError(f"Invalid Knowledge repository path: {repository_path}")
+    root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox")) / bundle_id
     root.mkdir(parents=True, exist_ok=True)
     for repository_path, content in files.items():
         destination = root / repository_path
@@ -259,7 +325,15 @@ def _write_outbox(session_id: str, files: dict[str, str], manifest: dict) -> Pat
     delivery = root / "delivery.json"
     delivery.write_text(
         json.dumps(
-            {"status": "pending", "sessionId": session_id, "manifest": manifest},
+            _delivery_payload(
+                status="pending",
+                bundle_id=bundle_id,
+                manifest=manifest,
+                repository_root=repository_root,
+                branch=branch,
+                title=title,
+                body=body,
+            ),
             ensure_ascii=False,
             indent=2,
         )
@@ -267,6 +341,196 @@ def _write_outbox(session_id: str, files: dict[str, str], manifest: dict) -> Pat
         encoding="utf-8",
     )
     return root
+
+
+def _write_delivery(outbox_dir: Path, payload: dict) -> None:
+    destination = outbox_dir / "delivery.json"
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, destination)
+
+
+def _outbox_files(outbox_dir: Path, repository_root: str) -> dict[str, str]:
+    path = PurePosixPath(repository_root)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError("Invalid Knowledge repository root")
+    root = outbox_dir / repository_root
+    if not root.is_dir():
+        raise RuntimeError(f"Knowledge bundle files are missing: {repository_root}")
+    return {
+        path.relative_to(outbox_dir).as_posix(): path.read_text(encoding="utf-8")
+        for path in root.rglob("*")
+        if path.is_file()
+        and not path.name.startswith(".")
+        and not path.name.endswith((".tmp", ".bak", "~"))
+    }
+
+
+async def publish_knowledge_bundle(
+    *,
+    bundle_id: str,
+    repository_root: str,
+    files: dict[str, str],
+    manifest: dict,
+    branch: str,
+    title: str,
+    body: str,
+) -> KnowledgePublishResult:
+    """Persist a review bundle and submit a Draft PR when configured.
+
+    The durable outbox is authoritative for delivery. A GitHub outage or a
+    missing service credential must not lose a submitted source.
+    """
+    outbox_dir = await asyncio.to_thread(
+        _write_outbox,
+        bundle_id,
+        files,
+        manifest,
+        repository_root=repository_root,
+        branch=branch,
+        title=title,
+        body=body,
+    )
+    sensitive_labels = _sensitive_labels(files)
+    if sensitive_labels:
+        payload = _delivery_payload(
+            status="blocked-sensitive-content",
+            bundle_id=bundle_id,
+            manifest=manifest,
+            repository_root=repository_root,
+            branch=branch,
+            title=title,
+            body=body,
+            detectedPatterns=sensitive_labels,
+        )
+        await asyncio.to_thread(_write_delivery, outbox_dir, payload)
+        log.error(
+            "Knowledge publication blocked by sensitive-content scan bundle=%s patterns=%s",
+            bundle_id,
+            ",".join(sensitive_labels),
+        )
+        return KnowledgePublishResult(
+            session_id=bundle_id,
+            outbox_dir=outbox_dir,
+            status="blocked-sensitive-content",
+        )
+
+    token = os.environ.get("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "").strip()
+    if not token:
+        log.warning("Knowledge GitHub token is not configured; bundle retained at %s", outbox_dir)
+        return KnowledgePublishResult(session_id=bundle_id, outbox_dir=outbox_dir)
+
+    repository = os.environ.get("YAGAPON_KNOWLEDGE_REPOSITORY", DEFAULT_REPOSITORY)
+    base_branch = os.environ.get("YAGAPON_KNOWLEDGE_BASE_BRANCH", "main")
+    publisher = GitHubKnowledgePublisher(token, repository, base_branch=base_branch)
+    try:
+        url = await asyncio.to_thread(
+            publisher.publish,
+            branch=branch,
+            title=title,
+            body=body,
+            files=files,
+        )
+    except Exception as exc:
+        payload = _delivery_payload(
+            status="failed",
+            bundle_id=bundle_id,
+            manifest=manifest,
+            repository_root=repository_root,
+            branch=branch,
+            title=title,
+            body=body,
+            errorType=type(exc).__name__,
+        )
+        await asyncio.to_thread(_write_delivery, outbox_dir, payload)
+        log.exception("Knowledge Draft PR publication failed; bundle remains at %s", outbox_dir)
+        return KnowledgePublishResult(
+            session_id=bundle_id,
+            outbox_dir=outbox_dir,
+            status="failed",
+        )
+
+    payload = _delivery_payload(
+        status="published",
+        bundle_id=bundle_id,
+        manifest=manifest,
+        repository_root=repository_root,
+        branch=branch,
+        title=title,
+        body=body,
+        repository=repository,
+        pullRequestUrl=url,
+    )
+    await asyncio.to_thread(_write_delivery, outbox_dir, payload)
+    return KnowledgePublishResult(
+        session_id=bundle_id,
+        outbox_dir=outbox_dir,
+        pull_request_url=url,
+        status="published",
+    )
+
+
+def list_knowledge_deliveries(*, guild_id: int | None = None, limit: int = 10) -> list[dict]:
+    """Return recent privacy-safe delivery metadata for operator commands."""
+    root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox"))
+    if not root.is_dir():
+        return []
+    deliveries = []
+    for path in root.glob("*/delivery.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        manifest = payload.get("manifest") or {}
+        manifest_guild = manifest.get("guildId")
+        if guild_id is not None and str(manifest_guild or "") != str(guild_id):
+            continue
+        deliveries.append(payload)
+    deliveries.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
+    return deliveries[: max(1, min(limit, 50))]
+
+
+def get_knowledge_delivery(bundle_id: str) -> dict | None:
+    """Read one delivery by its safe ID for authorization and retry."""
+    if not re.fullmatch(r"[0-9A-Za-z._-]{1,160}", bundle_id):
+        return None
+    root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox"))
+    path = root / bundle_id / "delivery.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+async def retry_knowledge_delivery(bundle_id: str) -> KnowledgePublishResult:
+    """Retry a durable pending/failed bundle without regenerating its content."""
+    if not re.fullmatch(r"[0-9A-Za-z._-]{1,160}", bundle_id):
+        raise ValueError("Invalid Knowledge bundle ID")
+    root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox"))
+    outbox_dir = root / bundle_id
+    payload = await asyncio.to_thread(get_knowledge_delivery, bundle_id)
+    if payload is None:
+        raise FileNotFoundError(bundle_id)
+    if payload.get("status") == "blocked-sensitive-content":
+        raise RuntimeError("Sensitive content must be reviewed before retrying")
+    required = ("repositoryRoot", "branch", "title", "body", "manifest")
+    if any(key not in payload for key in required):
+        raise RuntimeError("This legacy bundle does not contain retry metadata")
+    files = await asyncio.to_thread(_outbox_files, outbox_dir, payload["repositoryRoot"])
+    return await publish_knowledge_bundle(
+        bundle_id=bundle_id,
+        repository_root=payload["repositoryRoot"],
+        files=files,
+        manifest=payload["manifest"],
+        branch=payload["branch"],
+        title=payload["title"],
+        body=payload["body"],
+    )
 
 
 async def publish_meeting_knowledge(
@@ -293,39 +557,6 @@ async def publish_meeting_knowledge(
         minutes=minutes,
         include_minutes=include_minutes,
     )
-    outbox_dir = await asyncio.to_thread(_write_outbox, session_id, files, manifest)
-    sensitive_labels = _sensitive_labels(files)
-    if sensitive_labels:
-        delivery_path = outbox_dir / "delivery.json"
-        await asyncio.to_thread(
-            delivery_path.write_text,
-            json.dumps(
-                {
-                    "status": "blocked-sensitive-content",
-                    "sessionId": session_id,
-                    "detectedPatterns": sensitive_labels,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            "utf-8",
-        )
-        log.error(
-            "Knowledge publication blocked by sensitive-content scan session=%s patterns=%s",
-            session_id,
-            ",".join(sensitive_labels),
-        )
-        return KnowledgePublishResult(session_id=session_id, outbox_dir=outbox_dir)
-
-    token = os.environ.get("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "").strip()
-    if not token:
-        log.warning("Knowledge GitHub token is not configured; bundle retained at %s", outbox_dir)
-        return KnowledgePublishResult(session_id=session_id, outbox_dir=outbox_dir)
-
-    repository = os.environ.get("YAGAPON_KNOWLEDGE_REPOSITORY", DEFAULT_REPOSITORY)
-    base_branch = os.environ.get("YAGAPON_KNOWLEDGE_BASE_BRANCH", "main")
-    publisher = GitHubKnowledgePublisher(token, repository, base_branch=base_branch)
     branch = f"yagapon/meeting-{session_id.lower()}"
     title = f"source: {manifest['startedAt'][:10]} {manifest['channelName']}の文字起こし"
     body = (
@@ -336,32 +567,12 @@ async def publish_meeting_knowledge(
         f"- AI議事録: {'あり' if include_minutes and minutes else 'なし'}\n\n"
         "話者、固有名詞、決定事項、担当、期限、公開範囲を確認してからReadyにしてください。"
     )
-    try:
-        url = await asyncio.to_thread(
-            publisher.publish,
-            branch=branch,
-            title=title,
-            body=body,
-            files=files,
-        )
-    except Exception:
-        log.exception("Knowledge Draft PR publication failed; bundle remains at %s", outbox_dir)
-        return KnowledgePublishResult(session_id=session_id, outbox_dir=outbox_dir)
-
-    delivery_path = outbox_dir / "delivery.json"
-    await asyncio.to_thread(
-        delivery_path.write_text,
-        json.dumps(
-            {
-                "status": "published",
-                "sessionId": session_id,
-                "repository": repository,
-                "pullRequestUrl": url,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        "utf-8",
+    return await publish_knowledge_bundle(
+        bundle_id=session_id,
+        repository_root=repository_root,
+        files=files,
+        manifest=manifest,
+        branch=branch,
+        title=title,
+        body=body,
     )
-    return KnowledgePublishResult(session_id=session_id, outbox_dir=outbox_dir, pull_request_url=url)

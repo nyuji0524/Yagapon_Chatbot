@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot.gdrive import DriveWriter, _extract_folder_id, _render_markdown, upload_minutes, upload_transcript
-from bot.google_credentials import load_google_credentials
+from bot.google_credentials import GoogleCredentialScopeError, load_google_credentials
 
 
 def execute_result(value=None, error: Exception | None = None):
@@ -229,3 +229,20 @@ def test_user_oauth_rejects_service_account_json():
     ):
         with pytest.raises(RuntimeError, match="authorized-user credentials"):
             load_google_credentials(["scope"])
+
+
+def test_user_oauth_rejects_scopes_not_granted_by_original_consent():
+    info = {
+        "type": "authorized_user",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": ["drive.file", "documents"],
+    }
+
+    with patch.dict(
+        "os.environ",
+        {"GOOGLE_OAUTH_AUTHORIZED_USER_JSON": json.dumps(info)},
+    ):
+        with pytest.raises(GoogleCredentialScopeError, match="drive.readonly"):
+            load_google_credentials(["drive.readonly"])
