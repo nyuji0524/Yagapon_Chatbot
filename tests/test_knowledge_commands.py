@@ -2,11 +2,13 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from google.auth.exceptions import RefreshError
 
 from bot.commands.knowledge import (
     _channel_lineage,
     _discord_messages,
     _knowledge_guild_allowed,
+    _permission_channel,
     _protected_channel,
     _read_drive_source,
 )
@@ -82,6 +84,20 @@ def test_protected_channel_allows_unmatched_channel(monkeypatch):
     assert _protected_channel(channel) is False
 
 
+def test_thread_permissions_use_resolved_parent_when_thread_parent_is_uncached():
+    parent = SimpleNamespace(id=31)
+    thread = SimpleNamespace(id=32, parent=None, parent_id=31)
+
+    assert _permission_channel(thread, parent) is parent
+
+
+def test_text_channel_permissions_remain_on_the_channel():
+    category = SimpleNamespace(id=30)
+    channel = SimpleNamespace(id=31, category=category, category_id=30)
+
+    assert _permission_channel(channel, category) is channel
+
+
 def test_drive_source_falls_back_when_readonly_scope_was_not_granted(monkeypatch):
     calls = []
     document = SimpleNamespace(file_id="doc")
@@ -105,6 +121,45 @@ def test_drive_source_falls_back_when_readonly_scope_was_not_granted(monkeypatch
     assert _read_drive_source("doc") == (document, "本文", "drive.file")
     assert calls[0] is None
     assert len(calls[1]) == 2
+
+
+def test_drive_source_falls_back_when_token_refresh_reports_invalid_scope(monkeypatch):
+    calls = []
+    document = SimpleNamespace(file_id="doc")
+
+    class FakeReader:
+        def __init__(self, _credentials, _drive_id, *, scopes=None):
+            calls.append(scopes)
+
+        def get_document(self, file_id):
+            assert file_id == "doc"
+            if len(calls) == 1:
+                raise RefreshError("invalid_scope: drive.readonly was not granted")
+            return document
+
+        def read_text(self, source):
+            assert source is document
+            return "本文"
+
+    monkeypatch.setattr("bot.commands.knowledge.DriveReader", FakeReader)
+
+    assert _read_drive_source("doc") == (document, "本文", "drive.file")
+    assert calls[0] is None
+    assert len(calls[1]) == 2
+
+
+def test_drive_source_does_not_mask_unrelated_refresh_errors(monkeypatch):
+    class FakeReader:
+        def __init__(self, _credentials, _drive_id, *, scopes=None):
+            pass
+
+        def get_document(self, _file_id):
+            raise RefreshError("invalid_grant: token was revoked")
+
+    monkeypatch.setattr("bot.commands.knowledge.DriveReader", FakeReader)
+
+    with pytest.raises(RefreshError, match="invalid_grant"):
+        _read_drive_source("doc")
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ import logging
 import os
 
 import discord
+from google.auth.exceptions import RefreshError
 
 from bot.authorization import require_guild_admin
 from bot.gdrive import DOCS_SCOPE, DRIVE_FILE_SCOPE
@@ -155,6 +156,11 @@ async def _resolve_channel(bot, guild, channel_id: int):
     return channel
 
 
+def _permission_channel(channel, parent):
+    """Return the channel whose overwrites govern access to ``channel``."""
+    return parent if getattr(channel, "parent_id", None) else channel
+
+
 async def _channel_lineage(bot, guild, channel):
     """Resolve a thread's parent/category even when they are not cached."""
     parent = getattr(channel, "parent", None)
@@ -210,6 +216,11 @@ async def _discord_messages(channel, selected, limit: int) -> list[DiscordMessag
     return result
 
 
+def _is_scope_refresh_error(exc: RefreshError) -> bool:
+    message = str(exc).casefold()
+    return "invalid_scope" in message or "scope" in message
+
+
 def _read_drive_source(file_id: str):
     """Prefer full read-only access, then retain current drive.file compatibility."""
     credentials_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None
@@ -217,7 +228,9 @@ def _read_drive_source(file_id: str):
         reader = DriveReader(credentials_path, "")
         document = reader.get_document(file_id)
         return document, reader.read_text(document), "drive.readonly"
-    except GoogleCredentialScopeError:
+    except (GoogleCredentialScopeError, RefreshError) as exc:
+        if isinstance(exc, RefreshError) and not _is_scope_refresh_error(exc):
+            raise
         reader = DriveReader(
             credentials_path,
             "",
@@ -271,14 +284,17 @@ def register(bot):
                     ephemeral=True,
                 )
                 return
-            permissions = channel.permissions_for(ctx.author)
+            parent, category = await _channel_lineage(bot, ctx.guild, channel)
+            # Discord threads inherit access from their parent.  A thread fetched
+            # through the API can have ``parent is None`` in Pycord's cache, and
+            # Thread.permissions_for() then dereferences that missing parent.
+            permissions = _permission_channel(channel, parent).permissions_for(ctx.author)
             if not permissions.view_channel or not permissions.read_message_history:
                 await ctx.followup.send(
                     "❌ 実行者が閲覧できないチャンネルは登録できないぽん。",
                     ephemeral=True,
                 )
                 return
-            parent, category = await _channel_lineage(bot, ctx.guild, channel)
             parent_id = getattr(channel, "parent_id", None) or getattr(parent, "id", None)
             if bot.config.is_ignored(ctx.guild.id, channel_id) or (
                 parent_id and bot.config.is_ignored(ctx.guild.id, parent_id)
