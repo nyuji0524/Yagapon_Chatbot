@@ -21,10 +21,11 @@ def test_client_accepts_authorized_user_and_desktop_shapes():
 
 
 def test_authorization_url_requires_offline_readonly_pkce():
-    url = module._authorization_url("client", "http://localhost:1/", "state", "verifier")
+    url = module._authorization_url("client", "http://127.0.0.1:1/", "state", "verifier")
     query = parse_qs(urlparse(url).query)
 
     assert query["access_type"] == ["offline"]
     assert query["prompt"] == ["consent"]
     assert query["code_challenge_method"] == ["S256"]
     assert "https://www.googleapis.com/auth/drive.readonly" in query["scope"][0]
+    assert query["redirect_uri"] == ["http://127.0.0.1:1/"]

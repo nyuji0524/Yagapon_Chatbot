@@ -47,11 +47,12 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
 
 
 def test_curated_document_policy_allows_only_approved_front_matter():
-    source = "---\nstatus: active\nauthority: reviewed_record\n---\n本文"
+    source = "---\nstatus: active\nauthority: reviewed_record\nfestival: 27\n---\n本文"
 
     assert document_policy(curated_repository(), "knowledge/example.md", source) == (
         "reviewed_record",
         "active",
+        27,
     )
 
 
@@ -60,6 +61,26 @@ def test_curated_document_policy_rejects_draft_and_missing_front_matter():
 
     assert document_policy(curated_repository(), "knowledge/draft.md", draft) is None
     assert document_policy(curated_repository(), "knowledge/plain.md", "本文") is None
+
+
+def test_curated_document_policy_rejects_non_mapping_front_matter():
+    source = "---\n- status\n- active\n---\n本文"
+
+    assert document_policy(curated_repository(), "knowledge/invalid.md", source) is None
+
+
+def test_chunks_use_front_matter_festival_override():
+    chunk = chunks_for(
+        "YagamiFes-IT/YagamiFes-IT-Knowledge",
+        "a" * 40,
+        "knowledge/example.md",
+        "本文",
+        authority="curated",
+        status="historical",
+        festival=26,
+    )[0]
+
+    assert chunk.festival == 26
 
 
 def test_gcs_snapshot_validates_repository_and_commit(monkeypatch):

@@ -109,7 +109,7 @@ def main() -> None:
             return
 
     server = HTTPServer(("127.0.0.1", 0), Callback)
-    redirect_uri = f"http://localhost:{server.server_port}/"
+    redirect_uri = f"http://127.0.0.1:{server.server_port}/"
     url = _authorization_url(client_id, redirect_uri, state, verifier)
     print("Google認証画面を開きます。Driveの読み取り権限を許可してください。")
     if args.no_browser or not webbrowser.open(url):

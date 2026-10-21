@@ -96,7 +96,9 @@ required_scopes = {
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents",
 }
-if not required_scopes.issubset(set(value.get("scopes") or ())):
+raw_scopes = value.get("scopes") or value.get("scope") or ()
+scopes = set(raw_scopes.split() if isinstance(raw_scopes, str) else raw_scopes)
+if not required_scopes.issubset(scopes):
     raise SystemExit("OAuth credential must include drive.readonly and documents scopes")
 ' "$oauth_tmp"
   install -o 10001 -g 10001 -m 0600 \

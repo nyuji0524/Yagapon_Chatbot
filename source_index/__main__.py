@@ -281,16 +281,22 @@ def contains_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values())
 
 
-def document_policy(repository: Repository, path: str, text: str) -> tuple[str, str] | None:
+def document_policy(
+    repository: Repository,
+    path: str,
+    text: str,
+) -> tuple[str, str, int | None] | None:
     """Resolve authority/status and exclude unapproved curated documents."""
     authority = repository.authority or "repository_context"
     status = repository.status or "current"
     if not repository.front_matter_statuses:
-        return authority, status
+        return authority, status, None
     if not path.endswith(".md") or not text.startswith("---\n") or "\n---\n" not in text[4:]:
         return None
     front_matter = text[4:].split("\n---\n", 1)[0]
     payload = yaml.safe_load(front_matter) or {}
+    if not isinstance(payload, dict):
+        return None
     document_status = str(payload.get("status") or "")
     if document_status not in repository.front_matter_statuses:
         return None
@@ -302,7 +308,15 @@ def document_policy(repository: Repository, path: str, text: str) -> tuple[str, 
         "repository_context",
     }:
         document_authority = authority
-    return document_authority, document_status
+    festival_value = payload.get("festival")
+    document_festival = (
+        festival_value
+        if isinstance(festival_value, int)
+        and not isinstance(festival_value, bool)
+        and 1 <= festival_value <= 999
+        else None
+    )
+    return document_authority, document_status, document_festival
 
 
 def gcs_snapshot(repository: Repository) -> tuple[str, list[tuple[str, bytes]]]:
@@ -346,10 +360,11 @@ def chunks_for(
     *,
     authority: str,
     status: str,
+    festival: int | None = None,
 ) -> list[SourceChunk]:
     lines = content.splitlines()
     chunks = []
-    festival = inferred_festival(path, content)
+    resolved_festival = festival if festival is not None else inferred_festival(path, content)
     start = 0
     while start < len(lines):
         end = start
@@ -374,7 +389,7 @@ def chunks_for(
             end_line=end,
             text=header + body,
             content_sha256=hashlib.sha256(body.encode()).hexdigest(),
-            festival=festival,
+            festival=resolved_festival,
             authority=authority,
             status=status,
         ))
@@ -511,7 +526,7 @@ async def sync_once(args) -> dict:
             if policy is None:
                 skipped += 1
                 continue
-            document_authority, document_status = policy
+            document_authority, document_status, document_festival = policy
             for chunk in chunks_for(
                 repository.name,
                 commit,
@@ -519,6 +534,7 @@ async def sync_once(args) -> dict:
                 content,
                 authority=document_authority,
                 status=document_status,
+                festival=document_festival,
             ):
                 live_keys.add(chunk.key)
                 digest = hashlib.sha256(chunk.text.encode()).hexdigest()
