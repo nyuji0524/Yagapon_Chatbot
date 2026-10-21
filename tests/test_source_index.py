@@ -69,6 +69,12 @@ def test_curated_document_policy_rejects_non_mapping_front_matter():
     assert document_policy(curated_repository(), "knowledge/invalid.md", source) is None
 
 
+def test_curated_document_policy_rejects_invalid_yaml():
+    source = "---\nstatus: [active\n---\n本文"
+
+    assert document_policy(curated_repository(), "knowledge/invalid-yaml.md", source) is None
+
+
 def test_curated_document_policy_accepts_crlf_front_matter():
     source = "---\r\nstatus: historical\r\nfestival: 27\r\n---\r\n本文"
 

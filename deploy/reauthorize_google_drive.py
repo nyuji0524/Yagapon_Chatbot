@@ -115,7 +115,8 @@ def main() -> None:
     print("Google認証画面を開きます。Driveの読み取り権限を許可してください。")
     if args.no_browser or not webbrowser.open(url):
         print(url)
-    server.handle_request()
+    while not result:
+        server.handle_request()
     server.server_close()
     if result.get("error") or not result.get("code"):
         raise SystemExit(f"OAuth authorization failed: {result.get('error', 'missing code')}")
@@ -141,8 +142,9 @@ def main() -> None:
         "scopes": list(SCOPES),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    os.chmod(args.output, 0o600)
+    descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(payload, output, ensure_ascii=False)
     print(f"認証情報を安全に保存しました: {args.output}")
 
 

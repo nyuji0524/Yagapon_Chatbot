@@ -63,7 +63,8 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 
 | 状態 | 意味 | 対応 |
 |---|---|---|
-| `pending` | outbox保存済み、GitHub資格情報なし | サービス資格情報を設定して再送 |
+| `pending` | outbox保存済み、配信先未設定 | 配信先を設定して再送 |
+| `queued` | 非公開intakeへ送信済み、Draft PR作成待ち | 通常は待機。滞留時はActionsとGCSを確認 |
 | `published` | Draft PR作成済み | PRを人が確認 |
 | `failed` | GitHub API等で送信失敗 | 原因修正後に再送 |
 | `blocked-sensitive-content` | 認証情報らしき内容を検出 | outbox上で管理者が確認・除去。コマンドからの再送は禁止 |

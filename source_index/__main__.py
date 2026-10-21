@@ -299,7 +299,11 @@ def document_policy(
     ):
         return None
     front_matter = normalized[4:].split("\n---\n", 1)[0]
-    payload = yaml.safe_load(front_matter) or {}
+    try:
+        payload = yaml.safe_load(front_matter) or {}
+    except yaml.YAMLError:
+        log.warning("Skipping curated source with invalid YAML front matter: %s", path)
+        return None
     if not isinstance(payload, dict):
         return None
     document_status = str(payload.get("status") or "")
