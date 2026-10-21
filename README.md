@@ -106,6 +106,10 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/glossary approve <term>` | 候補を確認済み語録として登録 |
 | `/glossary list` | 語録一覧 |
 | `/glossary delete <term>` | 語録から削除 |
+| `/knowledge discord <message_url>` | Discordメッセージと周辺会話をKnowledgeの確認待ち資料として申請（管理者のみ） |
+| `/knowledge drive <drive_url>` | Drive資料を要約・構造化してKnowledgeの確認待ち資料として申請（管理者のみ） |
+| `/knowledge status` | 最近の登録申請、機密検知、Draft PR作成状況を確認（管理者のみ） |
+| `/knowledge retry <bundle_id>` | 永続outboxに残った申請を再送（管理者のみ） |
 | `/corpus delete` | コーパスを完全削除 |
 
 ## アーキテクチャ
@@ -203,6 +207,9 @@ YAGAPON_RECORDING_RETENTION_DAYS=7
 YAGAPON_KNOWLEDGE_REPO_PATH=../YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_URL=https://github.com/YagamiFes-IT/YagamiFes-IT-Knowledge/blob/main
 YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
+YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS=your_discord_guild_id
+YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS=
+YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS=選考
 YAGAPON_KNOWLEDGE_INDEX_STATE=/data/knowledge-index-state.json
 YAGAPON_SOURCE_INDEX_ENABLED=false
 YAGAPON_SOURCE_INDEX_STATE=/data/source-index-state.json
@@ -248,6 +255,11 @@ docker compose up --build
 `/recording replay`は、保存済み文字起こし、または障害復旧用に残っているPCMを使い、元の録音やオフセットを更新せずに長時間議事録を再生成する。結果は実行先Discordチャンネルと、設定済みの場合はGoogle Driveへ出力する。テスト出力はKnowledgeに自動投稿しない。
 
 VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`が設定されている場合は、privateなKnowledgeリポジトリの`draft`資料として専用ブランチへ1コミットし、Draft PRを作る。詳細なAI議事録は`YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true`の場合だけ含める。GitHub送信に失敗してもoutboxを削除しない。
+
+Discord会話とDrive資料の正式ナレッジ化は、無条件の自動昇格ではなく
+[`/knowledge`登録フロー](docs/knowledge-registration-flow.md)を使う。登録内容は必ず`status: draft`で
+outboxへ残り、機密検知を通過した場合だけDraft PRになる。PR上で原本、公開範囲、年度、分類、
+既存正本との重複を人が確認し、マージ後に承認済み状態へ変更された文書だけをRAGの強い根拠にする。
 
 バックグラウンド起動：
 
@@ -306,6 +318,7 @@ Pull Requestと`main`へのpushでは、GitHub Actionsがlint、単体テスト�
 自動更新する。初期IAM・Variables設定は[デプロイ手順](deploy/README.md)を参照。
 
 Google共有ドライブからKnowledge用draftを作る手順は[Drive同期設計](docs/google-drive-knowledge-sync.md)を参照。
+Discord・Drive資料を選択してKnowledgeへ申請する手順は[Knowledge登録フロー](docs/knowledge-registration-flow.md)を参照。
 File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質とbackfill運用](docs/file-search-operations.md)を参照。
 年度別検索、品質ダッシュボード、評価セット、Knowledge差分索引の運用は
 [RAG品質・年度・評価](docs/rag-quality-operations.md)を参照。

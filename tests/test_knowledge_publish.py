@@ -7,7 +7,10 @@ from bot.knowledge_publish import (
     GitHubKnowledgePublisher,
     build_meeting_bundle,
     festival_number,
+    list_knowledge_deliveries,
+    publish_knowledge_bundle,
     publish_meeting_knowledge,
+    retry_knowledge_delivery,
 )
 
 
@@ -76,6 +79,96 @@ async def test_sensitive_transcript_is_kept_local_and_blocked_from_github(tmp_pa
     delivery = json.loads((result.outbox_dir / "delivery.json").read_text(encoding="utf-8"))
     assert delivery["status"] == "blocked-sensitive-content"
     assert delivery["detectedPatterns"] == ["credential-assignment"]
+    assert result.status == "blocked-sensitive-content"
+
+
+@pytest.mark.asyncio
+async def test_generic_bundle_can_be_listed_and_retried(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", raising=False)
+    root = "sources/discord/inbox/28th/discord-1-hash"
+    manifest = {
+        "source": "yagapon-discord-message",
+        "guildId": "123",
+        "status": "draft",
+    }
+    result = await publish_knowledge_bundle(
+        bundle_id="discord-1-hash",
+        repository_root=root,
+        files={f"{root}/source.md": "draft"},
+        manifest=manifest,
+        branch="yagapon/intake-discord-1-hash",
+        title="source: test",
+        body="review",
+    )
+
+    assert result.status == "pending"
+    entries = list_knowledge_deliveries(guild_id=123)
+    assert len(entries) == 1
+    assert entries[0]["bundleId"] == "discord-1-hash"
+    assert list_knowledge_deliveries(guild_id=999) == []
+
+    class FakePublisher(GitHubKnowledgePublisher):
+        def publish(self, **kwargs):
+            assert kwargs["files"] == {f"{root}/source.md": "draft"}
+            return "https://github.example/pr/2"
+
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "configured-token")
+    monkeypatch.setattr("bot.knowledge_publish.GitHubKnowledgePublisher", FakePublisher)
+    retried = await retry_knowledge_delivery("discord-1-hash")
+
+    assert retried.status == "published"
+    assert retried.pull_request_url == "https://github.example/pr/2"
+    delivery = json.loads((retried.outbox_dir / "delivery.json").read_text(encoding="utf-8"))
+    assert delivery["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_sensitive_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "configured-token")
+    root = "sources/discord/inbox/28th/discord-sensitive"
+    result = await publish_knowledge_bundle(
+        bundle_id="discord-sensitive",
+        repository_root=root,
+        files={f"{root}/source.md": "password: very-secret-value"},
+        manifest={"source": "discord", "guildId": "123"},
+        branch="yagapon/intake-discord-sensitive",
+        title="source: sensitive",
+        body="review",
+    )
+    assert result.status == "blocked-sensitive-content"
+
+    with pytest.raises(RuntimeError, match="Sensitive content"):
+        await retry_knowledge_delivery("discord-sensitive")
+
+
+@pytest.mark.asyncio
+async def test_bundle_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="bundle ID"):
+        await publish_knowledge_bundle(
+            bundle_id="../escape",
+            repository_root="sources/drive/inbox/test",
+            files={"sources/drive/inbox/test/source.md": "draft"},
+            manifest={},
+            branch="yagapon/test",
+            title="test",
+            body="test",
+        )
+
+    with pytest.raises(ValueError, match="repository path"):
+        await publish_knowledge_bundle(
+            bundle_id="safe-id",
+            repository_root="sources/drive/inbox/test",
+            files={"../escape.md": "draft"},
+            manifest={},
+            branch="yagapon/test",
+            title="test",
+            body="test",
+        )
 
 
 def test_github_publisher_creates_one_commit_and_draft_pr():

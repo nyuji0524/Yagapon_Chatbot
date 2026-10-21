@@ -133,6 +133,7 @@ class YagaPon(discord.Bot):
             drive,
             glossary,
             ignore,
+            knowledge,
             meigen,
             member,
             minutes,
@@ -162,6 +163,7 @@ class YagaPon(discord.Bot):
         glossary.register(self)
         minutes.register(self)
         drive.register(self)
+        knowledge.register(self)
 
     async def on_ready(self):
         self.corpus.start_flush_loop()

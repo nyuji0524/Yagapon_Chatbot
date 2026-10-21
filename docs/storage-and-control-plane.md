@@ -11,7 +11,7 @@ GCEでは永続ディスクの `/var/lib/yagapon` をコンテナの `/data` に
 | 生文字起こし | `/data/transcripts/<guild>/<session>.md` | 議事録とは別の恒久記録 |
 | RAG品質 | `/data/rag.sqlite3` | 文書索引、質問、引用、評価 |
 | 運用状態 | `/data/operations.sqlite3` | ジョブ、エラー、デッドレター（本文は保存しない） |
-| Knowledge送信待ち | `/data/knowledge-outbox` | GitHub Draft PR作成前後の再送可能データ |
+| Knowledge送信待ち | `/data/knowledge-outbox/<bundle-id>` | 会議・Discord・Driveから作った再送可能なdraft、manifest、配信状態 |
 | Drive同期状態 | `/data/drive-sync-state.json` | change token、ハッシュ、削除状態 |
 | Knowledge索引状態 | `/data/knowledge-index-state.json` | GitHub文書とFile Search文書の対応 |
 | ソース索引状態 | `/data/source-index-state.json` | リポジトリcommit・コードチャンクとFile Search文書の対応 |

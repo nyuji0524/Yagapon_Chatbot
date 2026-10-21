@@ -67,6 +67,17 @@ class DriveReader:
             "folder": folder,
         }
 
+    def get_document(self, file_id: str) -> DriveDocument:
+        """Resolve one explicitly submitted Drive file, including Shared Drives."""
+        item = self._service.files().get(
+            fileId=file_id,
+            fields="id,name,mimeType,modifiedTime,webViewLink,parents,trashed",
+            supportsAllDrives=True,
+        ).execute(num_retries=5)
+        if item.get("trashed"):
+            raise FileNotFoundError(file_id)
+        return self._to_document(item)
+
     def get_start_page_token(self) -> str:
         response = self._service.changes().getStartPageToken(driveId=self.drive_id).execute(num_retries=5)
         return response["startPageToken"]

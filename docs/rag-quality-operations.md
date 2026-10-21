@@ -165,6 +165,9 @@ docker compose --profile knowledge up -d knowledge-sync-watch knowledge-index-wa
 
 Driveから生成したdraftは、人のレビューとstatus変更を経てKnowledgeリポジトリへ入れる。
 原文変更をそのまま回答根拠へ昇格させる処理は行わない。
+Discord上で選択した会話や単一Drive資料を登録する場合は、`/knowledge discord`または
+`/knowledge drive`を使う。いずれも同じoutbox・機密検知・Draft PR経路を通し、
+`draft`のままでは承認済みKnowledge索引の対象にしない。
 
 ## 本番移行手順
 
