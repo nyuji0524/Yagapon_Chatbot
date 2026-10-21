@@ -142,6 +142,8 @@ for _ in $(seq 1 30); do
     printf '{"image":"%s","deployed_at":"%s","container":"%s"}\n' \
       "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$container_id" \
       > "$data_path/releases/current.json"
+    chown 10001:10001 "$data_path/releases/current.json"
+    chmod 0640 "$data_path/releases/current.json"
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     docker image prune --force --filter 'until=168h' >/dev/null
     echo "Deployment healthy: $image (container: $container_id)"
