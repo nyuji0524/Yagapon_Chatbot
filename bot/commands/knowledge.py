@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 
@@ -358,6 +359,7 @@ def register(bot):
                 )
                 return
             sanitized, redaction_count = redact_credentials(source_text)
+            source_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
             structured = await asyncio.to_thread(
                 structure_source,
                 sanitized,
@@ -367,7 +369,8 @@ def register(bot):
                 guild_id=ctx.guild.id,
                 requested_by=ctx.author.id,
                 document=document,
-                source_text=source_text,
+                source_text=sanitized,
+                source_sha256=source_sha256,
                 structured=structured,
                 redaction_count=redaction_count,
                 access_mode=access_mode,

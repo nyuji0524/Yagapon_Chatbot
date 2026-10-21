@@ -183,12 +183,15 @@ def test_github_publisher_creates_one_commit_and_draft_pr():
     calls = []
 
     class FakePublisher(GitHubKnowledgePublisher):
-        def _request(self, method, path, payload=None):
+        def _request(self, method, path, payload=None, *, allow_not_found=False):
             calls.append((method, path, payload))
             if path.startswith("/pulls?"):
                 return []
-            if path.startswith("/git/ref/heads/"):
+            if path == "/git/ref/heads/main":
                 return {"object": {"sha": "base"}}
+            if path.startswith("/git/ref/heads/"):
+                assert allow_not_found is True
+                return None
             if path == "/git/commits/base":
                 return {"tree": {"sha": "base-tree"}}
             if path == "/git/blobs":
@@ -215,11 +218,55 @@ def test_github_publisher_creates_one_commit_and_draft_pr():
     pull = next(payload for _, path, payload in calls if path == "/pulls")
     assert pull["draft"] is True
     assert pull["base"] == "main"
+    assert any(method == "POST" and path == "/git/refs" for method, path, _ in calls)
+
+
+def test_github_publisher_updates_orphaned_branch_before_retrying_pr():
+    calls = []
+
+    class FakePublisher(GitHubKnowledgePublisher):
+        def _request(self, method, path, payload=None, *, allow_not_found=False):
+            calls.append((method, path, payload))
+            if path.startswith("/pulls?"):
+                return []
+            if path == "/git/ref/heads/main":
+                return {"object": {"sha": "base"}}
+            if path == "/git/ref/heads/yagapon/intake-source":
+                assert allow_not_found is True
+                return {"object": {"sha": "old-commit"}}
+            if path == "/git/commits/base":
+                return {"tree": {"sha": "base-tree"}}
+            if path == "/git/blobs":
+                return {"sha": "blob"}
+            if path == "/git/trees":
+                return {"sha": "tree"}
+            if path == "/git/commits":
+                return {"sha": "new-commit"}
+            if path == "/pulls":
+                return {"html_url": "https://github.example/pr/retried"}
+            return {}
+
+    publisher = FakePublisher("token", "owner/repo")
+    url = publisher.publish(
+        branch="yagapon/intake-source",
+        title="source: retry",
+        body="review",
+        files={"sources/source.md": "text"},
+    )
+
+    assert url == "https://github.example/pr/retried"
+    patch = next(call for call in calls if call[0] == "PATCH")
+    assert patch == (
+        "PATCH",
+        "/git/refs/heads/yagapon/intake-source",
+        {"sha": "new-commit", "force": True},
+    )
+    assert not any(method == "POST" and path == "/git/refs" for method, path, _ in calls)
 
 
 def test_github_publisher_reuses_existing_pull_request():
     class ExistingPublisher(GitHubKnowledgePublisher):
-        def _request(self, method, path, payload=None):
+        def _request(self, method, path, payload=None, *, allow_not_found=False):
             assert method == "GET"
             assert path.startswith("/pulls?")
             return [{"html_url": "https://github.example/pr/existing"}]

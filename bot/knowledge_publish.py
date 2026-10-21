@@ -48,7 +48,14 @@ class GitHubKnowledgePublisher:
         self.base_branch = base_branch
         self.api_root = f"https://api.github.com/repos/{repository}"
 
-    def _request(self, method: str, path: str, payload: dict | None = None):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        *,
+        allow_not_found: bool = False,
+    ):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(
             f"{self.api_root}{path}",
@@ -66,6 +73,8 @@ class GitHubKnowledgePublisher:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            if allow_not_found and exc.code == 404:
+                return None
             details = exc.read().decode("utf-8", errors="replace")[:1000]
             raise RuntimeError(f"GitHub API {method} {path} failed: {exc.code} {details}") from exc
 
@@ -108,11 +117,24 @@ class GitHubKnowledgePublisher:
                 "parents": [base_sha],
             },
         )
-        self._request(
-            "POST",
-            "/git/refs",
-            {"ref": f"refs/heads/{branch}", "sha": commit["sha"]},
+        branch_path = urllib.parse.quote(branch, safe="/")
+        existing_ref = self._request(
+            "GET",
+            f"/git/ref/heads/{branch_path}",
+            allow_not_found=True,
         )
+        if existing_ref:
+            self._request(
+                "PATCH",
+                f"/git/refs/heads/{branch_path}",
+                {"sha": commit["sha"], "force": True},
+            )
+        else:
+            self._request(
+                "POST",
+                "/git/refs",
+                {"ref": f"refs/heads/{branch}", "sha": commit["sha"]},
+            )
         pull_request = self._request(
             "POST",
             "/pulls",

@@ -136,7 +136,7 @@ def _discord_document(
         marker = " **[登録対象]**" if message.message_id == selected_message_id else ""
         lines.extend(
             [
-                f"### {message.timestamp.isoformat()} — {message.author_name}{marker}",
+                f"### {message.timestamp.astimezone(JST).isoformat()} — {message.author_name}{marker}",
                 "",
                 f"- Author ID: `{message.author_id}`",
                 f"- [Discord原文]({message.jump_url})",
@@ -234,9 +234,17 @@ def build_drive_intake_bundle(
     structured: StructuredDraft,
     redaction_count: int,
     access_mode: str | None = None,
+    source_sha256: str | None = None,
 ) -> tuple[str, str, dict[str, str], dict, str, str, str]:
     """Return publish arguments for a Google Drive source registration."""
-    rendered = render_source_draft(document, source_text, structured, redaction_count)
+    source_sha256 = source_sha256 or _source_hash(source_text)
+    rendered = render_source_draft(
+        document,
+        source_text,
+        structured,
+        redaction_count,
+        source_sha256=source_sha256,
+    )
     digest = _source_hash(rendered)[:12]
     safe_id = re.sub(r"[^0-9A-Za-z_-]", "", document.file_id)
     if not safe_id:
@@ -256,7 +264,7 @@ def build_drive_intake_bundle(
         "humanReviewed": False,
         "redactionCount": redaction_count,
         "driveAccessMode": access_mode,
-        "sourceSha256": _source_hash(source_text),
+        "sourceSha256": source_sha256,
     }
     files = {
         f"{repository_root}/source.md": rendered,

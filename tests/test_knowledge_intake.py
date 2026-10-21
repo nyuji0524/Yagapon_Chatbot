@@ -130,6 +130,7 @@ def test_discord_default_title_uses_jst_date():
 
     assert "2026-10-21" in title
     assert "2026-10-21" in files[f"{root}/source.md"]
+    assert "2026-10-21T01:00:00+09:00" in files[f"{root}/source.md"]
 
 
 def test_drive_bundle_keeps_original_as_reference_not_authoritative_content():
@@ -153,7 +154,8 @@ def test_drive_bundle_keeps_original_as_reference_not_authoritative_content():
         guild_id=1,
         requested_by=2,
         document=document,
-        source_text="原文",
+        source_text="[認証情報を除外]",
+        source_sha256="raw-source-sha256",
         structured=structured,
         redaction_count=1,
         access_mode="drive.readonly",
@@ -166,7 +168,8 @@ def test_drive_bundle_keeps_original_as_reference_not_authoritative_content():
     assert front_matter["status"] == "draft"
     assert manifest["redactionCount"] == 1
     assert manifest["driveAccessMode"] == "drive.readonly"
-    assert manifest["sourceSha256"]
+    assert manifest["sourceSha256"] == "raw-source-sha256"
+    assert "secret-value" not in source
     assert branch.startswith("yagapon/intake-drive-")
     assert "運用資料" in title
     assert "自動除外した認証情報: 1件" in body

@@ -80,9 +80,11 @@ def render_source_draft(
     source_text: str,
     structured: StructuredDraft,
     redaction_count: int,
+    *,
+    source_sha256: str | None = None,
 ) -> str:
     retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    source_hash = source_sha256 or hashlib.sha256(source_text.encode("utf-8")).hexdigest()
     metadata = {
         "title": document.name,
         "type": "source",
