@@ -106,6 +106,17 @@ def register(bot):
 
         if not minutes:
             knowledge_url = await session.publish_knowledge()
+            from bot.meeting_index import index_bot_meeting
+
+            await index_bot_meeting(
+                bot,
+                guild_id=ctx.guild_id,
+                session_id=session.session_id,
+                channel_name=channel_name,
+                started_at=session.started_at,
+                transcript=session.transcript_text,
+                transcript_url=transcript_url,
+            )
             session.mark_delivered(transcript_url=transcript_url)
             message = "退出したぽん！👋"
             if transcript_url:
@@ -127,6 +138,19 @@ def register(bot):
         # Geminiで要約を生成
         summary = await _summarize_minutes(minutes)
         knowledge_url = await session.publish_knowledge(summary=summary, minutes=minutes)
+        from bot.meeting_index import index_bot_meeting
+
+        await index_bot_meeting(
+            bot,
+            guild_id=ctx.guild_id,
+            session_id=session.session_id,
+            channel_name=channel_name,
+            started_at=session.started_at,
+            transcript=session.transcript_text,
+            minutes=minutes,
+            transcript_url=transcript_url,
+            minutes_url=drive_url,
+        )
 
         # Discordには要約 + Google Docsリンクを送信
         embed = discord.Embed(

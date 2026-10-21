@@ -550,6 +550,12 @@ class VoiceSession:
         return self._transcript_path
 
     @property
+    def session_id(self) -> str:
+        if self.recording_sink:
+            return self.recording_sink.session_dir.name
+        return self.started_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    @property
     def knowledge_pull_request_url(self) -> str | None:
         return self._knowledge_pull_request_url
 
@@ -1052,6 +1058,17 @@ async def _recover_recording(bot, candidate) -> None:
         if mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
             minutes = await session._generate_minutes()
         await session.publish_knowledge(minutes=minutes)
+        from bot.meeting_index import index_bot_meeting
+
+        await index_bot_meeting(
+            bot,
+            guild_id=guild_id,
+            session_id=session.session_id,
+            channel_name=channel.name,
+            started_at=session.started_at,
+            transcript=session.transcript_text,
+            minutes=minutes,
+        )
         session.recording_sink.mark(
             "recovered", recovery_attempts=attempts,
             recovered_at=datetime.now(timezone.utc).isoformat(),

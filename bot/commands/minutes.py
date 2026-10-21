@@ -146,6 +146,20 @@ def register(bot):
                 minutes=minutes,
             )
 
+            from bot.meeting_index import index_bot_meeting
+
+            await index_bot_meeting(
+                bot,
+                guild_id=ctx.guild_id,
+                session_id=session_id,
+                channel_name=doc_title,
+                started_at=meeting_at,
+                transcript=transcript,
+                minutes=minutes,
+                transcript_url=transcript_url,
+                minutes_url=drive_url,
+            )
+
             # Discordに送信
             embed = discord.Embed(
                 title=f"📝 {doc_title}",
