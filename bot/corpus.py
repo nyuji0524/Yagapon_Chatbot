@@ -955,10 +955,22 @@ class CorpusManager:
     def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
         rendered = []
         seen_labels = set()
+        existing_urls = {
+            match.group(1)
+            for value in existing
+            if (match := re.search(r"\]\((https?://[^)]+)\)", value))
+        }
         for hit in hits:
-            prefix = AUTHORITY_LABELS.get(getattr(hit, "authority", ""), "完全一致")
+            if hit.source_url and hit.source_url in existing_urls:
+                continue
+            source_type = getattr(hit, "source_type", "")
+            prefix = (
+                "会議記録"
+                if source_type.startswith("meeting_")
+                else AUTHORITY_LABELS.get(getattr(hit, "authority", ""), "完全一致")
+            )
             name = hit.channel_name or "記録"
-            if getattr(hit, "authority", "") not in {
+            if not source_type.startswith("meeting_") and getattr(hit, "authority", "") not in {
                 "deployed_implementation",
                 "repository_context",
             }:
@@ -1028,7 +1040,13 @@ class CorpusManager:
                 else f"#{channel}" if channel
                 else (title or "ナレッジ")
             )
-            authority_label = AUTHORITY_LABELS.get(authority)
+            authority_label = (
+                "会議記録"
+                if source_type.startswith("meeting_")
+                else AUTHORITY_LABELS.get(authority)
+            )
+            if source_type.startswith("meeting_"):
+                label = str(channel or title or "会議")
             if authority_label:
                 label = f"{authority_label}: {label}"
             if start:

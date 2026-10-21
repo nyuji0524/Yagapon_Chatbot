@@ -43,6 +43,7 @@ class LexicalHit:
     score: int
     authority: str = ""
     status: str = ""
+    source_type: str = ""
 
 
 class RagStore:
@@ -314,6 +315,7 @@ class RagStore:
                 score=matched_terms * 100 + authority_bonus + status_bonus,
                 authority=row["authority"] or "",
                 status=row["status"] or "",
+                source_type=row["source_type"] or "",
             ))
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[:limit]
