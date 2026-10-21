@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from bot.commands.knowledge import (
+    _channel_lineage,
     _discord_messages,
     _knowledge_guild_allowed,
     _protected_channel,
@@ -56,6 +57,21 @@ def test_protected_channel_matches_category_for_text_and_thread(monkeypatch):
 
     assert _protected_channel(text_channel) is True
     assert _protected_channel(thread) is True
+
+
+def test_protected_channel_matches_uncached_parent_and_category_ids(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "30,31")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "")
+    uncached_thread = SimpleNamespace(
+        id=32,
+        name="応募者A",
+        parent=None,
+        parent_id=31,
+        category=None,
+        category_id=30,
+    )
+
+    assert _protected_channel(uncached_thread) is True
 
 
 def test_protected_channel_allows_unmatched_channel(monkeypatch):
@@ -116,3 +132,21 @@ async def test_discord_messages_keeps_empty_selected_message_without_oldest_firs
     assert len(messages) == 1
     assert messages[0].message_id == 1
     assert messages[0].content == ""
+
+
+@pytest.mark.asyncio
+async def test_channel_lineage_fetches_uncached_parent_and_category():
+    category = SimpleNamespace(id=30, name="IT局員選考")
+    parent = SimpleNamespace(id=31, name="応募者対応", category=None, category_id=30)
+    thread = SimpleNamespace(parent=None, parent_id=31, category=None, category_id=None)
+    resolved = {31: parent, 30: category}
+    guild = SimpleNamespace(
+        get_channel=lambda channel_id: None,
+        get_thread=lambda channel_id: None,
+    )
+
+    class FakeBot:
+        async def fetch_channel(self, channel_id):
+            return resolved[channel_id]
+
+    assert await _channel_lineage(FakeBot(), guild, thread) == (parent, category)

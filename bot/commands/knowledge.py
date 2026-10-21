@@ -68,20 +68,36 @@ def _knowledge_guild_allowed(guild_id: int) -> bool:
     return str(guild_id) in allowed
 
 
-def _protected_channel(channel) -> bool:
+def _protected_channel(channel, *, parent=None, category=None) -> bool:
     channel_ids = {
         value.strip()
         for value in os.environ.get("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "").split(",")
         if value.strip()
     }
-    parent = getattr(channel, "parent", None)
+    parent = parent or getattr(channel, "parent", None)
+    category = (
+        category
+        or getattr(channel, "category", None)
+        or getattr(parent, "category", None)
+    )
     related = [
         channel,
         parent,
-        getattr(channel, "category", None),
-        getattr(parent, "category", None),
+        category,
     ]
-    if any(str(getattr(item, "id", "")) in channel_ids for item in related if item):
+    related_ids = {
+        str(value)
+        for value in (
+            getattr(channel, "id", None),
+            getattr(channel, "parent_id", None),
+            getattr(channel, "category_id", None),
+            getattr(parent, "id", None),
+            getattr(parent, "category_id", None),
+            getattr(category, "id", None),
+        )
+        if value is not None
+    }
+    if related_ids & channel_ids:
         return True
     protected_terms = {
         value.strip().casefold()
@@ -136,6 +152,26 @@ async def _resolve_channel(bot, guild, channel_id: int):
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
     return channel
+
+
+async def _channel_lineage(bot, guild, channel):
+    """Resolve a thread's parent/category even when they are not cached."""
+    parent = getattr(channel, "parent", None)
+    parent_id = getattr(channel, "parent_id", None)
+    if parent is None and parent_id:
+        parent = await _resolve_channel(bot, guild, parent_id)
+
+    category = (
+        getattr(channel, "category", None)
+        or getattr(parent, "category", None)
+    )
+    category_id = (
+        getattr(channel, "category_id", None)
+        or getattr(parent, "category_id", None)
+    )
+    if category is None and category_id:
+        category = await _resolve_channel(bot, guild, category_id)
+    return parent, category
 
 
 async def _discord_messages(channel, selected, limit: int) -> list[DiscordMessageSource]:
@@ -241,7 +277,8 @@ def register(bot):
                     ephemeral=True,
                 )
                 return
-            parent_id = getattr(getattr(channel, "parent", None), "id", None)
+            parent, category = await _channel_lineage(bot, ctx.guild, channel)
+            parent_id = getattr(channel, "parent_id", None) or getattr(parent, "id", None)
             if bot.config.is_ignored(ctx.guild.id, channel_id) or (
                 parent_id and bot.config.is_ignored(ctx.guild.id, parent_id)
             ):
@@ -250,7 +287,7 @@ def register(bot):
                     ephemeral=True,
                 )
                 return
-            if _protected_channel(channel):
+            if _protected_channel(channel, parent=parent, category=category):
                 await ctx.followup.send(
                     "❌ このチャンネルは機微情報を扱うためKnowledge登録対象外だぽん。",
                     ephemeral=True,
