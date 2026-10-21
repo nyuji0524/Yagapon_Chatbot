@@ -447,18 +447,8 @@ class RecordingReplayManager:
             job.drive_transcript_url = transcript_url or ""
             job.drive_minutes_url = minutes_url or ""
 
-            from bot.knowledge_publish import publish_meeting_knowledge
             from bot.meeting_index import index_bot_meeting
 
-            await publish_meeting_knowledge(
-                session_id=artifact.session_id,
-                guild_id=job.target_guild_id,
-                channel_name=artifact.channel_name,
-                mode=f"replay:{artifact.mode}",
-                transcript=transcript,
-                summary=summary,
-                minutes=minutes,
-            )
             await index_bot_meeting(
                 self.bot,
                 guild_id=job.target_guild_id,

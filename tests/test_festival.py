@@ -1,5 +1,7 @@
 from datetime import date, datetime, timezone
 
+import pytest
+
 from bot.festival import (
     calendar_date_from_query,
     festival_from_query,
@@ -61,3 +63,16 @@ def test_invalid_calendar_date_does_not_create_a_filter():
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
 
     assert calendar_date_from_query("2/30の会議", now) is None
+
+
+@pytest.mark.parametrize("query", ["1.5倍速", "2-3人で参加", "1-2時間", "gemini-3.1-flash", "2/3人"])
+def test_non_date_numbers_do_not_create_a_filter(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert calendar_date_from_query(query, now) is None
+
+
+def test_yearless_leap_day_resolves_to_the_latest_valid_occurrence():
+    now = datetime(2025, 2, 28, tzinfo=timezone.utc)
+
+    assert calendar_date_from_query("2月29日の会議", now) == date(2024, 2, 29)

@@ -87,20 +87,25 @@ def calendar_date_from_query(query: str, now: datetime | None = None) -> date | 
             return None
 
     month_day = re.search(
-        r"(?<![\d/.-])(1[0-2]|0?[1-9])\s*(?:月|[/.-])\s*(3[01]|[12]\d|0?[1-9])\s*日?",
+        r"(?<![\d/])(1[0-2]|0?[1-9])\s*"
+        r"(?:月\s*(3[01]|[12]\d|0?[1-9])\s*日|/\s*(3[01]|[12]\d|0?[1-9]))"
+        r"(?=\s*(?:$|[、。?？]|の|に|で|開催|会議|ミーティング|反省会))",
         normalized,
     )
     if not month_day:
         return None
 
     current = (now or datetime.now(JST)).astimezone(JST).date()
-    try:
-        candidate = date(current.year, int(month_day.group(1)), int(month_day.group(2)))
-        if candidate > current:
-            candidate = date(current.year - 1, candidate.month, candidate.day)
-        return candidate
-    except ValueError:
-        return None
+    month = int(month_day.group(1))
+    day = int(month_day.group(2) or month_day.group(3))
+    for year in range(current.year, current.year - 8, -1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        if candidate <= current:
+            return candidate
+    return None
 
 
 def festival_metadata_filter(number: int | None) -> str | None:

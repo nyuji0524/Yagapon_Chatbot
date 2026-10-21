@@ -11,6 +11,7 @@ from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 from bot.gdrive import upload_minutes, upload_transcript
 from bot.meeting_index import index_meeting_artifacts
+from bot.meeting_time import meeting_datetime
 from bot.recording_replay import find_recording_artifact, replay_root
 
 
@@ -53,6 +54,7 @@ async def backfill_session(guild_id: int, session_id: str, *, upload_missing: bo
         raise RuntimeError(f"No File Search store configured for guild {guild_id}")
     transcript_url = str(replay.get("drive_transcript_url") or "")
     minutes_url = str(replay.get("drive_minutes_url") or "")
+    meeting_at = meeting_datetime(artifact.started_at or None)
     if upload_missing and not transcript_url:
         transcript_url = (
             await upload_transcript(
@@ -60,7 +62,7 @@ async def backfill_session(guild_id: int, session_id: str, *, upload_missing: bo
                 guild_id,
                 transcript,
                 artifact.channel_name,
-                meeting_at=artifact.started_at or None,
+                meeting_at=meeting_at,
             )
             or ""
         )
@@ -71,7 +73,7 @@ async def backfill_session(guild_id: int, session_id: str, *, upload_missing: bo
                 guild_id,
                 minutes,
                 artifact.channel_name,
-                meeting_at=artifact.started_at or None,
+                meeting_at=meeting_at,
             )
             or ""
         )

@@ -111,9 +111,6 @@ async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, m
         "bot.commands.voice_cmd._summarize_minutes", AsyncMock(return_value="要約")
     )
     monkeypatch.setattr(
-        "bot.knowledge_publish.publish_meeting_knowledge", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
         "bot.meeting_index.index_bot_meeting", AsyncMock()
     )
     bot = SimpleNamespace(
