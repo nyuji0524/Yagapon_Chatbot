@@ -342,6 +342,8 @@ def _outbox_files(outbox_dir: Path, repository_root: str) -> dict[str, str]:
         path.relative_to(outbox_dir).as_posix(): path.read_text(encoding="utf-8")
         for path in root.rglob("*")
         if path.is_file()
+        and not path.name.startswith(".")
+        and not path.name.endswith((".tmp", ".bak", "~"))
     }
 
 

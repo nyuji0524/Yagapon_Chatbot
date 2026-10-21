@@ -397,13 +397,14 @@ def register(bot):
             return
         if not await _require_knowledge_guild(ctx):
             return
+        await ctx.defer(ephemeral=True)
         entries = await asyncio.to_thread(
             list_knowledge_deliveries,
             guild_id=ctx.guild_id,
             limit=10,
         )
         if not entries:
-            await ctx.respond("このサーバーの登録申請はまだないぽん。", ephemeral=True)
+            await ctx.followup.send("このサーバーの登録申請はまだないぽん。", ephemeral=True)
             return
         icons = {
             "published": "✅",
@@ -420,7 +421,7 @@ def register(bot):
             if entry.get("pullRequestUrl"):
                 line += f" — [Draft PR]({entry['pullRequestUrl']})"
             lines.append(line)
-        await ctx.respond("\n".join(lines), ephemeral=True)
+        await ctx.followup.send("\n".join(lines), ephemeral=True)
 
     @group.command(name="retry", description="保存済みのKnowledge登録申請を再送するぽん")
     @discord.default_permissions(administrator=True)

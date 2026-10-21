@@ -119,6 +119,10 @@ async def test_generic_bundle_can_be_listed_and_retried(tmp_path, monkeypatch):
 
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "configured-token")
     monkeypatch.setattr("bot.knowledge_publish.GitHubKnowledgePublisher", FakePublisher)
+    source_dir = result.outbox_dir / root
+    (source_dir / "source.md.tmp").write_text("partial", encoding="utf-8")
+    (source_dir / "source.md.bak").write_text("backup", encoding="utf-8")
+    (source_dir / ".source.swp").write_text("editor", encoding="utf-8")
     retried = await retry_knowledge_delivery("discord-1-hash")
 
     assert retried.status == "published"
