@@ -30,6 +30,8 @@ from bot.festival import (
     festival_from_query,
     festival_metadata_filter,
     festival_number,
+    festival_period,
+    festival_subject_dates_from_query,
 )
 from bot.firebase_knowledge import (
     COLLECTIONS,
@@ -141,6 +143,11 @@ BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
 BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
 BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
 BUILTIN_SOURCE_TYPE = "builtin_reference"
+FESTIVAL_OPERATING_YEAR_DOCUMENT_KEY = "builtin:festival-operating-year"
+FESTIVAL_OPERATING_YEAR_SOURCE_URL = (
+    "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/"
+    "docs/festival-operating-year.md"
+)
 
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -935,6 +942,28 @@ def trusted_capability_response(question: str) -> str | None:
     if re.fullmatch(bot_subject + identity_intent + r"[。！？!?、,.]*", normalized):
         return _TRUSTED_CAPABILITY_RESPONSE
     return None
+
+
+def trusted_festival_mapping_response(question: str) -> tuple[str, tuple[int, ...]] | None:
+    """Render explicit date-to-festival mappings from the canonical rule.
+
+    This narrow deterministic path exists because the dates in a mapping
+    question are values to classify, not evidence timestamps. It deliberately
+    accepts only fully-qualified valid dates plus an explicit mapping intent;
+    all other date questions continue through the ACL-aware RAG pipeline.
+    """
+    subject_dates = festival_subject_dates_from_query(question)
+    if not subject_dates:
+        return None
+    mappings = tuple(festival_number(value) for value in subject_dates)
+    lines = ["矢上祭実行委員会の年度区分は、毎年10月1日に切り替わるぽん。", ""]
+    for value, number in zip(subject_dates, mappings, strict=True):
+        period = festival_period(number)
+        lines.append(
+            f"- {value.isoformat()}: **{number}th** "
+            f"（{period.starts_on.isoformat()} 〜 {period.ends_on.isoformat()}）"
+        )
+    return "\n".join(lines), mappings
 
 
 @dataclass
@@ -1762,6 +1791,24 @@ class CorpusManager:
                 text=capability_response,
                 festival=festival,
                 no_answer=False,
+            )
+        festival_mapping = trusted_festival_mapping_response(question)
+        if festival_mapping:
+            mapping_text, mapped_festivals = festival_mapping
+            citation = (
+                "[確定仕様: #矢上祭の年度区分]"
+                f"({FESTIVAL_OPERATING_YEAR_SOURCE_URL})"
+            )
+            return RagAnswer(
+                text=mapping_text + "\n\n**参照**\n- " + citation,
+                citations=(citation,),
+                festival=(
+                    mapped_festivals[0]
+                    if len(set(mapped_festivals)) == 1
+                    else None
+                ),
+                no_answer=False,
+                lexical_keys=(FESTIVAL_OPERATING_YEAR_DOCUMENT_KEY,),
             )
         if guild_id and not self._check_rate_limit(guild_id):
             return RagAnswer(

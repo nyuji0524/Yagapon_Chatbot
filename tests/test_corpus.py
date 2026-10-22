@@ -26,6 +26,7 @@ from bot.corpus import (
     run_backfill_channels,
     sensitive_request_response,
     trusted_capability_response,
+    trusted_festival_mapping_response,
 )
 from bot.festival import CalendarWindow
 from bot.firebase_knowledge import FirebaseEvidence
@@ -1562,6 +1563,49 @@ async def test_capability_help_is_deterministic_and_skips_retrieval(corpus_manag
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
     corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
     corpus_manager.rag_store.query_terms.assert_not_called()
+
+
+def test_trusted_festival_mapping_response_uses_operating_year_rule():
+    response = trusted_festival_mapping_response(
+        "2026年9月30日と2026年10月1日はそれぞれ何th？"
+    )
+
+    assert response is not None
+    text, festivals = response
+    assert festivals == (27, 28)
+    assert "2026-09-30: **27th**" in text
+    assert "2026-10-01: **28th**" in text
+
+
+@pytest.mark.asyncio
+async def test_festival_mapping_is_deterministic_and_keeps_timeless_canonical_source(
+    corpus_manager,
+):
+    corpus_manager._client.aio.models.generate_content = AsyncMock()
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock()
+    corpus_manager.rag_store.query_terms = Mock()
+    corpus_manager.rag_store.search_exact = Mock()
+
+    result = await corpus_manager.query_with_trace(
+        "2026年9月30日と2026年10月1日はそれぞれ何th？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert result.festival is None
+    assert "2026-09-30: **27th**" in result.text
+    assert "2026-10-01: **28th**" in result.text
+    assert result.lexical_keys == ("builtin:festival-operating-year",)
+    assert result.citations == (
+        "[確定仕様: #矢上祭の年度区分]"
+        "(https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/"
+        "docs/festival-operating-year.md)",
+    )
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+    corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
+    corpus_manager.rag_store.query_terms.assert_not_called()
+    corpus_manager.rag_store.search_exact.assert_not_called()
 
 
 def exhaustive_notification_evidence(

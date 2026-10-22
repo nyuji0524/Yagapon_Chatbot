@@ -9,6 +9,7 @@ from bot.festival import (
     festival_from_query,
     festival_number,
     festival_period,
+    festival_subject_dates_from_query,
 )
 
 
@@ -105,6 +106,34 @@ def test_multiple_explicit_dates_do_not_create_a_single_date_filter():
         "2026年9月30日と2026年10月1日はそれぞれ何thですか",
         now,
     ) is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2026年9月30日と2026年10月1日はそれぞれ何thですか",
+        "2026/9/30と2026/10/1の年度区分を教えて",
+        "２０２６年９月３０日と２０２６年１０月１日はどの回次？",
+    ],
+)
+def test_festival_mapping_dates_are_subjects_not_evidence_filters(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_subject_dates_from_query(query) == (
+        date(2026, 9, 30),
+        date(2026, 10, 1),
+    )
+    assert calendar_date_from_query(query, now) is None
+    assert calendar_window_from_query(query, now) is None
+
+
+def test_non_mapping_date_question_keeps_evidence_date_semantics():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_subject_dates_from_query("2026年9月30日の会議内容") == ()
+    assert calendar_date_from_query("2026年9月30日の会議内容", now) == date(
+        2026, 9, 30
+    )
 
 
 @pytest.mark.parametrize("query", ["1.5倍速", "2-3人で参加", "1-2時間", "gemini-3.1-flash", "2/3人"])
