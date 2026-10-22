@@ -101,6 +101,10 @@ class RagStore:
                     guild_id INTEGER NOT NULL,
                     channel_id INTEGER,
                     channel_name TEXT,
+                    parent_id INTEGER,
+                    parent_name TEXT,
+                    category_id INTEGER,
+                    category_name TEXT,
                     category TEXT,
                     festival INTEGER,
                     source_type TEXT,
@@ -163,12 +167,39 @@ class RagStore:
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(documents)").fetchall()
             }
-            if "category" not in columns:
-                connection.execute("ALTER TABLE documents ADD COLUMN category TEXT")
-            if "access_scope" not in columns:
-                connection.execute("ALTER TABLE documents ADD COLUMN access_scope TEXT")
-            if "schema" not in columns:
-                connection.execute("ALTER TABLE documents ADD COLUMN schema TEXT")
+            migrations = {
+                "category": "TEXT",
+                "parent_id": "INTEGER",
+                "parent_name": "TEXT",
+                "category_id": "INTEGER",
+                "category_name": "TEXT",
+                "access_scope": "TEXT",
+                "schema": "TEXT",
+            }
+            for column, sql_type in migrations.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE documents ADD COLUMN {column} {sql_type}"
+                    )
+
+            # ``category`` is the original category-name field.  Keep it in
+            # sync with the explicit lineage name so existing databases and
+            # older callers remain readable while ID-based policy checks use
+            # the new fields.
+            connection.execute(
+                """
+                UPDATE documents SET category_name = category
+                WHERE coalesce(category_name, '') = ''
+                  AND coalesce(category, '') != ''
+                """
+            )
+            connection.execute(
+                """
+                UPDATE documents SET category = category_name
+                WHERE coalesce(category, '') = ''
+                  AND coalesce(category_name, '') != ''
+                """
+            )
 
         self._write(initialize)
 
@@ -189,6 +220,8 @@ class RagStore:
         """
         values = _metadata_map(metadata)
         document_key = str(values.get("document_key") or hashlib.sha256(text.encode()).hexdigest()[:24])
+        category_name = str(values.get("category_name") or values.get("category") or "")
+        legacy_category = str(values.get("category") or category_name)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         pending = tuple(
             dict.fromkeys(
@@ -203,14 +236,19 @@ class RagStore:
                 """
                 INSERT INTO documents (
                     document_key, remote_name, guild_id, channel_id, channel_name,
-                    category, festival, source_type, status, authority, source_url,
+                    parent_id, parent_name, category_id, category_name, category,
+                    festival, source_type, status, authority, source_url,
                     access_scope, schema, start_at, end_at, body, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_key) DO UPDATE SET
                     remote_name=excluded.remote_name,
                     guild_id=excluded.guild_id,
                     channel_id=excluded.channel_id,
                     channel_name=excluded.channel_name,
+                    parent_id=excluded.parent_id,
+                    parent_name=excluded.parent_name,
+                    category_id=excluded.category_id,
+                    category_name=excluded.category_name,
                     category=excluded.category,
                     festival=excluded.festival,
                     source_type=excluded.source_type,
@@ -230,7 +268,11 @@ class RagStore:
                     int(values.get("guild_id") or 0),
                     int(values["channel_id"]) if values.get("channel_id") else None,
                     str(values.get("channel_name") or ""),
-                    str(values.get("category") or ""),
+                    int(values["parent_id"]) if values.get("parent_id") else None,
+                    str(values.get("parent_name") or ""),
+                    int(values["category_id"]) if values.get("category_id") else None,
+                    category_name,
+                    legacy_category,
                     int(values["festival"]) if values.get("festival") is not None else None,
                     str(values.get("source_type") or values.get("source") or "unknown"),
                     str(values.get("status") or "raw"),
@@ -361,6 +403,10 @@ class RagStore:
             "guild_id",
             "channel_id",
             "channel_name",
+            "parent_id",
+            "parent_name",
+            "category_id",
+            "category_name",
             "category",
             "festival",
             "source_type",

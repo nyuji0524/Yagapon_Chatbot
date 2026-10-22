@@ -20,6 +20,87 @@ def metadata(festival: int = 27):
     ]
 
 
+def test_discord_lineage_survives_upsert_and_get_document(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    lineage = metadata(28) + [
+        {"key": "parent_id", "string_value": "101"},
+        {"key": "parent_name", "string_value": "応募者対応"},
+        {"key": "category_id", "string_value": "202"},
+        {"key": "category_name", "string_value": "選考"},
+        {"key": "source_type", "string_value": "discord_conversation"},
+    ]
+
+    store.upsert_document("documents/lineage", "十分な長さの会話 " * 30, lineage)
+
+    document = store.get_document("doc-28")
+    assert document is not None
+    assert document["parent_id"] == 101
+    assert document["parent_name"] == "応募者対応"
+    assert document["category_id"] == 202
+    assert document["category_name"] == "選考"
+    # The original name-only field remains populated for existing consumers.
+    assert document["category"] == "選考"
+    curated_source = store.list_curation_documents()
+    assert curated_source[0]["parent_id"] == 101
+    assert curated_source[0]["category_id"] == 202
+
+
+def test_legacy_database_migrates_category_to_explicit_lineage(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE documents (
+                document_key TEXT PRIMARY KEY,
+                remote_name TEXT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER,
+                channel_name TEXT,
+                category TEXT,
+                festival INTEGER,
+                source_type TEXT,
+                status TEXT,
+                authority TEXT,
+                access_scope TEXT,
+                schema TEXT,
+                source_url TEXT,
+                start_at TEXT,
+                end_at TEXT,
+                body TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO documents (
+                document_key, remote_name, guild_id, channel_id, channel_name,
+                category, body, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy",
+                "documents/legacy",
+                1,
+                2,
+                "過去ログ",
+                "27th IT局",
+                "legacy body",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    store = RagStore(path)
+
+    document = store.get_document("legacy")
+    assert document is not None
+    assert document["category"] == "27th IT局"
+    assert document["category_name"] == "27th IT局"
+    assert document["parent_id"] is None
+    assert document["parent_name"] is None
+    assert document["category_id"] is None
+
+
 def test_connection_sets_busy_timeout(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
 
