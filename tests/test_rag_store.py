@@ -112,6 +112,7 @@ def test_exact_search_includes_global_trusted_documents(tmp_path):
         {"key": "channel_name", "string_value": "Bot運用仕様"},
         {"key": "authority", "string_value": "curated"},
         {"key": "status", "string_value": "current"},
+        {"key": "source_type", "string_value": "builtin_reference"},
     ]
     store.upsert_document("builtin://drive", "文字起こしは専用フォルダへ保存する", global_metadata)
 
@@ -164,6 +165,23 @@ def test_year_filter_excludes_inactive_timeless_curated_document(tmp_path):
             {"key": "authority", "string_value": "curated"},
             {"key": "status", "string_value": "deprecated"},
             {"key": "source_type", "string_value": "knowledge_repository"},
+        ],
+    )
+
+    assert store.search_exact(1, ["再試行"], festival=28) == []
+
+
+def test_year_filter_excludes_timeless_document_from_unapproved_source_type(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "source://unlabelled-code",
+        "再試行についてのコードコメント",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "source:unlabelled-code"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "current"},
+            {"key": "source_type", "string_value": "source_code"},
         ],
     )
 
@@ -232,6 +250,7 @@ def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path)
             {"key": "channel_name", "string_value": record["title"]},
             {"key": "authority", "string_value": "curated"},
             {"key": "status", "string_value": record["status"]},
+            {"key": "source_type", "string_value": "builtin_reference"},
             {"key": "source_url", "string_value": record["source_url"]},
         ]
         if record.get("festival") is not None:

@@ -301,7 +301,8 @@ class RagStore:
             conditions.append(
                 "(festival = ? OR (festival IS NULL AND authority IN "
                 "('canonical', 'curated', 'reviewed_record') AND status IN "
-                "('active', 'historical', 'approved', 'verified', 'current')))"
+                "('active', 'historical', 'approved', 'verified', 'current') AND "
+                "source_type IN ('builtin_reference', 'knowledge_repository')))"
             )
             params.append(festival)
         if target_date is not None:
