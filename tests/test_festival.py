@@ -213,6 +213,13 @@ def test_multi_month_window_maps_across_festival_operating_year():
     ) == CalendarWindow(date(2025, 11, 1), date(2026, 2, 28))
 
 
+@pytest.mark.parametrize("query", ["27thの第1月曜の定例", "27thの第2月曜日の会議"])
+def test_weekday_ordinal_is_not_mistaken_for_a_calendar_month(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now, festival=27) is None
+
+
 def test_exact_date_does_not_also_create_a_month_window():
     now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
 

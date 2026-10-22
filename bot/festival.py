@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 FESTIVAL_YEAR_OFFSET = 1998
+_MONTH_NAME_PATTERN = r"(?<![第\d])(1[0-2]|0?[1-9])\s*月(?!\s*[\d曜])"
 
 
 def festival_number(value: date | datetime) -> int:
@@ -114,7 +115,7 @@ def calendar_date_from_query(
             normalized,
         ))
         additional_named_months = list(
-            re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+            re.finditer(_MONTH_NAME_PATTERN, normalized)
         )
         # A day plus another month is a range/comparison, not a single-date
         # question.  Let the month-window resolver cover fully-qualified
@@ -182,7 +183,7 @@ def calendar_window_from_query(
         normalized,
     ))
     named_months = list(
-        re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+        re.finditer(_MONTH_NAME_PATTERN, normalized)
     )
     additional_named_months = [
         month
@@ -252,7 +253,7 @@ def calendar_window_from_query(
         return _month_window(*relative_month)
 
     mentioned_months = list(
-        re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+        re.finditer(_MONTH_NAME_PATTERN, normalized)
     )
     if mentioned_months and festival is not None:
         period = festival_period(festival)
