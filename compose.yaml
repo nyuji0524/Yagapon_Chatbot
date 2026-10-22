@@ -65,6 +65,9 @@ services:
     image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
     build:
       context: .
+    depends_on:
+      yagapon:
+        condition: service_healthy
     restart: unless-stopped
     env_file:
       - ${YAGAPON_ENV_FILE:-.env}
@@ -75,6 +78,7 @@ services:
       YAGAPON_RELEASE_METADATA: /data/releases/current.json
       YAGAPON_SOURCE_INDEX_ENABLED: ${YAGAPON_SOURCE_INDEX_ENABLED:-false}
       YAGAPON_SOURCE_REPOSITORIES: ${YAGAPON_SOURCE_REPOSITORIES:-}
+      YAGAPON_SOURCE_UPLOAD_CONCURRENCY: ${YAGAPON_SOURCE_UPLOAD_CONCURRENCY:-2}
       YAGAPON_SOURCE_GITHUB_TOKEN_FILE: ${YAGAPON_SOURCE_GITHUB_TOKEN_FILE:-}
       YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET: ${YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET:-}
       YAGAPON_KNOWLEDGE_SNAPSHOT_OBJECT: ${YAGAPON_KNOWLEDGE_SNAPSHOT_OBJECT:-snapshots/main.json}

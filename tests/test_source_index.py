@@ -9,6 +9,7 @@ from source_index.__main__ import (
     load_repositories,
     metadata_for,
     safe_source_path,
+    source_upload_concurrency,
 )
 
 
@@ -185,3 +186,14 @@ def test_unreadable_release_metadata_is_non_fatal(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.exists", denied)
 
     assert deployed_refs(release) == {}
+
+
+def test_source_upload_concurrency_is_bounded(monkeypatch):
+    monkeypatch.setenv("YAGAPON_SOURCE_UPLOAD_CONCURRENCY", "99")
+    assert source_upload_concurrency() == 8
+
+    monkeypatch.setenv("YAGAPON_SOURCE_UPLOAD_CONCURRENCY", "0")
+    assert source_upload_concurrency() == 1
+
+    monkeypatch.setenv("YAGAPON_SOURCE_UPLOAD_CONCURRENCY", "invalid")
+    assert source_upload_concurrency() == 2
