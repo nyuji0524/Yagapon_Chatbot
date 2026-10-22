@@ -429,14 +429,14 @@ def deployed_refs(path: Path) -> dict[str, str]:
             refs.update({str(key): str(value) for key, value in json.loads(raw).items()})
         except (ValueError, TypeError):
             log.error("Invalid YAGAPON_SOURCE_DEPLOYED_REFS_JSON; ignoring it")
-    if path.exists():
-        try:
+    try:
+        if path.exists():
             image = str(json.loads(path.read_text(encoding="utf-8")).get("image") or "")
             sha = image.rsplit(":", 1)[-1]
             if re.fullmatch(r"[0-9a-f]{40}", sha):
                 refs["nyuji0524/Yagapon_Chatbot"] = sha
-        except (OSError, ValueError, TypeError):
-            log.warning("Could not read deployed release metadata")
+    except (OSError, ValueError, TypeError):
+        log.warning("Could not read deployed release metadata")
     return refs
 
 
