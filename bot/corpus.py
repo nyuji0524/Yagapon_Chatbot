@@ -698,7 +698,23 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     decoded_url = unicodedata.normalize("NFKC", unquote(normalized_url))
     if any(unicodedata.category(character)[0] in {"C", "M"} for character in decoded_url):
         return False
-    label_variants = _security_text_variants(label)
+    decoded_labels = [
+        unicodedata.normalize("NFKC", unquote(candidate))
+        for candidate in _security_text_variants(label)
+    ]
+    if any(
+        unicodedata.category(character)[0] == "C"
+        for candidate in decoded_labels
+        for character in candidate
+    ):
+        return False
+    label_variants = tuple(
+        dict.fromkeys(
+            variant
+            for candidate in decoded_labels
+            for variant in _security_text_variants(candidate)
+        )
+    )
     materials = [f"{candidate}\n{decoded_url}" for candidate in label_variants]
     if any(
         re.search(r"(?<!\\)\]\s*\(\s*<?https?://", candidate, re.IGNORECASE)
