@@ -3197,14 +3197,29 @@ class CorpusManager:
                     display_name,
                 )
                 if match:
-                    if document_start is None:
-                        document_start = datetime.strptime(
+                    try:
+                        inferred_start = datetime.strptime(
                             match.group(1), "%Y-%m-%d %H:%M"
-                        ).replace(tzinfo=JST).timestamp()
-                    if document_end is None:
-                        document_end = datetime.strptime(
-                            match.group(2), "%Y-%m-%d %H:%M"
-                        ).replace(tzinfo=JST).timestamp()
+                        ).replace(tzinfo=JST)
+                        # Legacy display names retain only minute precision.
+                        # Treat the end as the last possible instant in that
+                        # minute so a bounded replacement cannot drop seconds
+                        # that were rounded out of the name.
+                        inferred_end = (
+                            datetime.strptime(
+                                match.group(2), "%Y-%m-%d %H:%M"
+                            ).replace(tzinfo=JST)
+                            + timedelta(minutes=1)
+                            - timedelta(microseconds=1)
+                        )
+                    except ValueError:
+                        pass
+                    else:
+                        if inferred_start <= inferred_end:
+                            if document_start is None:
+                                document_start = inferred_start.timestamp()
+                            if document_end is None:
+                                document_end = inferred_end.timestamp()
             if (
                 after_timestamp is not None
                 and (document_start is None or document_start <= after_timestamp)

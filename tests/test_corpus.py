@@ -457,6 +457,35 @@ async def test_existing_channel_documents_replaces_only_chunks_fully_inside_slic
 
 
 @pytest.mark.asyncio
+async def test_bounded_replacement_keeps_imprecise_or_invalid_legacy_end(
+    corpus_manager,
+):
+    before = datetime(2026, 12, 31, 15, 0, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 12, 31, 15, 0, 0, tzinfo=timezone.utc)
+    inventory = (
+        {
+            "name": "documents/minute-precision",
+            "display_name": "#開発 | 2027-01-01 00:00-2027-01-01 00:00",
+            "metadata": discord_document_metadata(2, start_epoch=start.timestamp()),
+        },
+        {
+            "name": "documents/invalid-legacy-end",
+            "display_name": "#開発 | 2027-01-01 00:00-2027-02-30 00:30",
+            "metadata": discord_document_metadata(2, start_epoch=start.timestamp()),
+        },
+    )
+
+    matches = await corpus_manager._existing_channel_documents(
+        "fileSearchStores/test",
+        FakeChannel([]),
+        before=before,
+        remote_inventory=inventory,
+    )
+
+    assert matches == []
+
+
+@pytest.mark.asyncio
 async def test_existing_channel_documents_never_replaces_other_source_or_guild(
     corpus_manager,
 ):
