@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 image="${1:-}"
 staging_dir="${2:-/tmp}"
+staging_dir="${staging_dir%/}"
 app_dir=/opt/yagapon
 deploy_env=/etc/yagapon/deploy.env
 compose_source="$staging_dir/compose.yaml"
@@ -70,7 +71,14 @@ cleanup_staging() {
     fi
   fi
 }
-trap 'rollback; cleanup_staging' ERR
+handle_error() {
+  status=$?
+  trap - ERR
+  rollback
+  cleanup_staging
+  exit "$status"
+}
+trap handle_error ERR
 
 deploy_tmp=$(mktemp /etc/yagapon/deploy.env.XXXXXX)
 if [[ -f "$deploy_env" ]]; then
