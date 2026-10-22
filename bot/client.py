@@ -607,10 +607,14 @@ class YagaPon(discord.Bot):
             # Close the Discord connection before the slower corpus flush so
             # Pycord cannot start a reconnect against an already-closing HTTP
             # session during deployments.
-            await super().close()
-            log.info("Discord closed; flushing corpus buffers...")
-            await self.corpus.shutdown()
-            self._close_completed = True
+            try:
+                await super().close()
+            finally:
+                # A transport error while Discord is closing must not discard
+                # buffered knowledge waiting for its durable upload.
+                log.info("Discord closing finished; flushing corpus buffers...")
+                await self.corpus.shutdown()
+                self._close_completed = True
 
 
 def create_bot() -> YagaPon:
