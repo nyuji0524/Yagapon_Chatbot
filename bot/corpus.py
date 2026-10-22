@@ -312,7 +312,9 @@ def calculate_incremental_after(cursor: dict | None, now: datetime | None = None
     local = base.astimezone(JST).replace(hour=0, minute=0, second=0, microsecond=0)
     if cursor_at is not None:
         local -= timedelta(days=1)
-    return local.astimezone(timezone.utc)
+    # Discord history's ``after`` is exclusive. Move just before midnight so
+    # a message timestamped exactly at 00:00 is included in the rebuilt day.
+    return (local - timedelta(microseconds=1)).astimezone(timezone.utc)
 
 
 def calculate_resumable_incremental_after(
@@ -3188,35 +3190,35 @@ class CorpusManager:
 
             document_start = metadata_timestamp("start_epoch", "start_at")
             document_end = metadata_timestamp("end_epoch", "end_at")
-            if document_start is None and document_end is None:
-                match = re.search(r"\| (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", display_name)
+            if document_start is None or document_end is None:
+                match = re.search(
+                    r"\|\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*-\s*"
+                    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})",
+                    display_name,
+                )
                 if match:
-                    document_at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=JST)
-                    document_start = document_at.timestamp()
-                    document_end = document_start
-            elif document_start is None:
-                document_start = document_end
-            elif document_end is None:
-                document_end = document_start
-            if (
-                (after_timestamp is not None or before_timestamp is not None)
-                and document_start is None
-            ):
-                # A bounded slice must not delete an old document whose year
-                # cannot be established. It can be migrated by an explicit,
-                # unbounded maintenance run instead.
-                continue
+                    if document_start is None:
+                        document_start = datetime.strptime(
+                            match.group(1), "%Y-%m-%d %H:%M"
+                        ).replace(tzinfo=JST).timestamp()
+                    if document_end is None:
+                        document_end = datetime.strptime(
+                            match.group(2), "%Y-%m-%d %H:%M"
+                        ).replace(tzinfo=JST).timestamp()
             if (
                 after_timestamp is not None
-                and document_end is not None
-                and document_end < after_timestamp
+                and (document_start is None or document_start <= after_timestamp)
             ):
+                # Discord's ``after`` bound is exclusive. Keep any document
+                # that is not provably wholly inside the fetched slice; deleting
+                # an overlapping chunk would lose its pre-boundary messages.
                 continue
             if (
                 before_timestamp is not None
-                and document_start is not None
-                and document_start >= before_timestamp
+                and (document_end is None or document_end >= before_timestamp)
             ):
+                # ``before`` is exclusive as well. Equality and unknown ends
+                # are retained for the same lossless-replacement guarantee.
                 continue
             matches.append(str(document["name"]))
         return matches

@@ -357,7 +357,7 @@ async def test_prepared_backfill_rejects_invalid_slice_before(
 
 
 @pytest.mark.asyncio
-async def test_existing_channel_documents_selects_only_the_bounded_year_slice(
+async def test_existing_channel_documents_replaces_only_chunks_fully_inside_slice(
     corpus_manager,
 ):
     after = datetime(2026, 9, 30, 15, 0, tzinfo=timezone.utc)
@@ -366,16 +366,24 @@ async def test_existing_channel_documents_selects_only_the_bounded_year_slice(
         {
             "name": "documents/at-after",
             "display_name": "#開発 | boundary",
-            "metadata": discord_document_metadata(2, start_epoch=after.timestamp()),
+            "metadata": discord_document_metadata(
+                2,
+                start_epoch=after.timestamp(),
+                end_epoch=(after + timedelta(hours=1)).timestamp(),
+            ),
         },
         {
             "name": "documents/inside-iso",
             "display_name": "#開発 | inside",
-            "metadata": discord_document_metadata(2, start_at="2027-01-01T00:00:00+09:00"),
+            "metadata": discord_document_metadata(
+                2,
+                start_at="2027-01-01T00:00:00+09:00",
+                end_at="2027-01-01T00:30:00+09:00",
+            ),
         },
         {
-            "name": "documents/inside-end-fallback",
-            "display_name": "#開発 | inside",
+            "name": "documents/unknown-start",
+            "display_name": "#開発 | unknown start",
             "metadata": discord_document_metadata(2, end_epoch=(before - timedelta(seconds=1)).timestamp()),
         },
         {
@@ -443,13 +451,8 @@ async def test_existing_channel_documents_selects_only_the_bounded_year_slice(
     )
 
     assert matches == [
-        "documents/at-after",
         "documents/inside-iso",
-        "documents/inside-end-fallback",
         "documents/legacy-inside",
-        "documents/old-discord-metadata",
-        "documents/overlaps-start-boundary",
-        "documents/overlaps-end-boundary",
     ]
 
 
@@ -3539,10 +3542,12 @@ async def test_lexical_recovery_ignores_blank_response_and_api_failure(corpus_ma
     assert failed is None
 
 
-def test_incremental_boundary_is_previous_jst_midnight():
+def test_incremental_boundary_includes_previous_jst_midnight():
     cursor = {"message_at": "2026-10-05T15:30:00+00:00"}
 
-    assert calculate_incremental_after(cursor) == datetime(2026, 10, 4, 15, 0, tzinfo=timezone.utc)
+    assert calculate_incremental_after(cursor) == datetime(
+        2026, 10, 4, 14, 59, 59, 999999, tzinfo=timezone.utc
+    )
 
 
 def test_resumable_incremental_uses_default_window_for_first_run():
@@ -3553,7 +3558,7 @@ def test_resumable_incremental_uses_default_window_for_first_run():
     now = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
 
     assert calculate_resumable_incremental_after(config, 1, 2, now=now) == datetime(
-        2026, 9, 13, 15, 0, tzinfo=timezone.utc
+        2026, 9, 13, 14, 59, 59, 999999, tzinfo=timezone.utc
     )
 
 
@@ -3573,7 +3578,9 @@ def test_resumable_incremental_uses_existing_channel_cursor():
         has_backfill_cursors=lambda guild_id: True,
     )
 
-    assert calculate_resumable_incremental_after(config, 1, 2) == datetime(2026, 10, 4, 15, 0, tzinfo=timezone.utc)
+    assert calculate_resumable_incremental_after(config, 1, 2) == datetime(
+        2026, 10, 4, 14, 59, 59, 999999, tzinfo=timezone.utc
+    )
 
 
 @pytest.mark.asyncio
