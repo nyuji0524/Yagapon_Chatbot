@@ -29,6 +29,7 @@ jobs:
       GCE_INSTANCE: ${{ vars.GCE_INSTANCE }}
       GCE_ZONE: ${{ vars.GCE_ZONE }}
       IMAGE_REPOSITORY: ${{ vars.GCP_ARTIFACT_IMAGE }}
+      DEPLOY_STAGE: /tmp/yagapon-deploy-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout tested commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -77,6 +78,14 @@ jobs:
 
       - name: Copy deployment files
         run: |
+          quoted_stage=$(printf '%q' "$DEPLOY_STAGE")
+          # The path is unique per run. A collision may indicate stale ownership
+          # or tampering, so deliberately fail closed instead of using mkdir -p.
+          gcloud compute ssh "$GCE_INSTANCE" \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            --command "umask 077; mkdir $quoted_stage"
           gcloud compute scp \
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
@@ -84,15 +93,16 @@ jobs:
             compose.yaml deploy/remote-deploy.sh deploy/rag-eval-control.sh \
             docs/rag-eval-cases.yaml \
             deploy/systemd/yagapon.service \
-            "$GCE_INSTANCE:/tmp/"
+            "$GCE_INSTANCE:$DEPLOY_STAGE/"
 
       - name: Deploy and verify health
         env:
           IMAGE_SHA: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
         run: |
           quoted_image=$(printf '%q' "$IMAGE_SHA")
+          quoted_stage=$(printf '%q' "$DEPLOY_STAGE")
           gcloud compute ssh "$GCE_INSTANCE" \
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            --command "sudo /bin/bash /tmp/remote-deploy.sh $quoted_image"
+            --command "sudo /bin/bash $quoted_stage/remote-deploy.sh $quoted_image $quoted_stage"

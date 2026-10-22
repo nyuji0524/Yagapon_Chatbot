@@ -2,15 +2,17 @@
 set -Eeuo pipefail
 
 image="${1:-}"
+staging_dir="${2:-/tmp}"
+staging_dir="${staging_dir%/}"
 app_dir=/opt/yagapon
 deploy_env=/etc/yagapon/deploy.env
-compose_source=/tmp/compose.yaml
+compose_source="$staging_dir/compose.yaml"
 compose_target="$app_dir/compose.yaml"
-unit_source=/tmp/yagapon.service
+unit_source="$staging_dir/yagapon.service"
 unit_target=/etc/systemd/system/yagapon.service
-rag_eval_source=/tmp/rag-eval-control.sh
+rag_eval_source="$staging_dir/rag-eval-control.sh"
 rag_eval_target="$app_dir/deploy/rag-eval-control.sh"
-rag_eval_cases_source=/tmp/rag-eval-cases.yaml
+rag_eval_cases_source="$staging_dir/rag-eval-cases.yaml"
 rag_eval_cases_target="$app_dir/deploy/rag-eval-cases.yaml"
 backup_dir=/var/backups/yagapon/"$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -18,13 +20,18 @@ if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]
   echo "Refusing invalid Artifact Registry image reference" >&2
   exit 2
 fi
-if [[ ! -f "$compose_source" || ! -f /tmp/remote-deploy.sh || ! -f "$unit_source" \
+if [[ "$staging_dir" != /tmp \
+  && ! "$staging_dir" =~ ^/tmp/yagapon-deploy-[0-9]+-[0-9]+$ ]]; then
+  echo "Refusing invalid deployment staging directory" >&2
+  exit 2
+fi
+if [[ ! -f "$compose_source" || ! -f "$staging_dir/remote-deploy.sh" || ! -f "$unit_source" \
   || ! -f "$rag_eval_source" ]]; then
-  echo "Deployment files were not copied to /tmp" >&2
+  echo "Deployment files were not copied to the staging directory" >&2
   exit 2
 fi
 [[ -f "$rag_eval_cases_source" ]] || {
-  echo "RAG evaluation cases were not copied to /tmp" >&2
+  echo "RAG evaluation cases were not copied to the staging directory" >&2
   exit 2
 }
 if [[ ! -f /etc/yagapon/yagapon.env ]]; then
@@ -57,7 +64,21 @@ rollback() {
   systemctl daemon-reload
   systemctl restart yagapon || true
 }
-trap rollback ERR
+cleanup_staging() {
+  if [[ "$staging_dir" != /tmp ]]; then
+    if ! rm -rf -- "$staging_dir"; then
+      echo "Warning: could not remove deployment staging directory: $staging_dir" >&2
+    fi
+  fi
+}
+handle_error() {
+  status=$?
+  trap - ERR
+  rollback
+  cleanup_staging
+  exit "$status"
+}
+trap handle_error ERR
 
 deploy_tmp=$(mktemp /etc/yagapon/deploy.env.XXXXXX)
 if [[ -f "$deploy_env" ]]; then
@@ -168,6 +189,7 @@ for _ in $(seq 1 48); do
     chmod 0640 "$data_path/releases/current.json"
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     docker image prune --force --filter 'until=168h' >/dev/null
+    cleanup_staging
     echo "Deployment healthy: $image (container: $container_id)"
     exit 0
   fi
