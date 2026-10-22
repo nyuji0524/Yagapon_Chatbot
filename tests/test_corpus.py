@@ -330,6 +330,70 @@ async def test_prepared_multichannel_backfill_reuses_one_remote_inventory(
 
 
 @pytest.mark.asyncio
+async def test_prepared_same_name_channels_do_not_share_legacy_replacement(
+    corpus_manager,
+):
+    channel_two = FakeChannel([fake_message(1)])
+    channel_three = FakeChannel([fake_message(2)])
+    channel_three.id = 3
+    # Discord permits duplicate names (and forum thread titles are commonly
+    # duplicated), while pre-metadata documents have no immutable owner ID.
+    channel_three.name = channel_two.name
+    corpus_manager.list_remote_documents = AsyncMock(
+        return_value=[
+            {
+                "name": "documents/channel-two",
+                "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+                "metadata": {"channel_id": "2", "channel_name": "開発"},
+            },
+            {
+                "name": "documents/channel-three",
+                "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+                "metadata": {"channel_id": "3", "channel_name": "開発"},
+            },
+            {
+                "name": "documents/ambiguous-legacy",
+                "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+                "metadata": {},
+            },
+        ]
+    )
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+    corpus_manager._delete_documents = AsyncMock(
+        side_effect=lambda names: len(names)
+    )
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2, 3},
+        "fileSearchStores/test",
+    )
+
+    results = await asyncio.gather(
+        corpus_manager.backfill_channel(
+            channel_two,
+            "fileSearchStores/test",
+            session=session,
+        ),
+        corpus_manager.backfill_channel(
+            channel_three,
+            "fileSearchStores/test",
+            session=session,
+        ),
+    )
+    await corpus_manager.finish_backfill(session)
+
+    assert {
+        tuple(call.args[0])
+        for call in corpus_manager._delete_documents.await_args_list
+    } == {
+        ("documents/channel-two",),
+        ("documents/channel-three",),
+    }
+    assert [result.documents_replaced for result in results] == [1, 1]
+    assert session.completed_channel_ids == {2, 3}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("dry_run", [False, True])
 async def test_prepare_snapshots_inventory_after_an_inflight_flush(
     corpus_manager,

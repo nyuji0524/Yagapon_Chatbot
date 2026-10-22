@@ -2445,6 +2445,7 @@ class CorpusManager:
         after=None,
         *,
         remote_inventory: tuple[dict[str, object], ...] | None = None,
+        allow_legacy_name_match: bool = True,
     ) -> list[str]:
         """置換対象を事前取得する。metadataなしの旧形式も表示名で対象化する。
 
@@ -2463,7 +2464,11 @@ class CorpusManager:
             metadata = document.get("metadata") or {}
             display_name = str(document.get("display_name") or "")
             channel_matches = str(metadata.get("channel_id") or "") == str(channel.id)
-            legacy_matches = not metadata and display_name.startswith(prefix)
+            legacy_matches = (
+                allow_legacy_name_match
+                and not metadata
+                and display_name.startswith(prefix)
+            )
             if not (channel_matches or legacy_matches):
                 continue
             if after_timestamp is not None:
@@ -2478,6 +2483,58 @@ class CorpusManager:
                             continue
             matches.append(str(document["name"]))
         return matches
+
+    @staticmethod
+    def _session_legacy_name_match_allowed(
+        session: BackfillSession,
+        channel,
+    ) -> bool:
+        """Only migrate a legacy name when it has one provable target owner.
+
+        Legacy File Search documents predate immutable channel metadata and can
+        only be recognized by ``#channel-name``.  A prepared multi-channel run
+        shares one inventory between parallel workers, so two same-name targets
+        would otherwise both delete the same legacy document.  Existing
+        metadata-bearing documents let us prove the target-name allocation; if
+        any target is unknown, retain the legacy document for explicit migration.
+        """
+        if len(session.target_channel_ids) <= 1:
+            return True
+        if session.remote_inventory is None:
+            return False
+
+        names_by_channel_id: dict[int, set[str]] = {
+            channel_id: set() for channel_id in session.target_channel_ids
+        }
+        for document in session.remote_inventory:
+            metadata = document.get("metadata") or {}
+            try:
+                channel_id = int(metadata.get("channel_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if channel_id not in names_by_channel_id:
+                continue
+            channel_name = str(metadata.get("channel_name") or "").strip()
+            if not channel_name:
+                display_name = str(document.get("display_name") or "")
+                match = re.match(
+                    r"^#(.+?) \| \d{4}-\d{2}-\d{2} \d{2}:\d{2}",
+                    display_name,
+                )
+                if match:
+                    channel_name = match.group(1)
+            if channel_name:
+                names_by_channel_id[channel_id].add(channel_name)
+
+        if any(not names for names in names_by_channel_id.values()):
+            return False
+        current_name = str(getattr(channel, "name", "") or "")
+        owners = {
+            channel_id
+            for channel_id, names in names_by_channel_id.items()
+            if current_name in names
+        }
+        return owners == {int(channel.id)}
 
     async def backfill_channel(
         self,
@@ -2505,15 +2562,21 @@ class CorpusManager:
         existing = []
         if replace_existing:
             remote_inventory = None
+            allow_legacy_name_match = True
             if session is not None:
                 if session.remote_inventory is None:
                     raise RuntimeError("Prepared backfill remote inventory is unavailable")
                 remote_inventory = session.remote_inventory
+                allow_legacy_name_match = self._session_legacy_name_match_allowed(
+                    session,
+                    channel,
+                )
             existing = await self._existing_channel_documents(
                 corpus_store_name,
                 channel,
                 after,
                 remote_inventory=remote_inventory,
+                allow_legacy_name_match=allow_legacy_name_match,
             )
 
         messages = []
