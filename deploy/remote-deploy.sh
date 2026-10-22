@@ -121,7 +121,10 @@ systemctl restart yagapon
 
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
 host_port=${host_port:-8000}
-for _ in $(seq 1 30); do
+# A cold start on the production VM has reached roughly 80 seconds. Keep this
+# longer than the image health-check start period so a slow but progressing boot
+# is not rolled back as a false negative.
+for _ in $(seq 1 48); do
   container_id=$(docker compose \
     --project-directory "$app_dir" \
     --env-file "$deploy_env" \
@@ -150,7 +153,7 @@ for _ in $(seq 1 30); do
     echo "Deployment healthy: $image (container: $container_id)"
     exit 0
   fi
-  sleep 2
+  sleep 5
 done
 
 echo "Health check timed out" >&2
