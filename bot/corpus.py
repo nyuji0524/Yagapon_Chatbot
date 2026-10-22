@@ -2394,7 +2394,7 @@ class CorpusManager:
                         or not (semantic_sources or used_lexical_hits or used_firebase)
                         or semantic_audit.requires_recovery
                     ):
-                        recovery_context = with_lexical_context(evidence_context, search_hits)
+                        recovery_context = search_context
                         for item in recovery_semantic_evidence:
                             recovery_context += self._untrusted_evidence(item.key, item.text)
                         await recover_verified_evidence(
