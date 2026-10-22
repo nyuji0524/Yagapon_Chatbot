@@ -50,7 +50,8 @@ def register(bot):
             await ctx.respond("先にボイスチャンネルに入ってほしいぽん！", ephemeral=True)
             return
 
-        await ctx.defer(ephemeral=True if document_url else False)
+        # VC参加と録音開始は、資料URLの有無にかかわらず参加者全体へ知らせる。
+        await ctx.defer()
 
         material = None
         if document_url.strip():

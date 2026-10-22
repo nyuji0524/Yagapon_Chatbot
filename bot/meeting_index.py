@@ -101,7 +101,7 @@ async def _replace_document(
         {"key": "schema", "string_value": MEETING_SCHEMA_VERSION},
         {"key": "guild_id", "string_value": str(guild_id)},
         {"key": "channel_name", "string_value": meeting_name(channel_name)[:500]},
-        {"key": "category", "string_value": category_name[:500]},
+        {"key": "category", "string_value": str(category_name or "")[:500]},
         {"key": "session_id", "string_value": session_id[:500]},
         {"key": "start_at", "string_value": local.isoformat()},
         {"key": "end_at", "string_value": local.isoformat()},

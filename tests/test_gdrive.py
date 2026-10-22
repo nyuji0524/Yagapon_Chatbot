@@ -40,6 +40,7 @@ def test_read_meeting_material_requires_configured_folder_scope(monkeypatch):
     class FakeReader:
         def __init__(self, **kwargs):
             assert kwargs["folder_id"] == "folder-1"
+            assert kwargs["credentials_path"] is None
 
         def get_document(self, file_id):
             assert file_id == "doc-1"

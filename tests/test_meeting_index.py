@@ -79,6 +79,32 @@ async def test_meeting_index_replaces_previous_remote_document_after_upload(tmp_
 
 
 @pytest.mark.asyncio
+async def test_meeting_index_treats_none_category_as_empty(tmp_path):
+    corpus = SimpleNamespace(
+        rag_store=RagStore(tmp_path / "rag.sqlite3"),
+        _upload_document=AsyncMock(return_value="documents/transcript"),
+        _delete_documents=AsyncMock(return_value=0),
+    )
+
+    await index_meeting_artifacts(
+        corpus,
+        "fileSearchStores/test",
+        guild_id=123,
+        session_id="session-none-category",
+        channel_name="会議用",
+        category_name=None,
+        started_at="2026-10-10T06:14:31Z",
+        transcript="文字起こし",
+    )
+
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in corpus._upload_document.await_args.args[3]
+    }
+    assert metadata["category"] == ""
+
+
+@pytest.mark.asyncio
 async def test_meeting_index_skips_identical_document(tmp_path):
     rag_store = RagStore(tmp_path / "rag.sqlite3")
     corpus = SimpleNamespace(

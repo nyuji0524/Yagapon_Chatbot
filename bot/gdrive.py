@@ -53,7 +53,8 @@ def read_meeting_material(folder_url: str, file_id: str) -> MeetingMaterial:
     if not folder_id:
         raise ValueError("drive_setのフォルダURLが正しくありません")
     reader = DriveReader(
-        credentials_path=os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None,
+        # Shared loader resolves user OAuth first, then service account/ADC.
+        credentials_path=None,
         drive_id="",
         folder_id=folder_id,
         scopes=[READONLY_SCOPE],
