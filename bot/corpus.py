@@ -707,8 +707,8 @@ _INSTRUCTION_OVERRIDE_PATTERN = re.compile(
     r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
     r"(?:previous|prior|above|system|developer)\s+"
     r"(?:instructions?|rules?|prompts?|messages?)|"
-    r"(?:これまで|以前|前の|上記|システム|開発者)(?:の)?"
-    r"(?:指示|命令|ルール|プロンプト|メッセージ)(?:を)?"
+    r"(?:これまで|以前|前\s*の|上記|システム|開発者)\s*(?:の)?\s*"
+    r"(?:指示|命令|ルール|プロンプト|メッセージ)\s*(?:を)?\s*"
     r"(?:無視|忘れ|破棄|上書き|解除|回避)",
     re.IGNORECASE,
 )
@@ -721,14 +721,14 @@ def _instruction_override_request(normalized: str) -> bool:
         suffix = normalized[match.end():match.end() + 40]
         japanese_retrospective = bool(
             re.match(
-                r"(?:した|された|していた|されていた|している|されている)"
-                r"(?:理由|経緯|背景|仕組み|意味)|"
-                r"(?:の)?(?:理由|経緯|背景|仕組み|意味)|(?:について|とは)",
+                r"\s*(?:(?:した|された|していた|されていた|している|されている)"
+                r"\s*(?:理由|経緯|背景|仕組み|意味)|"
+                r"(?:の)?\s*(?:理由|経緯|背景|仕組み|意味)|(?:について|とは))",
                 suffix,
             )
         ) or bool(
             re.search(r"(?:なぜ|どうして).{0,40}$", prefix)
-            and re.match(r"(?:した|された|していた|されていた)", suffix)
+            and re.match(r"\s*(?:した|された|していた|されていた)", suffix)
         )
         english_retrospective = bool(
             re.search(

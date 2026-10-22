@@ -177,6 +177,31 @@ def test_month_window_uses_festival_operating_year_and_leap_day():
     )
 
 
+def test_explicit_multi_month_range_covers_every_mentioned_month():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "2024年10月から2024年12月までの活動",
+        now,
+    ) == CalendarWindow(date(2024, 10, 1), date(2024, 12, 31))
+
+
+def test_partially_qualified_multi_month_comparison_is_not_narrowed():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("2024年5月と6月の比較", now, festival=25) is None
+
+
+def test_multi_month_window_maps_across_festival_operating_year():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "27thの11月から2月まで",
+        now,
+        festival=27,
+    ) == CalendarWindow(date(2025, 11, 1), date(2026, 2, 28))
+
+
 def test_exact_date_does_not_also_create_a_month_window():
     now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
 

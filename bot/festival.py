@@ -164,12 +164,31 @@ def calendar_window_from_query(
     )
     current = (now or datetime.now(JST)).astimezone(JST).date()
 
-    explicit = re.search(
+    explicit_matches = list(re.finditer(
         r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?"
         r"(?!\s*(?:[/.-]|月)\s*(?:3[01]|[12]\d|0?[1-9]))",
         normalized,
-    )
-    if explicit:
+    ))
+    if len(explicit_matches) > 1:
+        windows = [
+            _month_window(int(match.group(1)), int(match.group(2)))
+            for match in explicit_matches
+        ]
+        return CalendarWindow(
+            starts_on=min(window.starts_on for window in windows),
+            ends_on=max(window.ends_on for window in windows),
+        )
+    if explicit_matches:
+        explicit = explicit_matches[0]
+        # A partially-qualified comparison such as ``2024年5月と6月`` is
+        # ambiguous without parsing the connective (and ``12月から1月`` may
+        # cross a year).  A broad search is safer than silently restricting
+        # the second month out of the grounding audit.
+        named_months = list(
+            re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+        )
+        if len(named_months) > 1:
+            return None
         year, month = int(explicit.group(1)), int(explicit.group(2))
         return _month_window(year, month)
 
@@ -210,12 +229,20 @@ def calendar_window_from_query(
     if relative_month:
         return _month_window(*relative_month)
 
-    mentioned_month = re.search(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
-    if mentioned_month and festival is not None:
-        month = int(mentioned_month.group(1))
+    mentioned_months = list(
+        re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+    )
+    if mentioned_months and festival is not None:
         period = festival_period(festival)
-        year = period.starts_on.year if month >= 10 else period.ends_on.year
-        return _month_window(year, month)
+        windows = []
+        for match in mentioned_months:
+            month = int(match.group(1))
+            year = period.starts_on.year if month >= 10 else period.ends_on.year
+            windows.append(_month_window(year, month))
+        return CalendarWindow(
+            starts_on=min(window.starts_on for window in windows),
+            ends_on=max(window.ends_on for window in windows),
+        )
     return None
 
 
