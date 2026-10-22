@@ -569,6 +569,7 @@ class BackfillSession:
     quarantined_buffers: dict[tuple[int, int], MessageBuffer] = field(default_factory=dict)
     deferred_buffers: dict[tuple[int, int], MessageBuffer] = field(default_factory=dict)
     completed_channel_ids: set[int] = field(default_factory=set)
+    remote_inventory: tuple[dict[str, object], ...] | None = None
     prepared: bool = False
     finished: bool = False
 
@@ -2121,25 +2122,32 @@ class CorpusManager:
             result[getattr(item, "key", "")] = value
         return result
 
-    async def _existing_channel_documents(self, store_name: str, channel, after=None) -> list[str]:
-        """置換対象を事前取得する。metadataなしの旧形式も表示名で対象化する。"""
-        loop = asyncio.get_running_loop()
-        documents = await loop.run_in_executor(
-            None,
-            lambda: list(
-                self._client.file_search_stores.documents.list(
-                    parent=store_name,
-                    config={"page_size": 20},
-                )
-            ),
-        )
+    async def _existing_channel_documents(
+        self,
+        store_name: str,
+        channel,
+        after=None,
+        *,
+        remote_inventory: tuple[dict[str, object], ...] | None = None,
+    ) -> list[str]:
+        """置換対象を事前取得する。metadataなしの旧形式も表示名で対象化する。
+
+        A prepared multi-channel backfill owns one immutable remote inventory.
+        Reusing it keeps File Search pagination O(pages) for the whole cycle,
+        rather than O(channels * pages). A standalone channel backfill retains
+        the previous behavior and reads one fresh inventory for itself.
+        """
+        documents = remote_inventory
+        if documents is None:
+            documents = tuple(await self.list_remote_documents(store_name))
         prefix = f"#{channel.name} | "
         after_timestamp = after.timestamp() if after else None
         matches = []
         for document in documents:
-            metadata = self._metadata_map(document)
-            channel_matches = metadata.get("channel_id") == str(channel.id)
-            legacy_matches = not metadata and (document.display_name or "").startswith(prefix)
+            metadata = document.get("metadata") or {}
+            display_name = str(document.get("display_name") or "")
+            channel_matches = str(metadata.get("channel_id") or "") == str(channel.id)
+            legacy_matches = not metadata and display_name.startswith(prefix)
             if not (channel_matches or legacy_matches):
                 continue
             if after_timestamp is not None:
@@ -2147,12 +2155,12 @@ class CorpusManager:
                 if start_epoch is not None and float(start_epoch) < after_timestamp:
                     continue
                 if start_epoch is None:
-                    match = re.search(r"\| (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", document.display_name or "")
+                    match = re.search(r"\| (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", display_name)
                     if match:
                         document_at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
                         if document_at < after:
                             continue
-            matches.append(document.name)
+            matches.append(str(document["name"]))
         return matches
 
     async def backfill_channel(
@@ -2170,6 +2178,8 @@ class CorpusManager:
         if session is not None:
             if int(channel.guild.id) != session.guild_id:
                 raise ValueError("Backfill session guild does not match channel")
+            if corpus_store_name != session.corpus_store_name:
+                raise ValueError("Backfill session corpus store does not match")
             if int(channel.id) not in session.target_channel_ids:
                 raise ValueError("Channel is outside the prepared backfill session")
             if bool(dry_run) != session.dry_run:
@@ -2178,7 +2188,17 @@ class CorpusManager:
         result = BackfillResult()
         existing = []
         if replace_existing:
-            existing = await self._existing_channel_documents(corpus_store_name, channel, after)
+            remote_inventory = None
+            if session is not None:
+                if session.remote_inventory is None:
+                    raise RuntimeError("Prepared backfill remote inventory is unavailable")
+                remote_inventory = session.remote_inventory
+            existing = await self._existing_channel_documents(
+                corpus_store_name,
+                channel,
+                after,
+                remote_inventory=remote_inventory,
+            )
 
         messages = []
         async for message in channel.history(
@@ -2281,18 +2301,30 @@ class CorpusManager:
         # No await before publishing. A dry-run uses the guard only; a real run
         # also makes on_message defer post-cutoff target events.
         self._active_backfills[guild_id] = session
-        if dry_run:
-            session.prepared = True
-            return session
         try:
             async with self._guild_flush_lock(guild_id):
                 if self._active_backfills.get(guild_id) is not session:
                     return None
-                for channel_id in session.target_channel_ids:
-                    key = (guild_id, channel_id)
-                    buffered = self._buffers.pop(key, None)
-                    if buffered is not None:
-                        self._merge_buffer(session.quarantined_buffers, key, buffered)
+                if not dry_run:
+                    for channel_id in session.target_channel_ids:
+                        key = (guild_id, channel_id)
+                        buffered = self._buffers.pop(key, None)
+                        if buffered is not None:
+                            self._merge_buffer(
+                                session.quarantined_buffers,
+                                key,
+                                buffered,
+                            )
+                # A flush that started immediately before this session may
+                # upload a target-channel document while holding the same
+                # guild lock. Snapshot only after that flush and quarantine
+                # complete, otherwise the replacement can leave a duplicate.
+                # If pagination fails, no channel may mutate against a partial
+                # inventory. Dry-runs use the same point-in-time lock boundary
+                # but deliberately leave live buffers untouched.
+                session.remote_inventory = tuple(
+                    await self.list_remote_documents(corpus_store_name)
+                )
                 session.prepared = True
         except BaseException:
             if self._active_backfills.get(guild_id) is session:

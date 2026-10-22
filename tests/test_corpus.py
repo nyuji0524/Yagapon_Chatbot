@@ -180,6 +180,309 @@ async def test_prepared_backfill_uses_one_fixed_utc_cutoff(corpus_manager):
 
 
 @pytest.mark.asyncio
+async def test_prepared_backfill_rejects_a_different_corpus_store(corpus_manager):
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+    corpus_manager._existing_channel_documents = AsyncMock()
+    corpus_manager._upload_document = AsyncMock()
+    corpus_manager._delete_documents = AsyncMock()
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/original",
+    )
+
+    with pytest.raises(ValueError, match="corpus store does not match"):
+        await corpus_manager.backfill_channel(
+            FakeChannel([fake_message(1)]),
+            "fileSearchStores/different",
+            session=session,
+        )
+    await corpus_manager.finish_backfill(session)
+
+    corpus_manager._existing_channel_documents.assert_not_awaited()
+    corpus_manager._upload_document.assert_not_awaited()
+    corpus_manager._delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepared_multichannel_backfill_reuses_one_remote_inventory(
+    corpus_manager,
+):
+    channel_two = FakeChannel([fake_message(1)])
+    channel_three = FakeChannel([fake_message(2)])
+    channel_three.id = 3
+    channel_three.name = "総務"
+    remote_inventory = [
+        {
+            "name": "documents/channel-two",
+            "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": {"channel_id": "2", "start_epoch": 0},
+        },
+        {
+            "name": "documents/channel-three",
+            "display_name": "#総務 | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": {"channel_id": "3", "start_epoch": 0},
+        },
+        {
+            "name": "documents/legacy-channel-two",
+            "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": {},
+        },
+        {
+            "name": "documents/unrelated",
+            "display_name": "#デザイン | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": {"channel_id": "4", "start_epoch": 0},
+        },
+    ]
+    corpus_manager.list_remote_documents = AsyncMock(return_value=remote_inventory)
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+    corpus_manager._delete_documents = AsyncMock(
+        side_effect=lambda names: len(names)
+    )
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2, 3},
+        "fileSearchStores/test",
+    )
+
+    results = await asyncio.gather(
+        corpus_manager.backfill_channel(
+            channel_two,
+            "fileSearchStores/test",
+            session=session,
+        ),
+        corpus_manager.backfill_channel(
+            channel_three,
+            "fileSearchStores/test",
+            session=session,
+        ),
+    )
+    await corpus_manager.finish_backfill(session)
+
+    corpus_manager.list_remote_documents.assert_awaited_once_with(
+        "fileSearchStores/test"
+    )
+    deleted = {
+        tuple(call.args[0])
+        for call in corpus_manager._delete_documents.await_args_list
+    }
+    assert deleted == {
+        ("documents/channel-two", "documents/legacy-channel-two"),
+        ("documents/channel-three",),
+    }
+    assert [result.documents_replaced for result in results] == [2, 1]
+    assert session.completed_channel_ids == {2, 3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_prepare_snapshots_inventory_after_an_inflight_flush(
+    corpus_manager,
+    dry_run,
+):
+    upload_started = asyncio.Event()
+    release_upload = asyncio.Event()
+    upload_finished = asyncio.Event()
+
+    async def upload(*_args):
+        upload_started.set()
+        await release_upload.wait()
+        upload_finished.set()
+        return "documents/flushed-before-snapshot"
+
+    async def inventory(_store_name):
+        assert upload_finished.is_set()
+        return [
+            {
+                "name": "documents/flushed-before-snapshot",
+                "display_name": "#開発 | 2026-10-22 12:00-2026-10-22 12:00",
+                "metadata": {"channel_id": "2", "start_epoch": 0},
+            }
+        ]
+
+    add_message(
+        corpus_manager,
+        content="prepare直前にflushされるメッセージ",
+        timestamp=datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc),
+    )
+    corpus_manager._upload_document = AsyncMock(side_effect=upload)
+    corpus_manager.list_remote_documents = AsyncMock(side_effect=inventory)
+    flush_task = asyncio.create_task(
+        corpus_manager._flush_buffer((1, 2), "fileSearchStores/test")
+    )
+    await upload_started.wait()
+
+    prepare_task = asyncio.create_task(
+        corpus_manager.prepare_backfill(
+            1,
+            {2},
+            "fileSearchStores/test",
+            dry_run=dry_run,
+            cutoff=datetime(2026, 10, 22, 3, 4, tzinfo=timezone.utc),
+        )
+    )
+    await asyncio.sleep(0)
+    corpus_manager.list_remote_documents.assert_not_awaited()
+    release_upload.set()
+
+    assert await flush_task is True
+    session = await prepare_task
+
+    corpus_manager.list_remote_documents.assert_awaited_once_with(
+        "fileSearchStores/test"
+    )
+    assert session.remote_inventory == (
+        {
+            "name": "documents/flushed-before-snapshot",
+            "display_name": "#開発 | 2026-10-22 12:00-2026-10-22 12:00",
+            "metadata": {"channel_id": "2", "start_epoch": 0},
+        },
+    )
+    await corpus_manager.finish_backfill(session)
+
+
+@pytest.mark.asyncio
+async def test_standalone_backfill_reads_one_fresh_remote_inventory(corpus_manager):
+    corpus_manager.list_remote_documents = AsyncMock(
+        return_value=[
+            {
+                "name": "documents/old",
+                "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+                "metadata": {"channel_id": "2", "start_epoch": 0},
+            }
+        ]
+    )
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+    corpus_manager._delete_documents = AsyncMock(return_value=1)
+
+    result = await corpus_manager.backfill_channel(
+        FakeChannel([fake_message(1)]),
+        "fileSearchStores/test",
+    )
+
+    corpus_manager.list_remote_documents.assert_awaited_once_with(
+        "fileSearchStores/test"
+    )
+    assert result.documents_replaced == 1
+
+
+@pytest.mark.asyncio
+async def test_remote_inventory_failure_aborts_session_and_restores_live_messages(
+    corpus_manager,
+):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_inventory(_store_name):
+        started.set()
+        await release.wait()
+        raise RuntimeError("File Search pagination failed")
+
+    corpus_manager.list_remote_documents = AsyncMock(side_effect=fail_inventory)
+    corpus_manager._upload_document = AsyncMock()
+    corpus_manager._delete_documents = AsyncMock()
+    cutoff = datetime(2026, 10, 22, 3, 4, tzinfo=timezone.utc)
+    corpus_manager.add_message(
+        1,
+        2,
+        "開発",
+        "member",
+        "inventory取得前のメッセージ",
+        cutoff - timedelta(minutes=1),
+        "fileSearchStores/test",
+        message_id=9,
+    )
+    task = asyncio.create_task(
+        corpus_manager.prepare_backfill(
+            1,
+            {2, 3},
+            "fileSearchStores/test",
+            cutoff=cutoff,
+        )
+    )
+    await started.wait()
+    session = corpus_manager._active_backfills[1]
+    assert (1, 2) not in corpus_manager._buffers
+    assert (1, 2) in session.quarantined_buffers
+    corpus_manager.add_message(
+        1,
+        2,
+        "開発",
+        "member",
+        "inventory取得中のメッセージ",
+        cutoff,
+        "fileSearchStores/test",
+        message_id=10,
+    )
+    release.set()
+
+    with pytest.raises(RuntimeError, match="pagination failed"):
+        await task
+
+    assert corpus_manager._active_backfills == {}
+    restored = "\n".join(corpus_manager._buffers[(1, 2)].messages)
+    assert "inventory取得前のメッセージ" in restored
+    assert "inventory取得中のメッセージ" in restored
+    corpus_manager._upload_document.assert_not_awaited()
+    corpus_manager._delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepared_multichannel_dry_run_reuses_inventory_without_mutation(
+    corpus_manager,
+):
+    channel_two = FakeChannel([fake_message(1)])
+    channel_three = FakeChannel([fake_message(2)])
+    channel_three.id = 3
+    channel_three.name = "総務"
+    corpus_manager.list_remote_documents = AsyncMock(
+        return_value=[
+            {
+                "name": "documents/channel-two",
+                "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+                "metadata": {"channel_id": "2", "start_epoch": 0},
+            },
+            {
+                "name": "documents/channel-three",
+                "display_name": "#総務 | 2026-10-05 09:00-2026-10-05 09:01",
+                "metadata": {"channel_id": "3", "start_epoch": 0},
+            },
+        ]
+    )
+    corpus_manager._upload_document = AsyncMock()
+    corpus_manager._delete_documents = AsyncMock()
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2, 3},
+        "fileSearchStores/test",
+        dry_run=True,
+    )
+
+    results = await asyncio.gather(
+        corpus_manager.backfill_channel(
+            channel_two,
+            "fileSearchStores/test",
+            dry_run=True,
+            session=session,
+        ),
+        corpus_manager.backfill_channel(
+            channel_three,
+            "fileSearchStores/test",
+            dry_run=True,
+            session=session,
+        ),
+    )
+    await corpus_manager.finish_backfill(session)
+
+    corpus_manager.list_remote_documents.assert_awaited_once_with(
+        "fileSearchStores/test"
+    )
+    assert [result.documents_replaced for result in results] == [1, 1]
+    corpus_manager._upload_document.assert_not_awaited()
+    corpus_manager._delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_prepare_quarantines_only_exact_target_and_flushes_deferred_live_messages(
     corpus_manager,
 ):
