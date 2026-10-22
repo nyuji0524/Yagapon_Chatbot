@@ -50,6 +50,11 @@ class LexicalHit:
     authority: str = ""
     status: str = ""
     source_type: str = ""
+    access_scope: str = ""
+    channel_id: int | None = None
+    start_at: str = ""
+    end_at: str = ""
+    content_sha256: str = ""
 
 
 class RagStore:
@@ -498,6 +503,7 @@ class RagStore:
         target_date: str | None = None,
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
+        source_types: tuple[str, ...] | list[str] | set[str] | None = None,
         limit: int = 4,
     ) -> list[LexicalHit]:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
@@ -533,6 +539,19 @@ class RagStore:
         if target_date is not None:
             conditions.append("substr(start_at, 1, 10) = ?")
             params.append(target_date)
+        selected_source_types = tuple(
+            dict.fromkeys(
+                value
+                for value in (str(item).strip() for item in source_types or ())
+                if value and re.fullmatch(r"[a-z0-9_-]{1,64}", value)
+            )
+        )
+        if source_types is not None:
+            if not selected_source_types:
+                return []
+            placeholders = ",".join("?" for _ in selected_source_types)
+            conditions.append(f"source_type IN ({placeholders})")
+            params.extend(selected_source_types)
         term_conditions = []
         for term in clean_terms:
             term_conditions.append("instr(lower(body), lower(?)) > 0")
@@ -577,9 +596,32 @@ class RagStore:
                 authority=row["authority"] or "",
                 status=row["status"] or "",
                 source_type=row["source_type"] or "",
+                access_scope=row["access_scope"] or "",
+                channel_id=row["channel_id"],
+                start_at=row["start_at"] or "",
+                end_at=row["end_at"] or "",
+                content_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             ))
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[:limit]
+
+    def find_approved_topic(self, topic_id: str, *, festival: int) -> dict | None:
+        """Find a reviewed Knowledge article that reconciles an open topic draft."""
+        if not topic_id or not 1 <= festival <= 999:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM documents
+                   WHERE guild_id = 0
+                     AND source_type = 'knowledge_repository'
+                     AND authority IN ('canonical','curated','reviewed_record')
+                     AND status IN ('active','historical','approved','verified','current')
+                     AND festival = ?
+                     AND instr(lower(body), lower(?)) > 0
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (festival, topic_id),
+            ).fetchone()
+        return dict(row) if row else None
 
     def record_query(
         self,

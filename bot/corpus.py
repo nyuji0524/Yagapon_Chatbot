@@ -662,6 +662,9 @@ class CorpusManager:
             {"key": "start_epoch", "numeric_value": start_at.timestamp()},
             {"key": "end_epoch", "numeric_value": end_at.timestamp()},
             {"key": "message_count", "numeric_value": float(len(buf.messages))},
+            {"key": "first_message_id", "string_value": str(buf.first_message_id or "")},
+            {"key": "last_message_id", "string_value": str(buf.last_message_id or "")},
+            {"key": "content_sha256", "string_value": hashlib.sha256(text.encode("utf-8")).hexdigest()},
             {
                 "key": "document_key",
                 "string_value": hashlib.sha256(key_source.encode()).hexdigest()[:24],
@@ -1495,6 +1498,9 @@ class CorpusManager:
                 {"key": "start_epoch", "numeric_value": start_at.timestamp()},
                 {"key": "end_epoch", "numeric_value": end_at.timestamp()},
                 {"key": "message_count", "numeric_value": float(len(group))},
+                {"key": "first_message_id", "string_value": str(group[0].message_id)},
+                {"key": "last_message_id", "string_value": str(group[-1].message_id)},
+                {"key": "content_sha256", "string_value": hashlib.sha256(text.encode("utf-8")).hexdigest()},
                 {"key": "document_key", "string_value": document_key},
                 {"key": "source_url", "string_value": source_url[:500]},
             ]

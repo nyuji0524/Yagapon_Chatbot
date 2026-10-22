@@ -114,13 +114,28 @@ Knowledge用AIレビューは真偽を決めず、front matter、分類、状態
 ## Discordログの継続整理
 
 `knowledge-curation-watch`はFile Searchへ登録済みのDiscord会話・会議文字起こしを少数ずつ読み、
-重要な選択、方針変更、仕様、優先順位、運用判断がある文書だけをDecision候補にする。主資料の固有語で
-過去ログと整理済みKnowledgeも検索し、事実、当時の理由、結果、後日の振り返り、推測、未確認事項を分離する。
+継続して更新する価値があるプロジェクト、機能、運用、課題、方針を議題単位にまとめる。主資料の固有語で
+同年度のDiscord、デプロイ済みソースコード、承認済みKnowledgeを別枠で検索し、Situation、Environment、
+現在状態、前回差分、コードマップ、時系列、Decision、問題・原因・対応・結果、当時の理由、後日の振り返り、
+推測、矛盾、未確認事項を分離する。各主張は`D01`（Discord）、`C01`（Code）、`K01`（Knowledge）のような
+証拠IDを持ち、草案末尾のdocument_key・原本リンクと照合できる。
+
+議題IDは`festival + bureau + 正規化したtopic`からコード側で決定し、モデルが年度、局、保存先を自由に
+指定することはできない。別名はSQLite台帳で同じ議題へ解決する。証拠のdocument_key、本文SHA-256、
+公開範囲からfingerprintを作り、証拠が変わった場合だけdirtyにする。承認済みKnowledgeへ同じtopic_idが
+反映されるまでは同一議題の次のDraftを出さず、未処理Draftの増殖を防ぐ。
 
 保存先は`years/{festival}th/bureaus/{bureau}/decisions/candidates/`で、IT、総務、装飾、ステージ、
 屋外、室内、広報、渉外の8局を同じように処理する。複数局名を含むチャンネルは`cross-bureau`、
 全体会議等は`committee`、判定不能は`unclassified`へ置く。分類はDiscordカテゴリ・チャンネル名で行い、
 AIが自由に選んだ局名を権限や保存先の根拠にしない。どの候補もDraft PR止まりで自動マージしない。
+証拠の公開範囲は積集合で判定する。同じ1チャンネルとguild資料の組み合わせはchannel扱い、異なる
+非公開チャンネル、`restricted`、公開範囲不明の資料が1件でも混じればfail closedで送信しない。
+
+処理済み文書、別名、最新fingerprint、配送状態、再試行時刻は
+`YAGAPON_KNOWLEDGE_CURATION_STATE`のSQLiteへ保存する。旧JSON台帳を同じパスで検出した場合は
+`.legacy.json`へ退避して処理済み文書を移行する。`pending`と`failed`は完了扱いにせず、決定的jitter付きの
+指数backoffで既存outbox bundleを再送する。1回のモデル呼び出し数、生成数、未処理bundle数には上限を設ける。
 
 ## 本番設定
 
@@ -139,8 +154,20 @@ YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS=<選考等の除外チャンネルID>
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS=選考
 YAGAPON_KNOWLEDGE_CURATION_ENABLED=false
 YAGAPON_KNOWLEDGE_CURATION_BATCH=3
+YAGAPON_KNOWLEDGE_CURATION_STATE=/data/knowledge-curation.sqlite3
 YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS=
+YAGAPON_KNOWLEDGE_CURATION_MODEL_CALLS_PER_RUN=6
+YAGAPON_KNOWLEDGE_CURATION_GENERATIONS_PER_RUN=3
+YAGAPON_KNOWLEDGE_CURATION_MAX_OPEN_BUNDLES=5
+YAGAPON_KNOWLEDGE_BACKFILL_STATE=/data/scheduled-backfill-state.json
+YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS=28800
 ```
+
+`YAGAPON_KNOWLEDGE_BACKFILL_STATE`は任意である。未設定なら従来どおり独立して整理する。設定時は、
+指定時刻以内に完了したschema v1のcheckpointについて、対象guildがすべて`status=completed`、
+`failures=[]`、`channels_completed == channels_total`の場合だけ整理を開始する。ファイル欠落、古い時刻、
+`failed`、`deferred`、`interrupted`、一部チャンネル失敗はいずれもfail closedとなり、古いコーパスから
+新しい草案を生成しない。
 
 個人用の`gh`認証やPATを本番VMへコピーしない。キューobjectは機密検査済みの候補だけを含み、
 パイプライン処理後に`processed/`へ移動する。Draft PRは人が確認するまでマージしない。

@@ -119,6 +119,9 @@ def test_knowledge_document_has_traceable_metadata(corpus_manager):
     assert metadata["festival"] == 28.0
     assert metadata["status"] == "raw"
     assert metadata["authority"] == "conversation"
+    assert metadata["first_message_id"] == "1"
+    assert metadata["last_message_id"] == "2"
+    assert len(metadata["content_sha256"]) == 64
     assert "2026-10-05 09:00" in documents[0].text
 
 

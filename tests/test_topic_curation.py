@@ -1,0 +1,532 @@
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+import yaml
+
+from bot.rag_store import RagStore
+from knowledge_curation import __main__ as curation
+from knowledge_curation.__main__ import (
+    CurationPlan,
+    EvidenceClaim,
+    TopicDraft,
+    backfill_checkpoint_status,
+    build_topic_bundle,
+    collect_topic_evidence,
+    render_topic_brief,
+    validate_topic_draft,
+)
+from knowledge_curation.topic import (
+    AccessDecision,
+    EvidenceItem,
+    TopicStateStore,
+    deterministic_topic_identity,
+    evidence_fingerprint,
+    intersect_access_scopes,
+)
+
+
+def evidence(
+    evidence_id: str,
+    key: str,
+    *,
+    source_type: str = "discord_conversation",
+    access_scope: str = "channel",
+    channel_id: int | None = 10,
+    content_sha256: str = "a" * 64,
+) -> EvidenceItem:
+    return EvidenceItem(
+        evidence_id=evidence_id,
+        document_key=key,
+        source_type=source_type,
+        authority="conversation",
+        status="raw",
+        access_scope=access_scope,
+        channel_id=channel_id,
+        source_url=f"https://example.test/{key}",
+        excerpt="新歓Webページの根拠",
+        content_sha256=content_sha256,
+        start_at="2026-10-01T00:00:00+09:00",
+        end_at="2026-10-01T01:00:00+09:00",
+    )
+
+
+def topic_draft() -> TopicDraft:
+    return TopicDraft(
+        title="新歓Webページ",
+        summary=[EvidenceClaim(text="新歓向けの案内ページを運用する。", evidence_ids=["D01", "C01"])],
+        situation=[EvidenceClaim(text="Discordで公開内容を検討した。", evidence_ids=["D01"])],
+        current_state=[EvidenceClaim(text="実装ファイルが存在する。", evidence_ids=["C01"])],
+        decisions=[EvidenceClaim(text="公開前にレビューする方針である。", evidence_ids=["K01"])],
+        unknowns=[EvidenceClaim(text="本番反映日は未確認である。", evidence_ids=["D01"])],
+        systems=["Web"],
+        tags=["新歓"],
+    )
+
+
+def source_document() -> dict:
+    return {
+        "document_key": "discord-primary",
+        "guild_id": 123,
+        "channel_id": 10,
+        "channel_name": "開発",
+        "category": "28th IT局",
+        "festival": 28,
+        "source_type": "discord_conversation",
+        "authority": "conversation",
+        "status": "raw",
+        "access_scope": "channel",
+        "source_url": "https://discord.com/channels/123/10/100",
+        "start_at": "2026-10-01T00:00:00+09:00",
+        "end_at": "2026-10-01T01:00:00+09:00",
+        "body": "新歓Webページを公開前にレビューする。" * 20,
+    }
+
+
+def test_topic_identity_is_normalized_deterministic_and_filesystem_safe():
+    left = deterministic_topic_identity(28, "IT", " 新歓 Webページ ")
+    right = deterministic_topic_identity(28, "it", "新歓　Webページ")
+
+    assert left == right
+    assert left.topic_id.startswith("28th-it-")
+    assert left.slug.endswith(left.topic_id[-10:])
+    assert all(character.isascii() for character in left.topic_id)
+
+
+def test_evidence_fingerprint_is_order_independent_and_content_sensitive():
+    first = evidence("D01", "discord")
+    second = evidence("C01", "code", source_type="source_code", access_scope="guild", channel_id=None)
+
+    assert evidence_fingerprint([first, second]) == evidence_fingerprint([second, first])
+    changed = evidence(
+        "C01",
+        "code",
+        source_type="source_code",
+        access_scope="guild",
+        channel_id=None,
+        content_sha256="b" * 64,
+    )
+    assert evidence_fingerprint([first, second]) != evidence_fingerprint([first, changed])
+
+
+@pytest.mark.parametrize(
+    ("items", "scope", "channel_id", "reason"),
+    [
+        ([evidence("K01", "knowledge", access_scope="guild", channel_id=None)], "guild", None, "guild-evidence-only"),
+        (
+            [
+                evidence("D01", "discord"),
+                evidence("C01", "code", source_type="source_code", access_scope="guild", channel_id=None),
+            ],
+            "channel",
+            10,
+            "single-private-channel",
+        ),
+        (
+            [evidence("D01", "one", channel_id=10), evidence("D02", "two", channel_id=11)],
+            "restricted",
+            None,
+            "multiple-private-channels",
+        ),
+        ([evidence("D01", "legacy", access_scope="", channel_id=None)], "restricted", None, "unsupported-scope:legacy"),
+    ],
+)
+def test_access_scope_intersection_is_fail_closed(items, scope, channel_id, reason):
+    result = intersect_access_scopes(items)
+
+    assert (result.scope, result.channel_id, result.reason) == (scope, channel_id, reason)
+
+
+def test_topic_state_tracks_aliases_dirty_updates_and_open_bundle_backpressure(tmp_path):
+    store = TopicStateStore(tmp_path / "topics.sqlite3")
+    identity = store.resolve_identity(festival=28, bureau="it", topic="新歓Webページ", aliases=["新歓サイト"])
+    first = store.observe_topic(
+        identity,
+        title="新歓Webページ",
+        aliases=["新歓サイト"],
+        fingerprint="one",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+
+    assert first.dirty is True
+    queued = store.record_delivery(
+        identity.topic_id,
+        fingerprint="one",
+        bundle_id="bundle-one",
+        status="queued",
+    )
+    assert queued.dirty is False
+    assert queued.has_open_bundle is True
+    assert store.count_open_bundles() == 1
+    assert [item.topic_id for item in store.open_topics()] == [identity.topic_id]
+
+    updated = store.observe_topic(
+        identity,
+        title="新歓Webページ",
+        aliases=["歓迎ページ"],
+        fingerprint="two",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+    assert updated.dirty is True
+    assert updated.has_open_bundle is True
+    assert "歓迎ページ" in updated.aliases
+
+    # A merged/reviewed article closes the old Draft without discarding the
+    # evidence change that arrived while it was open.
+    store.mark_accepted(identity.topic_id)
+    accepted = store.get_topic(identity.topic_id)
+    assert accepted is not None
+    assert accepted.has_open_bundle is False
+    assert accepted.dirty is True
+
+    resolved = store.resolve_identity(festival=28, bureau="it", topic="歓迎ページ")
+    assert resolved.topic_id == identity.topic_id
+
+
+def test_pending_delivery_remains_dirty_and_retries_with_backoff(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_RETRY_BASE_SECONDS", "60")
+    store = TopicStateStore(tmp_path / "topics.sqlite3")
+    identity = store.resolve_identity(festival=28, bureau="it", topic="新歓Web")
+    store.observe_topic(
+        identity,
+        title="新歓Web",
+        aliases=[],
+        fingerprint="one",
+        access=AccessDecision("guild", None, "guild-evidence-only"),
+    )
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    pending = store.record_delivery(
+        identity.topic_id,
+        fingerprint="one",
+        bundle_id="bundle-one",
+        status="pending",
+        now=now,
+    )
+
+    assert pending.dirty is True
+    assert pending.attempts == 1
+    assert store.due_retries(now=now) == []
+    due = store.due_retries(now=now + timedelta(hours=1))
+    assert [item.topic_id for item in due] == [identity.topic_id]
+
+
+def test_legacy_json_state_is_backed_up_and_imported(tmp_path):
+    path = tmp_path / "knowledge-curation-state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "documents": {"old-document": {"sha256": "abc", "status": "queued"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = TopicStateStore(path)
+
+    assert store.source_actionable("old-document", "abc") is False
+    assert path.with_suffix(".json.legacy.json").is_file()
+
+
+def test_collect_topic_evidence_keeps_discord_code_and_knowledge_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "festival", "numeric_value": 28},
+        {"key": "status", "string_value": "active"},
+    ]
+    records = (
+        (
+            "discord-related",
+            "discord_conversation",
+            123,
+            "conversation",
+            "raw",
+            "channel",
+            10,
+        ),
+        ("code-related", "source_code", 0, "deployed_implementation", "active", "guild", None),
+        ("knowledge-related", "knowledge_repository", 0, "curated", "active", "guild", None),
+    )
+    for key, source_type, guild_id, authority, status, scope, channel_id in records:
+        metadata = [
+            *common,
+            {"key": "document_key", "string_value": key},
+            {"key": "source_type", "string_value": source_type},
+            {"key": "guild_id", "numeric_value": guild_id},
+            {"key": "authority", "string_value": authority},
+            {"key": "status", "string_value": status},
+            {"key": "access_scope", "string_value": scope},
+            {"key": "source_url", "string_value": f"https://example.test/{key}"},
+        ]
+        if channel_id:
+            metadata.append({"key": "channel_id", "numeric_value": channel_id})
+        store.upsert_document(f"documents/{key}", "新歓Webページの実装と運用 " * 40, metadata)
+
+    result = collect_topic_evidence(store, source_document(), ["新歓Webページ"])
+
+    assert {item.evidence_id[:1] for item in result} == {"D", "C", "K"}
+    assert {item.source_type for item in result} >= {
+        "discord_conversation",
+        "source_code",
+        "knowledge_repository",
+    }
+    assert intersect_access_scopes(result) == AccessDecision("channel", 10, "single-private-channel")
+
+
+def test_rag_store_finds_only_reviewed_approved_topic(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    topic_id = "28th-it-welcome-1234567890"
+    for key, status, authority in (
+        ("draft", "draft", "curated"),
+        ("approved", "active", "reviewed_record"),
+    ):
+        store.upsert_document(
+            f"documents/{key}",
+            f"---\ntopic_id: {topic_id}\n---\n本文",
+            [
+                {"key": "document_key", "string_value": key},
+                {"key": "source_type", "string_value": "knowledge_repository"},
+                {"key": "guild_id", "numeric_value": 0},
+                {"key": "festival", "numeric_value": 28},
+                {"key": "authority", "string_value": authority},
+                {"key": "status", "string_value": status},
+                {"key": "access_scope", "string_value": "guild"},
+            ],
+        )
+
+    matched = store.find_approved_topic(topic_id, festival=28)
+
+    assert matched is not None
+    assert matched["document_key"] == "approved"
+    assert store.find_approved_topic(topic_id, festival=27) is None
+
+
+def test_topic_brief_has_detailed_sections_evidence_ids_and_draft_only_bundle():
+    identity = deterministic_topic_identity(28, "it", "新歓Webページ")
+    items = [
+        evidence("D01", "discord"),
+        evidence("C01", "code", source_type="source_code", access_scope="guild", channel_id=None),
+        evidence(
+            "K01",
+            "knowledge",
+            source_type="knowledge_repository",
+            access_scope="guild",
+            channel_id=None,
+        ),
+    ]
+    fingerprint = evidence_fingerprint(items)
+    draft = topic_draft()
+    validate_topic_draft(draft, items)
+
+    rendered = render_topic_brief(
+        document=source_document(),
+        identity=identity,
+        candidate=draft,
+        evidence=items,
+        fingerprint=fingerprint,
+        access=AccessDecision("channel", 10, "single-private-channel"),
+        aliases=["新歓サイト"],
+    )
+    metadata = yaml.safe_load(rendered[4:].split("\n---\n", 1)[0])
+
+    assert metadata["status"] == "draft"
+    assert metadata["topic_id"] == identity.topic_id
+    assert metadata["evidence_fingerprint"] == fingerprint
+    assert "## コードマップ・実装箇所" in rendered
+    assert "## 問題・原因・対応・結果" in rendered
+    assert "[D01] [C01]" in rendered
+    assert "| D01 |" in rendered
+
+    bundle = build_topic_bundle(
+        document=source_document(),
+        identity=identity,
+        candidate=draft,
+        evidence=items,
+        fingerprint=fingerprint,
+        access=AccessDecision("channel", 10, "single-private-channel"),
+        aliases=["新歓サイト"],
+    )
+    assert bundle[0].endswith(fingerprint[:12])
+    assert "/decisions/candidates/" in bundle[1]
+    assert bundle[3]["source"] == "yagapon-continuous-curation"
+    assert bundle[3]["humanReviewed"] is False
+    assert "Draft" in bundle[6]
+
+
+def test_topic_draft_rejects_unknown_evidence_id():
+    draft = TopicDraft(
+        title="誤った草案",
+        summary=[EvidenceClaim(text="根拠が存在しない。", evidence_ids=["X99"])],
+    )
+
+    with pytest.raises(ValueError, match="unknown evidence IDs"):
+        validate_topic_draft(draft, [evidence("D01", "discord")])
+
+
+def test_restricted_topic_cannot_be_rendered():
+    identity = deterministic_topic_identity(28, "it", "新歓Webページ")
+
+    with pytest.raises(ValueError, match="Restricted evidence"):
+        render_topic_brief(
+            document=source_document(),
+            identity=identity,
+            candidate=topic_draft(),
+            evidence=[evidence("D01", "discord")],
+            fingerprint="abc",
+            access=AccessDecision("restricted", None, "multiple-private-channels"),
+            aliases=[],
+        )
+
+
+def checkpoint_payload(now: datetime) -> dict:
+    return {
+        "schema_version": 1,
+        "started_at": (now - timedelta(minutes=5)).isoformat(),
+        "completed_at": now.isoformat(),
+        "status": "completed",
+        "guilds": {
+            "123": {
+                "status": "completed",
+                "reason": "",
+                "channels_total": 4,
+                "channels_completed": 4,
+                "messages_indexed": 100,
+                "documents_uploaded": 3,
+                "documents_replaced": 1,
+                "failures": [],
+            }
+        },
+    }
+
+
+def test_backfill_checkpoint_gate_allows_unset_or_fresh_complete_state(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", raising=False)
+    assert backfill_checkpoint_status(now=now) == (True, "not-configured")
+
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(checkpoint_payload(now)), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (lambda value: value.update(status="failed"), "checkpoint-cycle-failed"),
+        (
+            lambda value: value["guilds"]["123"].update(status="deferred"),
+            "checkpoint-failed-guild:123",
+        ),
+        (
+            lambda value: value["guilds"]["123"].update(
+                failures=[{"channel_id": 10, "error_type": "HTTPException"}]
+            ),
+            "checkpoint-incomplete-guild:123",
+        ),
+        (
+            lambda value: value["guilds"]["123"].update(channels_completed=3),
+            "checkpoint-incomplete-guild:123",
+        ),
+        (lambda value: value.update(schema_version=2), "checkpoint-unsupported-schema"),
+        (lambda value: value.pop("started_at"), "checkpoint-missing-time-range"),
+    ],
+)
+def test_backfill_checkpoint_gate_fails_closed_for_partial_or_failed_cycles(
+    tmp_path, monkeypatch, mutation, reason
+):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    payload = checkpoint_payload(now)
+    mutation(payload)
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+
+    assert backfill_checkpoint_status(now=now) == (False, reason)
+
+
+def test_backfill_checkpoint_gate_rejects_stale_state(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(checkpoint_payload(now - timedelta(hours=2))), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS", "3600")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+
+    assert backfill_checkpoint_status(now=now) == (False, "checkpoint-stale")
+
+
+@pytest.mark.asyncio
+async def test_curate_once_stops_before_rag_when_checkpoint_is_not_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(tmp_path / "missing.json"))
+
+    result = await curation.curate_once(state_path=tmp_path / "curation.sqlite3", limit=3)
+
+    assert result["checkpoint_ready"] is False
+    assert result["checkpoint_reason"] == "checkpoint-unreadable"
+    assert not (tmp_path / "curation.sqlite3").exists()
+
+
+@pytest.mark.asyncio
+async def test_curate_once_keeps_pending_topic_retryable_without_regeneration(tmp_path, monkeypatch):
+    database = tmp_path / "rag.sqlite3"
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
+    store = RagStore(database)
+    document = source_document()
+    store.upsert_document(
+        "documents/primary",
+        document["body"],
+        [
+            {"key": "document_key", "string_value": document["document_key"]},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 10},
+            {"key": "channel_name", "string_value": "開発"},
+            {"key": "category", "string_value": "28th IT局"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "source_url", "string_value": document["source_url"]},
+        ],
+    )
+    plan = CurationPlan(
+        has_knowledge_value=True,
+        topic="新歓Webページ",
+        aliases=["新歓サイト"],
+        search_terms=["新歓Webページ"],
+    )
+    draft = TopicDraft(
+        title="新歓Webページ",
+        summary=[EvidenceClaim(text="公開前レビューを検討した。", evidence_ids=["D01"])],
+    )
+    monkeypatch.setattr(curation, "new_genai_client", lambda _key: object())
+    monkeypatch.setattr(curation, "plan_document", AsyncMock(return_value=plan))
+    draft_mock = AsyncMock(return_value=draft)
+    monkeypatch.setattr(curation, "draft_topic", draft_mock)
+    publish_mock = AsyncMock(
+        return_value=SimpleNamespace(session_id="curation-pending", status="pending")
+    )
+    monkeypatch.setattr(curation, "publish_knowledge_bundle", publish_mock)
+
+    first = await curation.curate_once(state_path=state, limit=3)
+
+    assert first["processed"] == 1
+    assert first["open_bundles"] == 1
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_MAX_OPEN_BUNDLES", "1")
+    second = await curation.curate_once(state_path=state, limit=3)
+
+    assert second["processed"] == 0
+    assert second["backpressured"] == 1
+    assert draft_mock.await_count == 1
+    assert publish_mock.await_count == 1
