@@ -32,6 +32,7 @@ from bot.festival import (
     festival_number,
     festival_period,
     festival_subject_dates_from_query,
+    has_invalid_explicit_calendar_reference,
 )
 from bot.firebase_knowledge import (
     COLLECTIONS,
@@ -1865,6 +1866,15 @@ class CorpusManager:
                 festival=festival,
                 no_answer=False,
             )
+        if has_invalid_explicit_calendar_reference(question):
+            return RagAnswer(
+                text=(
+                    "指定された日付は実在しないため、その条件では検索できないぽん。"
+                    "年月日を確認して、もう一度質問してほしいぽん。"
+                ),
+                festival=None,
+                no_answer=True,
+            )
         festival_mapping = trusted_festival_mapping_response(question)
         if festival_mapping:
             mapping_text, mapped_festivals = festival_mapping
@@ -2068,6 +2078,9 @@ class CorpusManager:
         authoritative_hits = [
             hit for hit in lexical_hits if can_answer_directly(question_kind, hit.authority, hit.status)
         ]
+        cross_source_history = question_kind is QuestionKind.HISTORY and any(
+            is_history_narrative_source(hit.source_type) for hit in lexical_hits
+        )
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -2193,7 +2206,11 @@ class CorpusManager:
                 QuestionKind.RUNTIME,
                 QuestionKind.GENERAL,
             }
-            if not comprehensive and (authoritative_hits or direct_runtime_evidence):
+            if (
+                not comprehensive
+                and not cross_source_history
+                and (authoritative_hits or direct_runtime_evidence)
+            ):
                 # Each attempt is an independent model call. Reserving most of
                 # the output allowance for a later retry made the first valid
                 # evidence path truncate, while subtracting a failed call's
@@ -2223,7 +2240,7 @@ class CorpusManager:
             if not has_answer:
                 search_hits = (
                     lexical_hits
-                    if comprehensive
+                    if comprehensive or cross_source_history
                     else [hit for hit in lexical_hits if hit not in authoritative_hits]
                 )
                 if not allows_unreviewed_evidence(question_kind):
@@ -2245,7 +2262,9 @@ class CorpusManager:
                         contents=self._question_with_evidence(question, search_context),
                         config=generation_config(
                             model,
-                            thinking_level="medium" if comprehensive else "low",
+                            thinking_level=(
+                                "medium" if comprehensive or cross_source_history else "low"
+                            ),
                             max_output_tokens=primary_budget,
                             system_instruction=system,
                             tools=[types.Tool(file_search=search)],

@@ -133,6 +133,49 @@ def test_non_history_context_keeps_direct_authority_priority():
     assert selected == [deployed]
 
 
+@pytest.mark.asyncio
+async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus_manager):
+    implementation = lexical_hit(
+        "implementation",
+        score=500,
+        authority="repository_history",
+        source_type="source_code_history",
+    )
+    conversation = lexical_hit(
+        "on-site-report",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券"])
+    corpus_manager.rag_store.search_exact = Mock(
+        return_value=[implementation, conversation]
+    )
+    corpus_manager.rag_store.record_query = Mock(return_value="query-history")
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("stop after request inspection")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券運用で問題になった点は何ですか",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    call = corpus_manager._client.aio.models.generate_content.await_args
+    assert call.kwargs["config"].tools is not None
+    assert call.kwargs["config"].thinking_config.thinking_level == "MEDIUM"
+    assert "implementation" in call.kwargs["contents"]
+    assert "on-site-report" in call.kwargs["contents"]
+    assert corpus_manager.rag_store.search_exact.call_args.kwargs["question_kind"] is (
+        QuestionKind.HISTORY
+    )
+
+
 def add_message(manager: CorpusManager, *, content: str = "テストメッセージ", timestamp=None):
     manager.add_message(
         guild_id=1,
@@ -1693,6 +1736,26 @@ async def test_festival_mapping_is_deterministic_and_keeps_timeless_canonical_so
     corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
     corpus_manager.rag_store.query_terms.assert_not_called()
     corpus_manager.rag_store.search_exact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invalid_explicit_date_is_rejected_before_retrieval(corpus_manager):
+    corpus_manager._client.aio.models.generate_content = AsyncMock()
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock()
+    corpus_manager.rag_store.query_terms = Mock()
+
+    result = await corpus_manager.query_with_trace(
+        "2026年2月29日は何thですか",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert result.festival is None
+    assert "実在しない" in result.text
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+    corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
+    corpus_manager.rag_store.query_terms.assert_not_called()
 
 
 def exhaustive_notification_evidence(
