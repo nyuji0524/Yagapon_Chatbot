@@ -19,8 +19,19 @@ from bot.scheduled_backfill import (
 def _bot(*, failing_channel_id=None):
     channels = []
     for channel_id in (10, 20, 30):
+        def history(*, limit=None, before=None, oldest_first=False, _channel_id=channel_id, **_kwargs):
+            async def iterator():
+                if limit == 1 and oldest_first:
+                    yield SimpleNamespace(
+                        id=_channel_id * 10,
+                        created_at=datetime(2024, 10, 5, tzinfo=timezone.utc),
+                    )
+
+            return iterator()
+
         channel = SimpleNamespace(
             id=channel_id,
+            history=history,
             permissions_for=lambda _member: SimpleNamespace(view_channel=True, read_message_history=True),
         )
         channels.append(channel)
@@ -207,7 +218,7 @@ def _text_thread_bot():
     return bot, archive_calls, prepared_target_ids
 
 
-def test_scheduler_requires_feature_gate_and_explicit_guild_and_channel_allowlists(monkeypatch):
+def test_scheduler_requires_feature_gate_and_explicit_guild_allowlist(monkeypatch):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.delenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", raising=False)
     monkeypatch.delenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", raising=False)
@@ -225,20 +236,17 @@ def test_scheduler_requires_feature_gate_and_explicit_guild_and_channel_allowlis
     assert configured_guild_ids() == (1, 2)
     assert scheduler_enabled() is True
 
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
+    assert scheduler_enabled() is True
 
-@pytest.mark.parametrize(
-    ("channel_ids", "reason"),
-    (("not-a-channel", "invalid-allowlist"), ("", "missing-allowlist")),
-)
-def test_requested_scheduler_invalidates_success_when_allowlist_is_invalid_or_empty(
+
+def test_requested_scheduler_invalidates_success_when_channel_filter_is_invalid(
     tmp_path,
     monkeypatch,
-    channel_ids,
-    reason,
 ):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
-    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", channel_ids)
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "not-a-channel")
     state_path = tmp_path / "scheduled.json"
     state_path.write_text(
         json.dumps(
@@ -255,9 +263,24 @@ def test_requested_scheduler_invalidates_success_when_allowlist_is_invalid_or_em
 
     checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
     assert checkpoint["status"] == "failed"
-    assert checkpoint["reason"] == reason
+    assert checkpoint["reason"] == "invalid-allowlist"
     assert checkpoint["configured_channel_ids"] == []
     assert manager.start() is False
+
+
+def test_requested_scheduler_accepts_dynamic_all_readable_inventory(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
+    state_path = tmp_path / "scheduled.json"
+
+    manager = ScheduledBackfillManager(_bot(), state_path=state_path)
+
+    checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == "waiting"
+    assert checkpoint["configured_channel_ids"] == []
+    assert manager.running is False
+    assert scheduler_enabled() is True
 
 
 def test_backfill_retry_keeps_six_hour_success_cadence():
@@ -301,6 +324,67 @@ async def test_scheduled_cycle_is_incremental_and_checkpoints_after_completion(
     bot.corpus.finish_backfill.assert_awaited_once_with(bot.corpus.prepare_backfill.return_value)
     assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "completed"
     assert not state_path.with_suffix(".json.tmp").exists()
+
+
+@pytest.mark.asyncio
+async def test_manual_historical_cycle_rebuilds_each_festival_separately(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
+    bot = _bot()
+
+    result = await ScheduledBackfillManager(
+        bot,
+        state_path=tmp_path / "scheduled.json",
+    ).run_once(full_history=True)
+
+    guild = result["guilds"]["1"]
+    assert result["status"] == "completed"
+    assert result["mode"] == "historical"
+    assert guild["mode"] == "historical"
+    assert set(guild["festivals"]) == {"26th", "27th", "28th"}
+    assert guild["messages_indexed"] == 90
+    assert guild["documents_uploaded"] == 6
+    assert guild["documents_replaced"] == 6
+    assert guild["festivals"]["26th"] == {
+        "messages_indexed": 30,
+        "documents_uploaded": 2,
+        "documents_replaced": 2,
+        "channel_slices": 2,
+    }
+    assert bot.corpus.backfill_channel.await_count == 6
+    completion_flags = [
+        call.kwargs["complete_session_channel"]
+        for call in bot.corpus.backfill_channel.await_args_list
+    ]
+    assert completion_flags.count(True) == 2
+    assert completion_flags.count(False) == 4
+    assert bot.config.set_backfill_cursor.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dynamic_inventory_expands_public_forum_threads(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
+    bot, archive_calls, prepared_target_ids = _forum_bot()
+
+    result = await ScheduledBackfillManager(
+        bot,
+        state_path=tmp_path / "scheduled.json",
+    ).run_once()
+
+    guild = result["guilds"]["1"]
+    assert result["status"] == "completed"
+    assert guild["configured_channel_ids"] == []
+    assert guild["container_channel_ids"] == ["40"]
+    assert set(guild["eligible_channel_ids"]) == {"40", "41", "42"}
+    assert set(guild["completed_channel_ids"]) == {"41", "42"}
+    assert prepared_target_ids == [frozenset({41, 42})]
+    assert archive_calls == [
+        {"private": False, "joined": False, "limit": None, "before": None},
+    ]
 
 
 @pytest.mark.asyncio

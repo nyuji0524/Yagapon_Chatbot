@@ -1,10 +1,11 @@
 """Periodic, resumable Discord history refresh for the RAG corpus.
 
-The scheduler is opt-in and requires immutable guild/channel-ID allowlists.  It
-reuses the same per-guild lock and per-channel cursors as the manual/API
-backfill paths, so a scheduled cycle never races an operator run.  A durable
-cycle checkpoint lets downstream curation wait for a completed refresh rather
-than reading a half-updated corpus.
+The scheduler is opt-in and requires an immutable guild-ID allowlist.  Inside
+an allowed guild it discovers every readable text channel and public thread,
+then applies the shared ``/ignore`` and protected-channel policy.  An optional
+channel list remains as a backwards-compatible narrowing override, but is no
+longer required.  The same per-guild lock, per-channel cursors, and durable
+checkpoint are shared by scheduled and administrator-triggered refreshes.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import inspect
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +24,7 @@ from bot.corpus import (
     calculate_resumable_incremental_after,
     run_backfill_channels,
 )
+from bot.festival import JST, festival_number, festival_period
 from bot.knowledge_policy import protected_channel
 
 log = logging.getLogger("yagapon.scheduled_backfill")
@@ -100,7 +102,45 @@ def scheduler_enabled() -> bool:
     except ScheduledBackfillConfigurationError as exc:
         log.error("Scheduled Discord backfill configuration is invalid: %s", exc)
         return False
-    return bool(guild_ids) and bool(channel_ids)
+    return bool(guild_ids)
+
+
+def _festival_bounds(number: int, cutoff: datetime) -> tuple[datetime, datetime]:
+    """Return one JST festival window as an exclusive UTC history range."""
+    period = festival_period(number)
+    starts_at = datetime.combine(period.starts_on, time.min, JST)
+    ends_at = datetime.combine(period.ends_on + timedelta(days=1), time.min, JST)
+    # Discord.py/Pycord treats both datetime boundaries as exclusive. Moving
+    # ``after`` back by one microsecond includes exactly 10/1 00:00 JST while
+    # ``before`` remains the exclusive beginning of the next festival year.
+    return (
+        (starts_at - timedelta(microseconds=1)).astimezone(timezone.utc),
+        min(ends_at.astimezone(timezone.utc), cutoff),
+    )
+
+
+async def _oldest_message_at(channel, *, before: datetime) -> datetime | None:
+    """Read only the oldest message needed to bound an all-history rebuild."""
+    history = getattr(channel, "history", None)
+    if not callable(history):
+        raise RuntimeError("channel-history-unavailable")
+    async for message in history(limit=1, before=before, oldest_first=True):
+        created_at = getattr(message, "created_at", None)
+        if not isinstance(created_at, datetime):
+            raise RuntimeError("message-created-at-unavailable")
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return created_at.astimezone(timezone.utc)
+    return None
+
+
+def _historical_festivals(oldest: datetime | None, cutoff: datetime) -> tuple[int, ...]:
+    """Return every festival year that can contain a channel message."""
+    latest = festival_number(cutoff)
+    earliest = festival_number(oldest) if oldest is not None else latest
+    if earliest > latest:
+        earliest = latest
+    return tuple(range(max(1, earliest), latest + 1))
 
 
 def next_backfill_delay(interval: int, retry_interval: int, result: dict | None) -> int:
@@ -220,7 +260,7 @@ class ScheduledBackfillManager:
             except ScheduledBackfillConfigurationError:
                 self._write_configuration_error_checkpoint("invalid-allowlist")
             else:
-                if not guild_ids or not channel_ids:
+                if not guild_ids:
                     self._write_configuration_error_checkpoint("missing-allowlist")
                 else:
                     self._write_waiting_checkpoint(
@@ -341,7 +381,7 @@ class ScheduledBackfillManager:
                 next_backfill_delay(interval, retry_interval, result)
             )
 
-    async def run_once(self) -> dict:
+    async def run_once(self, *, full_history: bool = False) -> dict:
         if self._run_lock.locked():
             now = datetime.now(timezone.utc).isoformat()
             return {
@@ -350,6 +390,7 @@ class ScheduledBackfillManager:
                 "completed_at": now,
                 "status": "deferred",
                 "reason": "backfill-already-running",
+                "mode": "historical" if full_history else "incremental",
                 "configured_guild_ids": [str(value) for value in configured_guild_ids()],
                 "configured_channel_ids": [str(value) for value in sorted(configured_channel_ids())],
                 "discovered_channel_ids": [],
@@ -358,9 +399,9 @@ class ScheduledBackfillManager:
                 "guilds": {},
             }
         async with self._run_lock:
-            return await self._run_once_locked()
+            return await self._run_once_locked(full_history=full_history)
 
-    async def _run_once_locked(self) -> dict:
+    async def _run_once_locked(self, *, full_history: bool = False) -> dict:
         started_at = datetime.now(timezone.utc).isoformat()
         guild_ids = configured_guild_ids()
         selected_channel_ids = configured_channel_ids()
@@ -369,6 +410,7 @@ class ScheduledBackfillManager:
             "started_at": started_at,
             "completed_at": None,
             "status": "running",
+            "mode": "historical" if full_history else "incremental",
             "configured_guild_ids": [str(value) for value in guild_ids],
             "configured_channel_ids": [str(value) for value in sorted(selected_channel_ids)],
             "discovered_channel_ids": [],
@@ -384,7 +426,14 @@ class ScheduledBackfillManager:
             if not guild_ids:
                 raise RuntimeError("no-configured-guilds")
             for guild_id in guild_ids:
-                result["guilds"][str(guild_id)] = await self._refresh_guild(guild_id)
+                if full_history:
+                    guild_result = await self._refresh_guild(
+                        guild_id,
+                        full_history=True,
+                    )
+                else:
+                    guild_result = await self._refresh_guild(guild_id)
+                result["guilds"][str(guild_id)] = guild_result
 
             discovered = {
                 value for item in result["guilds"].values() for value in item.get("discovered_channel_ids", [])
@@ -414,7 +463,7 @@ class ScheduledBackfillManager:
         _write_state(self.state_path, result)
         return result
 
-    async def _refresh_guild(self, guild_id: int) -> dict:
+    async def _refresh_guild(self, guild_id: int, *, full_history: bool = False) -> dict:
         guild = self.bot.get_guild(guild_id)
         corpus_store = self.bot.config.get_corpus(guild_id)
         selected_ids = configured_channel_ids()
@@ -432,6 +481,8 @@ class ScheduledBackfillManager:
             "messages_indexed": 0,
             "documents_uploaded": 0,
             "documents_replaced": 0,
+            "mode": "historical" if full_history else "incremental",
+            "festivals": {},
             "failures": [],
         }
         if guild is None or not corpus_store:
@@ -445,32 +496,75 @@ class ScheduledBackfillManager:
 
         async def process_channel(channel) -> None:
             try:
-                after = calculate_resumable_incremental_after(
-                    self.bot.config,
-                    guild_id,
-                    channel.id,
-                    now=session.cutoff,
-                )
-                channel_result = await self.bot.corpus.backfill_channel(
-                    channel,
-                    corpus_store,
-                    after=after,
-                    before=session.cutoff,
-                    replace_existing=True,
-                    dry_run=False,
-                    session=session,
-                )
-                if channel_result.latest_message_id and channel_result.latest_message_at:
+                latest_message_id = None
+                latest_message_at = None
+                if full_history:
+                    oldest = await _oldest_message_at(channel, before=session.cutoff)
+                    festivals = _historical_festivals(oldest, session.cutoff)
+                    for index, festival in enumerate(festivals):
+                        after, before = _festival_bounds(festival, session.cutoff)
+                        if before <= after:
+                            continue
+                        channel_result = await self.bot.corpus.backfill_channel(
+                            channel,
+                            corpus_store,
+                            after=after,
+                            before=before,
+                            replace_existing=True,
+                            dry_run=False,
+                            session=session,
+                            complete_session_channel=index == len(festivals) - 1,
+                        )
+                        if channel_result.latest_message_id and channel_result.latest_message_at:
+                            latest_message_id = channel_result.latest_message_id
+                            latest_message_at = channel_result.latest_message_at
+                        async with summary_lock:
+                            summary["messages_indexed"] += channel_result.messages_indexed
+                            summary["documents_uploaded"] += channel_result.documents_uploaded
+                            summary["documents_replaced"] += channel_result.documents_replaced
+                            annual = summary["festivals"].setdefault(
+                                f"{festival}th",
+                                {
+                                    "messages_indexed": 0,
+                                    "documents_uploaded": 0,
+                                    "documents_replaced": 0,
+                                    "channel_slices": 0,
+                                },
+                            )
+                            annual["messages_indexed"] += channel_result.messages_indexed
+                            annual["documents_uploaded"] += channel_result.documents_uploaded
+                            annual["documents_replaced"] += channel_result.documents_replaced
+                            annual["channel_slices"] += 1
+                else:
+                    after = calculate_resumable_incremental_after(
+                        self.bot.config,
+                        guild_id,
+                        channel.id,
+                        now=session.cutoff,
+                    )
+                    channel_result = await self.bot.corpus.backfill_channel(
+                        channel,
+                        corpus_store,
+                        after=after,
+                        before=session.cutoff,
+                        replace_existing=True,
+                        dry_run=False,
+                        session=session,
+                    )
+                    latest_message_id = channel_result.latest_message_id
+                    latest_message_at = channel_result.latest_message_at
+                    async with summary_lock:
+                        summary["messages_indexed"] += channel_result.messages_indexed
+                        summary["documents_uploaded"] += channel_result.documents_uploaded
+                        summary["documents_replaced"] += channel_result.documents_replaced
+                if latest_message_id and latest_message_at:
                     await self.bot.config.set_backfill_cursor(
                         guild_id,
                         channel.id,
-                        channel_result.latest_message_id,
-                        channel_result.latest_message_at,
+                        latest_message_id,
+                        latest_message_at,
                     )
                 async with summary_lock:
-                    summary["messages_indexed"] += channel_result.messages_indexed
-                    summary["documents_uploaded"] += channel_result.documents_uploaded
-                    summary["documents_replaced"] += channel_result.documents_replaced
                     summary["completed_channel_ids"].append(str(channel.id))
             except asyncio.CancelledError:
                 raise
@@ -550,17 +644,23 @@ class ScheduledBackfillManager:
             # eligible, then expand it into independently scoped thread targets.
             eligible_ids = set(channels_by_id)
             requested_forum_ids = selected_ids & set(readable_forums)
-            eligible_ids.update(readable_forums if not selected_ids else requested_forum_ids)
+            container_ids = set(readable_forums) if not selected_ids else set(requested_forum_ids)
+            eligible_ids.update(container_ids)
 
             undiscovered_selected_ids = selected_ids - discovered_ids
+            thread_archive_parents = {
+                channel_id: channel
+                for channel_id, channel in readable_thread_parents.items()
+                if callable(getattr(channel, "archived_threads", None))
+            }
+            active_threads_method = getattr(guild, "active_threads", None)
             discover_threads = bool(readable_thread_parents) and (
-                (not selected_ids and bool(readable_forums))
+                (not selected_ids and (bool(thread_archive_parents) or callable(active_threads_method)))
                 or bool(requested_forum_ids)
                 or bool(undiscovered_selected_ids)
             )
             active_threads: list[object] = []
             if discover_threads:
-                active_threads_method = getattr(guild, "active_threads", None)
                 if callable(active_threads_method):
                     try:
                         active_threads = await _materialize_threads(active_threads_method())
@@ -578,7 +678,7 @@ class ScheduledBackfillManager:
                             "Scheduled backfill could not list active threads guild=%s",
                             guild_id,
                         )
-                else:
+                elif selected_ids:
                     summary["failures"].append(
                         {
                             "channel_id": None,
@@ -618,11 +718,6 @@ class ScheduledBackfillManager:
                     and not parent_expands_public_threads
                 ):
                     return
-                if not selected_ids and parent_id not in readable_forums:
-                    # Preserve the legacy all-readable behavior for direct test
-                    # runs: only Forum parents expand implicitly. A TextChannel
-                    # never authorizes any child thread, especially a private one.
-                    return
                 channels_by_id[thread_id] = thread
                 eligible_ids.add(thread_id)
 
@@ -633,7 +728,10 @@ class ScheduledBackfillManager:
 
             undiscovered_selected_ids = selected_ids - discovered_ids
             if not selected_ids:
-                archive_parent_ids = set(readable_forums)
+                # Public threads inherit their parent's read boundary. Include
+                # both Forum posts and ordinary public TextChannel threads;
+                # private threads still fail closed in ``admit_thread``.
+                archive_parent_ids = set(thread_archive_parents)
             else:
                 archive_parent_ids = set(requested_forum_ids)
                 # An explicitly allowlisted archived thread cannot be resolved
@@ -641,10 +739,10 @@ class ScheduledBackfillManager:
                 # parent, including ordinary TextChannels, while still admitting
                 # only the exact requested thread ID.
                 if undiscovered_selected_ids:
-                    archive_parent_ids.update(readable_thread_parents)
+                    archive_parent_ids.update(thread_archive_parents)
 
             for parent_id in sorted(archive_parent_ids):
-                parent_channel = readable_thread_parents[parent_id]
+                parent_channel = thread_archive_parents[parent_id]
                 for private, joined, stage in (
                     (False, False, "archived-public-thread-discovery"),
                     (True, True, "archived-private-thread-discovery"),
@@ -694,7 +792,7 @@ class ScheduledBackfillManager:
                     "discovered_channel_ids": [str(value) for value in sorted(discovered_ids)],
                     "eligible_channel_ids": [str(value) for value in sorted(eligible_ids)],
                     "container_channel_ids": [
-                        str(value) for value in sorted(requested_forum_ids)
+                        str(value) for value in sorted(container_ids)
                     ],
                     "missing_channel_ids": [str(value) for value in sorted(local_missing)],
                     "channels_total": len(channels),

@@ -19,7 +19,11 @@ from bot.commands.knowledge import (
     register,
 )
 from bot.google_credentials import GoogleCredentialScopeError
-from bot.knowledge_policy import evaluate_knowledge_export, evaluate_meeting_export
+from bot.knowledge_policy import (
+    automatic_knowledge_promotion_allowed,
+    evaluate_knowledge_export,
+    evaluate_meeting_export,
+)
 
 
 def test_curation_batch_limit_is_bounded(monkeypatch):
@@ -168,6 +172,45 @@ async def test_full_knowledge_refresh_does_not_curate_failed_checkpoint(monkeypa
     curate.assert_not_awaited()
     assert result["curation"]["checkpoint_reason"] == "manual-backfill-not-completed"
     assert _knowledge_refresh_status(result) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_historical_knowledge_refresh_requests_all_history_before_curation(monkeypatch):
+    backfill = AsyncMock(
+        return_value={
+            "status": "completed",
+            "mode": "historical",
+            "guilds": {},
+        }
+    )
+    curate = AsyncMock(
+        return_value={
+            "enabled": True,
+            "checkpoint_ready": True,
+            "processed": 0,
+            "failed": 0,
+        }
+    )
+    monkeypatch.setattr("bot.commands.knowledge._run_curation_cycle", curate)
+
+    result = await _run_knowledge_refresh(
+        SimpleNamespace(scheduled_backfill=SimpleNamespace(run_once=backfill)),
+        mode="historical",
+    )
+
+    backfill.assert_awaited_once_with(full_history=True)
+    curate.assert_awaited_once()
+    assert result["mode"] == "historical"
+    assert _knowledge_refresh_status(result) == "completed"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_refresh_rejects_unknown_internal_mode():
+    with pytest.raises(ValueError, match="Unsupported Knowledge refresh mode"):
+        await _run_knowledge_refresh(
+            SimpleNamespace(scheduled_backfill=SimpleNamespace()),
+            mode="everything",
+        )
 
 
 @pytest.mark.asyncio
@@ -339,6 +382,47 @@ def test_meeting_external_export_requires_same_audience_or_explicit_channel(monk
         ),
     )
     assert evaluate_meeting_export(guild_id=1, channel=public).allowed is True
+
+
+def test_automatic_promotion_requires_guildwide_audience_and_respects_deny(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
+    default_role = SimpleNamespace(id=1)
+    guild = SimpleNamespace(default_role=default_role)
+
+    private = SimpleNamespace(
+        id=10,
+        name="役員会",
+        guild=guild,
+        parent=None,
+        category=None,
+        permissions_for=lambda _role: SimpleNamespace(
+            view_channel=False,
+            read_message_history=False,
+        ),
+    )
+    public = SimpleNamespace(
+        id=11,
+        name="全体会議",
+        guild=guild,
+        parent=None,
+        category=None,
+        permissions_for=lambda _role: SimpleNamespace(
+            view_channel=True,
+            read_message_history=True,
+        ),
+    )
+    protected = SimpleNamespace(
+        id=12,
+        name="選考連絡",
+        guild=guild,
+        parent=None,
+        category=None,
+        permissions_for=public.permissions_for,
+    )
+
+    assert automatic_knowledge_promotion_allowed(private) is False
+    assert automatic_knowledge_promotion_allowed(public) is True
+    assert automatic_knowledge_promotion_allowed(protected) is False
 
 
 def test_thread_permissions_use_resolved_parent_when_thread_parent_is_uncached():

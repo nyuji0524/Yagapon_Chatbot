@@ -54,6 +54,7 @@ flowchart LR
     SupportRepo[YagamiFes-IT/Yaga_Support]
     FirebaseRepo[YagamiFes-IT/yagamifes-firebase]
     WebRepo[YagamiFes-IT/Yagamifes_Web_2025]
+    YagamyRepo[YagamiFes-IT/Yagamy]
     KnowledgeRepo[YagamiFes-IT/YagamiFes-IT-Knowledge]
     ReadApp[Read-only GitHub App\nContents + Metadata read]
     IntakeAction[Knowledge Intake Action]
@@ -98,6 +99,7 @@ flowchart LR
   SupportRepo -->|main + commit history| ReadApp
   FirebaseRepo -->|main + commit history| ReadApp
   WebRepo -->|main + commit history| ReadApp
+  YagamyRepo -->|main + commit history| ReadApp
   KnowledgeRepo -->|承認済みmain + commit history| ReadApp
   SourceWorker --> FileSearch
   SourceWorker --> RAGDB
@@ -118,8 +120,10 @@ flowchart LR
 GitHub APIから直接取得する。private repositoryは組織の`All repositories`へインストールした
 read-only GitHub Appで読み、短命なinstallation tokenを期限前に更新する。Appが組織の全repositoryを
 読めても、自動列挙はしない。実際に取り込むrepositoryとtokenに指定するrepositoryは
-`source_index/repositories.yaml`のentryを`YAGAPON_SOURCE_REPOSITORIES`で絞った明示allowlistだけである。
-環境変数が空ならmanifest内の全entryを選び、組織の全repositoryを意味しない。
+`source_index/repositories.yaml`のレビュー済みentryだけである。本番は
+`YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true`かつ`YAGAPON_SOURCE_REPOSITORIES`を空欄にし、manifest全件を
+選ぶ。固定リストが残っていればpreflightで拒否し、新しいレビュー済みentryが黙って欠落するのを防ぐ。
+ローカルsubsetだけはguardを無効にしてenvで絞れる。空欄は組織の全repositoryを意味しない。
 `YAGAPON_SOURCE_INDEX_ENABLED=false` の間はworkerが起動していても索引を更新しない。
 
 ## 根拠の優先順位
@@ -132,7 +136,7 @@ flowchart TD
   Disclosure -->|いいえ| ACL[Discord channelのpositive ACL\n+ authority / date / festival filter]
   ACL --> Exact[SQLite完全一致]
   ACL --> FirebaseNow[許可済みFirebase現在値\nfeature gate]
-  Exact --> Strong{承認済みexactまたは\nFirebase根拠で回答可能?}
+  Exact --> Strong{承認済みexactまたは\n現在値向けFirebase根拠で回答可能?}
   FirebaseNow --> Strong
   Strong -->|はい| Direct[その根拠だけで生成]
   Strong -->|いいえ| Semantic[File Search意味検索\n+質問種別によりraw exactも併用]
@@ -144,9 +148,9 @@ flowchart TD
   Verify -->|根拠不足| NoAnswer[推測せず回答不能]
 ```
 
-この開示要求検知は、質問文に対する限定的な意図フィルタであり、汎用的なDLPや検索結果全文の
-秘密スキャンではない。根拠そのものはACL、取り込み時の項目制限・機密パターン検査、
-回答system instructionの複数層で制限する。
+この開示要求検知は、質問文に対する限定的な意図フィルタであり、単体で汎用的なDLPを保証するものではない。
+根拠そのものはACL、取り込み時の項目制限・機密パターン検査、Firebaseのleaf schemaとconsumer側再検証、
+回答system instruction、最終回答検査の複数層で制限する。
 
 根拠の役割は次のとおり。
 

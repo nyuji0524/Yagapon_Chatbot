@@ -1,6 +1,7 @@
 """Festival-year rules shared by ingestion, retrieval, and evaluation."""
 
 import re
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -26,6 +27,14 @@ def current_festival(now: datetime | None = None) -> int:
 @dataclass(frozen=True)
 class FestivalPeriod:
     number: int
+    starts_on: date
+    ends_on: date
+
+
+@dataclass(frozen=True)
+class CalendarWindow:
+    """Inclusive calendar window inferred from a coarse time expression."""
+
     starts_on: date
     ends_on: date
 
@@ -133,6 +142,64 @@ def calendar_date_from_query(
         if candidate <= current:
             return candidate
     return None
+
+
+def calendar_window_from_query(
+    query: str,
+    now: datetime | None = None,
+    *,
+    festival: int | None = None,
+) -> CalendarWindow | None:
+    """Resolve month-level expressions such as ``去年の今頃``.
+
+    Exact dates remain the responsibility of :func:`calendar_date_from_query`.
+    A month is intentionally used instead of one guessed day: committee work
+    is usually discussed over several days and a one-day filter would make a
+    natural question such as "去年の今頃" miss almost every relevant record.
+    """
+    if calendar_date_from_query(query, now, festival=festival) is not None:
+        return None
+    normalized = query.translate(
+        str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
+    )
+    current = (now or datetime.now(JST)).astimezone(JST).date()
+
+    explicit = re.search(
+        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?"
+        r"(?!\s*(?:[/.-]|月)\s*(?:3[01]|[12]\d|0?[1-9]))",
+        normalized,
+    )
+    if explicit:
+        year, month = int(explicit.group(1)), int(explicit.group(2))
+        return _month_window(year, month)
+
+    relative_month = None
+    if re.search(r"先月", normalized):
+        if current.month == 1:
+            relative_month = (current.year - 1, 12)
+        else:
+            relative_month = (current.year, current.month - 1)
+    elif re.search(r"(?:去年|昨年|昨年度).{0,4}(?:今頃|この時期|今月)", normalized):
+        relative_month = (current.year - 1, current.month)
+    elif re.search(r"今頃|この時期|今月", normalized):
+        relative_month = (current.year, current.month)
+    if relative_month:
+        return _month_window(*relative_month)
+
+    mentioned_month = re.search(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+    if mentioned_month and festival is not None:
+        month = int(mentioned_month.group(1))
+        period = festival_period(festival)
+        year = period.starts_on.year if month >= 10 else period.ends_on.year
+        return _month_window(year, month)
+    return None
+
+
+def _month_window(year: int, month: int) -> CalendarWindow:
+    return CalendarWindow(
+        starts_on=date(year, month, 1),
+        ends_on=date(year, month, monthrange(year, month)[1]),
+    )
 
 
 def festival_metadata_filter(number: int | None) -> str | None:

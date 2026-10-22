@@ -3,7 +3,9 @@ from datetime import date, datetime, timezone
 import pytest
 
 from bot.festival import (
+    CalendarWindow,
     calendar_date_from_query,
+    calendar_window_from_query,
     festival_from_query,
     festival_number,
     festival_period,
@@ -112,3 +114,32 @@ def test_yearless_date_accepts_weekday_suffix(query):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
 
     assert calendar_date_from_query(query, now) == date(2026, 10, 9)
+
+
+def test_relative_period_resolves_last_year_current_month():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "去年の今頃って何してた？",
+        now,
+        festival=27,
+    ) == CalendarWindow(date(2025, 10, 1), date(2025, 10, 31))
+
+
+def test_month_window_uses_festival_operating_year_and_leap_day():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("27thの2月頃", now, festival=27) == CalendarWindow(
+        date(2026, 2, 1),
+        date(2026, 2, 28),
+    )
+    assert calendar_window_from_query("2024年2月の活動", now) == CalendarWindow(
+        date(2024, 2, 1),
+        date(2024, 2, 29),
+    )
+
+
+def test_exact_date_does_not_also_create_a_month_window():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("2025年10月9日の会議", now, festival=27) is None

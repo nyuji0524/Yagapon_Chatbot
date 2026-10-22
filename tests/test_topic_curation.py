@@ -70,6 +70,7 @@ def test_curation_digest_changes_when_discord_lineage_changes():
     original = curation._digest(document)
     assert curation._digest(document | {"parent_id": 21}) != original
     assert curation._digest(document | {"category_name": "選考"}) != original
+    assert curation._digest(document | {"auto_promote": True}) != original
 
 
 def test_watch_delay_retries_failed_work_and_durable_delivery_schedule():
@@ -479,11 +480,11 @@ def test_collect_topic_evidence_keeps_discord_code_and_knowledge_sources(tmp_pat
     assert intersect_access_scopes(result) == AccessDecision("channel", 10, "single-private-channel")
 
 
-def test_curation_deny_policy_wins_over_guild_and_channel_allowlists(monkeypatch):
+def test_curation_deny_policy_wins_over_dynamic_and_explicit_admission(monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
-    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10,20")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "10")
-    denied_by_id = source_document()
+    denied_by_id = source_document() | {"auto_promote": True}
 
     assert curation.curation_document_allowed(denied_by_id) is False
 
@@ -712,8 +713,27 @@ def test_backfill_checkpoint_must_match_current_scheduler_inventory(
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
     assert backfill_checkpoint_status(now=now) == (
         False,
-        "checkpoint-invalid-current-configuration",
+        "checkpoint-channel-configuration-changed",
     )
+
+
+def test_backfill_checkpoint_accepts_dynamic_all_readable_channel_inventory(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    payload = checkpoint_payload(now)
+    payload["configured_channel_ids"] = []
+    payload["guilds"]["123"]["configured_channel_ids"] = []
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
+
+    assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
 
 
 def test_backfill_checkpoint_accepts_forum_parent_container_plus_completed_threads(

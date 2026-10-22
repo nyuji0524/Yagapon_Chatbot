@@ -463,6 +463,7 @@ def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
     assert {repository.name for repository in repositories} >= {
         "nyuji0524/Yagapon_Chatbot",
         "YagamiFes-IT/yagamifes-firebase",
+        "YagamiFes-IT/Yagamy",
     }
     knowledge = next(
         repository
@@ -488,21 +489,52 @@ def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
     assert web.private
     assert web.history
     assert web.fetch == "tree"
+    yagamy = next(
+        repository
+        for repository in repositories
+        if repository.name == "YagamiFes-IT/Yagamy"
+    )
+    assert yagamy.ref == "main"
+    assert yagamy.private
+    assert yagamy.history
+    assert yagamy.fetch == "tree"
+    assert yagamy.include == (
+        "lib/",
+        "test/",
+        "docs/readMe26th/",
+        "docs/implementations/",
+        "docs/requirements/",
+        "docs/map-navigation/",
+        "pubspec.yaml",
+        "firebase.json",
+    )
 
 
-def test_checked_in_manifest_indexes_history_only_for_three_code_repositories():
+def test_checked_in_manifest_covers_every_reviewed_source(monkeypatch):
+    monkeypatch.delenv("YAGAPON_SOURCE_REPOSITORIES", raising=False)
+    monkeypatch.setenv("YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST", "true")
     manifest = source_index_module.Path(source_index_module.__file__).with_name(
         "repositories.yaml"
     )
     repositories = load_repositories(manifest)
 
+    assert {repository.name for repository in repositories} == {
+        "nyuji0524/Yagapon_Chatbot",
+        "YagamiFes-IT/Yaga_Support",
+        "YagamiFes-IT/yagamifes-firebase",
+        "YagamiFes-IT/Yagamifes_Web_2025",
+        "YagamiFes-IT/Yagamy",
+        "YagamiFes-IT/YagamiFes-IT-Knowledge",
+    }
     assert {repository.name for repository in repositories if repository.history} == {
         "YagamiFes-IT/Yaga_Support",
         "YagamiFes-IT/yagamifes-firebase",
         "YagamiFes-IT/Yagamifes_Web_2025",
+        "YagamiFes-IT/Yagamy",
     }
     fetches = {repository.name: repository.fetch for repository in repositories}
     assert fetches["YagamiFes-IT/Yagamifes_Web_2025"] == "tree"
+    assert fetches["YagamiFes-IT/Yagamy"] == "tree"
     assert fetches["YagamiFes-IT/Yaga_Support"] == "archive"
     assert fetches["YagamiFes-IT/yagamifes-firebase"] == "archive"
     assert fetches["YagamiFes-IT/YagamiFes-IT-Knowledge"] == "archive"
@@ -543,6 +575,40 @@ def test_repository_env_can_only_narrow_reviewed_manifest(monkeypatch, tmp_path)
         "example/approved,example/not-in-manifest",
     )
     with pytest.raises(RuntimeError, match="outside the reviewed manifest"):
+        load_repositories(manifest)
+
+
+def test_full_manifest_guard_rejects_even_a_reviewed_fixed_subset(
+    monkeypatch,
+    tmp_path,
+):
+    manifest = tmp_path / "repositories.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "repositories": [
+                    {
+                        "name": "example/approved",
+                        "ref": "main",
+                        "include": ["src/"],
+                    },
+                    {
+                        "name": "example/future-entry",
+                        "ref": "main",
+                        "include": ["app/"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_REPOSITORIES", "example/approved")
+
+    with pytest.raises(
+        RuntimeError,
+        match="must be empty when YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true",
+    ):
         load_repositories(manifest)
 
 
@@ -1316,6 +1382,45 @@ async def test_source_preflight_is_a_safe_noop_when_disabled(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_source_preflight_rejects_a_stale_production_repository_filter(
+    tmp_path,
+    monkeypatch,
+):
+    manifest = tmp_path / "repositories.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "repositories": [
+                    {"name": "example/one", "ref": "main", "include": ["src/"]},
+                    {"name": "example/two", "ref": "main", "include": ["app/"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_REPOSITORIES", "example/one")
+    monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
+    monkeypatch.setattr(
+        source_index_module,
+        "GitHubSourceClient",
+        lambda *_args: pytest.fail("invalid selection must fail before GitHub access"),
+    )
+    args = SimpleNamespace(
+        manifest=manifest,
+        state=tmp_path / "state.json",
+        guild_id=None,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="must be empty when YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true",
+    ):
+        await preflight_once(args)
+
+
+@pytest.mark.asyncio
 async def test_source_preflight_resolves_every_repo_and_samples_one_document(
     tmp_path,
     monkeypatch,
@@ -1404,6 +1509,7 @@ async def test_source_preflight_resolves_every_repo_and_samples_one_document(
     assert result == {
         "preflight": True,
         "repositories_checked": 2,
+        "repositories": ["example/one", "example/two"],
         "file_search_store": "stores/123",
         "remote_documents_sampled": 1,
         "state_documents": 0,

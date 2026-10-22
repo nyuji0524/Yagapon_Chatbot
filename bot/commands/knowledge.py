@@ -77,9 +77,14 @@ async def _run_curation_cycle() -> dict:
 
 async def _run_knowledge_refresh(bot, *, mode: str) -> dict:
     """Run the operator-triggered pipeline without bypassing production gates."""
+    if mode not in {"full", "historical", "curation"}:
+        raise ValueError(f"Unsupported Knowledge refresh mode: {mode}")
     result: dict[str, object] = {"mode": mode}
-    if mode == "full":
-        backfill = await bot.scheduled_backfill.run_once()
+    if mode in {"full", "historical"}:
+        if mode == "historical":
+            backfill = await bot.scheduled_backfill.run_once(full_history=True)
+        else:
+            backfill = await bot.scheduled_backfill.run_once()
         result["backfill"] = backfill
         if backfill.get("status") != "completed":
             result["curation"] = {
@@ -127,17 +132,45 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
     backfill = result.get("backfill") or {}
     if backfill:
         guilds = list((backfill.get("guilds") or {}).values())
+        backfill_label = "Discord全期間取得" if result.get("mode") == "historical" else "Discord差分取得"
         embed.add_field(
-            name="Discord差分取得",
+            name=backfill_label,
             value=(
                 f"状態: `{backfill.get('status', 'unknown')}`\n"
                 f"チャンネル: {sum(int(item.get('channels_completed') or 0) for item in guilds)} / "
                 f"{sum(int(item.get('channels_total') or 0) for item in guilds)}\n"
                 f"メッセージ: {sum(int(item.get('messages_indexed') or 0) for item in guilds)}\n"
-                f"文書: {sum(int(item.get('documents_uploaded') or 0) for item in guilds)}"
+                f"文書: {sum(int(item.get('documents_uploaded') or 0) for item in guilds)}\n"
+                f"置換: {sum(int(item.get('documents_replaced') or 0) for item in guilds)}"
             ),
             inline=False,
         )
+        annual: dict[str, dict[str, int]] = {}
+        for guild in guilds:
+            for festival, values in (guild.get("festivals") or {}).items():
+                target = annual.setdefault(
+                    str(festival),
+                    {"messages_indexed": 0, "documents_uploaded": 0, "documents_replaced": 0},
+                )
+                for key in target:
+                    target[key] += int((values or {}).get(key) or 0)
+        if annual:
+            def festival_sort(item):
+                value = str(item[0]).removesuffix("th")
+                return int(value) if value.isdecimal() else 0
+
+            lines = [
+                (
+                    f"**{festival}** — 発言 {values['messages_indexed']} / "
+                    f"文書 {values['documents_uploaded']} / 置換 {values['documents_replaced']}"
+                )
+                for festival, values in sorted(annual.items(), key=festival_sort)
+            ]
+            embed.add_field(
+                name="年度別結果（10月〜翌9月）",
+                value="\n".join(lines)[:1024],
+                inline=False,
+            )
     curation = result.get("curation") or {}
     checkpoint = str(curation.get("checkpoint_reason") or "ready")
     embed.add_field(
@@ -149,7 +182,8 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
             f"見送り: {int(curation.get('skipped') or 0)} / "
             f"失敗: {int(curation.get('failed') or 0)}\n"
             f"再送: {int(curation.get('retried') or 0)} / "
-            f"未確認bundle: {int(curation.get('open_bundles') or 0)}"
+            f"未確認bundle: {int(curation.get('open_bundles') or 0)} / "
+            f"PR待ち: {int(curation.get('backpressured') or 0)}"
         ),
         inline=False,
     )
@@ -325,13 +359,14 @@ def register(bot):
         set(),
     )
 
-    @group.command(name="refresh", description="Discord差分取得とKnowledge整理を今すぐ実行するぽん")
+    @group.command(name="refresh", description="Discord履歴取得とKnowledge整理を今すぐ実行するぽん")
     @discord.default_permissions(administrator=True)
     @discord.option(
         "mode",
-        description="Discord差分取得から実行するか、整理だけ実行するか",
+        description="差分・全期間・整理のみのどれを実行するか",
         choices=[
             discord.OptionChoice("Discord差分取得 → Knowledge整理（推奨）", "full"),
+            discord.OptionChoice("全期間を年度別に再構築 → Knowledge整理", "historical"),
             discord.OptionChoice("Knowledge整理のみ", "curation"),
         ],
         default="full",
@@ -353,11 +388,11 @@ def register(bot):
                 ephemeral=True,
             )
             return
-        if mode == "full" and (
+        if mode in {"full", "historical"} and (
             not scheduler_enabled() or ctx.guild.id not in configured_guild_ids()
         ):
             await ctx.respond(
-                "⏸️ このサーバーの定期Discord差分取得が許可されていないぽん。"
+                "⏸️ このサーバーのDiscord履歴取得が許可されていないぽん。"
                 "固定Guild IDの設定を管理者に確認してほしいぽん。",
                 ephemeral=True,
             )
@@ -370,8 +405,9 @@ def register(bot):
             return
         await manual_refresh_lock.acquire()
         try:
+            duration_note = "全期間を年度別に確認するため、かなり時間がかかる場合があるぽん。" if mode == "historical" else ""
             await ctx.respond(
-                "🚀 Knowledge更新を開始したぽん。長時間かかっても処理を継続し、"
+                "🚀 Knowledge更新を開始したぽん。" + duration_note + "長時間かかっても処理を継続し、"
                 "完了結果をこのチャンネルへ表示するぽん。",
                 ephemeral=True,
             )

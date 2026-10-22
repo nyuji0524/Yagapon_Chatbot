@@ -10,6 +10,10 @@ import discord
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 from bot.key_management import KeyManagementManager
+from bot.knowledge_policy import (
+    automatic_knowledge_promotion_allowed,
+    protected_channel,
+)
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
@@ -202,6 +206,18 @@ def _split_discord_text(text: str, *, limit: int = 1900) -> list[str]:
         # Never split the fence marker itself.  If it does not fit, finish the
         # current message first (closing/reopening an existing block as needed).
         if is_fence and current and len(current) + len(logical_line) > content_limit:
+            flush()
+
+        # Keep an ordinary line (especially a Markdown citation/link) intact
+        # whenever it fits in an empty chunk. Previously we filled the
+        # remainder of ``current`` first, which could cut a URL in half and
+        # make Discord render the tail as a separate Google sign-in preview.
+        if (
+            not is_fence
+            and current
+            and len(logical_line) <= content_limit
+            and len(current) + len(logical_line) > content_limit
+        ):
             flush()
 
         remaining = logical_line
@@ -645,12 +661,20 @@ class YagaPon(discord.Bot):
             return
 
         channel_ignored = _is_ignored_with_parent(self.config, guild_id, message.channel)
+        parent = getattr(message.channel, "parent", None)
+        category = getattr(message.channel, "category", None) or getattr(parent, "category", None)
+        channel_protected = protected_channel(
+            message.channel,
+            parent=parent,
+            category=category,
+        )
+        channel_excluded = channel_ignored or channel_protected
 
         # VCセッション中のテキストチャットを参考資料として収集
         from bot.voice import get_session
 
         vc_session = get_session(guild_id)
-        if vc_session and vc_session.is_active and not channel_ignored:
+        if vc_session and vc_session.is_active and not channel_excluded:
             if _is_voice_reference_channel(
                 message.channel,
                 vc_session.channel,
@@ -663,7 +687,7 @@ class YagaPon(discord.Bot):
             return
 
         # 学習 (ignore/短文/コマンドは除外)
-        if channel_ignored:
+        if channel_excluded:
             return
         learning_content = self.corpus._message_content(message)
         if not learning_content or learning_content.startswith("/"):
@@ -682,6 +706,11 @@ class YagaPon(discord.Bot):
             corpus_store_name=corpus,
             message_id=message.id,
             source_url=getattr(message, "jump_url", ""),
+            auto_promote=automatic_knowledge_promotion_allowed(
+                message.channel,
+                parent=parent,
+                category=category,
+            ),
             **lineage,
         )
 
@@ -864,6 +893,7 @@ class YagaPon(discord.Bot):
                 ),
                 silent=True,
                 allowed_mentions=discord.AllowedMentions.none(),
+                suppress_embeds=True,
             )
             return [message]
         sent_messages = []
@@ -873,6 +903,7 @@ class YagaPon(discord.Bot):
                     chunk,
                     silent=True,
                     allowed_mentions=discord.AllowedMentions.none(),
+                    suppress_embeds=True,
                 )
             )
         return sent_messages

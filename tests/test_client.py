@@ -199,6 +199,16 @@ def test_split_discord_text_reopens_code_blocks_without_losing_code():
     assert sum(chunk.count("x") for chunk in chunks) == 5000
 
 
+def test_split_discord_text_never_splits_a_citation_line_that_fits():
+    citation = "- [Firebase現在値: 公開通知](https://console.firebase.google.com/project/example/firestore/databases/-default-/data/festival~2F27~2Fnotifications)\n"
+    text = ("説明だぽん。\n" * 180) + citation
+
+    chunks = _split_discord_text(text)
+
+    assert sum(citation in chunk for chunk in chunks) == 1
+    assert "".join(chunks) == text
+
+
 @pytest.mark.asyncio
 async def test_send_split_message_never_sends_empty_payload_for_long_line():
     destination = SimpleNamespace(send=AsyncMock(side_effect=lambda value, **_: value))
@@ -208,6 +218,7 @@ async def test_send_split_message_never_sends_empty_payload_for_long_line():
     assert sent
     assert all(call.args[0] for call in destination.send.await_args_list)
     assert sum(call.args[0].count("z") for call in destination.send.await_args_list) == 5000
+    assert all(call.kwargs["suppress_embeds"] is True for call in destination.send.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -227,3 +238,4 @@ async def test_send_split_message_uses_one_complete_markdown_attachment_for_very
     uploaded = attachment.fp.read().decode("utf-8")
     assert uploaded == answer
     assert attachment.filename == "yagapon-answer.md"
+    assert call.kwargs["suppress_embeds"] is True

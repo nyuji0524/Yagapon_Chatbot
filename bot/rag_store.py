@@ -39,6 +39,17 @@ def _metadata_map(metadata: list[dict] | None) -> dict[str, object]:
     return result
 
 
+def _metadata_flag(value: object) -> int:
+    """Normalize a producer-owned metadata flag for durable SQLite storage."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value == 1)
+    if isinstance(value, str):
+        return int(value.strip().casefold() in {"1", "true", "yes", "on"})
+    return 0
+
+
 @dataclass(frozen=True)
 class LexicalHit:
     document_key: str
@@ -111,6 +122,7 @@ class RagStore:
                     status TEXT,
                     authority TEXT,
                     access_scope TEXT,
+                    auto_promote INTEGER NOT NULL DEFAULT 0,
                     schema TEXT,
                     source_url TEXT,
                     start_at TEXT,
@@ -174,6 +186,7 @@ class RagStore:
                 "category_id": "INTEGER",
                 "category_name": "TEXT",
                 "access_scope": "TEXT",
+                "auto_promote": "INTEGER NOT NULL DEFAULT 0",
                 "schema": "TEXT",
             }
             for column, sql_type in migrations.items():
@@ -238,8 +251,8 @@ class RagStore:
                     document_key, remote_name, guild_id, channel_id, channel_name,
                     parent_id, parent_name, category_id, category_name, category,
                     festival, source_type, status, authority, source_url,
-                    access_scope, schema, start_at, end_at, body, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    access_scope, auto_promote, schema, start_at, end_at, body, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_key) DO UPDATE SET
                     remote_name=excluded.remote_name,
                     guild_id=excluded.guild_id,
@@ -255,6 +268,7 @@ class RagStore:
                     status=excluded.status,
                     authority=excluded.authority,
                     access_scope=excluded.access_scope,
+                    auto_promote=excluded.auto_promote,
                     schema=excluded.schema,
                     source_url=excluded.source_url,
                     start_at=excluded.start_at,
@@ -279,6 +293,7 @@ class RagStore:
                     str(values.get("authority") or "unknown"),
                     str(values.get("source_url") or ""),
                     str(values.get("access_scope") or ""),
+                    _metadata_flag(values.get("auto_promote")),
                     str(values.get("schema") or ""),
                     str(values.get("start_at") or ""),
                     str(values.get("end_at") or ""),
@@ -413,6 +428,7 @@ class RagStore:
             "status",
             "authority",
             "access_scope",
+            "auto_promote",
             "schema",
             "source_url",
             "start_at",
@@ -516,6 +532,16 @@ class RagStore:
                 )
                 if compound:
                     terms.extend(compound.groups())
+        # Preserve short, information-bearing domain cues that the generic
+        # Japanese particle splitter would otherwise drop or glue together.
+        # These are vocabulary classes rather than answers; they only improve
+        # deterministic recovery when semantic File Search is unavailable.
+        cue_pattern = re.compile(
+            r"新歓(?:Web)?|大賞企画|Y-?1(?:グランプリ)?|ランキング|ranking|"
+            r"Firestore|firestore|map|外部|他局|要求|票数|得票|順位|構造",
+            re.IGNORECASE,
+        )
+        terms.extend(match.group(0) for match in cue_pattern.finditer(question))
         # The festival number already drives the metadata filter in the RAG
         # pipeline.  Treating ``27th`` itself as an exact-search subject makes
         # the operating-year reference appear beside unrelated 27th topics.
@@ -547,13 +573,25 @@ class RagStore:
         *,
         festival: int | None = None,
         target_date: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
         source_types: tuple[str, ...] | list[str] | set[str] | None = None,
         limit: int = 4,
     ) -> list[LexicalHit]:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
-        if not clean_terms:
+        if target_date is not None and (date_from is not None or date_to is not None):
+            raise ValueError("target_date and date range are mutually exclusive")
+        for label, value in (("date_from", date_from), ("date_to", date_to)):
+            if value is not None:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError as exc:
+                    raise ValueError(f"{label} must be YYYY-MM-DD") from exc
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise ValueError("date_from must not be after date_to")
+        if not clean_terms and date_from is None and date_to is None:
             return []
         # guild_id=0 is reserved for reviewed references shipped with the bot.
         # Those records are safe to share across configured guilds.
@@ -585,6 +623,18 @@ class RagStore:
         if target_date is not None:
             conditions.append("substr(start_at, 1, 10) = ?")
             params.append(target_date)
+        if date_from is not None:
+            conditions.append(
+                "coalesce(nullif(substr(end_at, 1, 10), ''), "
+                "nullif(substr(start_at, 1, 10), '')) >= ?"
+            )
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append(
+                "coalesce(nullif(substr(start_at, 1, 10), ''), "
+                "nullif(substr(end_at, 1, 10), '')) <= ?"
+            )
+            params.append(date_to)
         selected_source_types = tuple(
             dict.fromkeys(
                 value
@@ -598,11 +648,12 @@ class RagStore:
             placeholders = ",".join("?" for _ in selected_source_types)
             conditions.append(f"source_type IN ({placeholders})")
             params.extend(selected_source_types)
-        term_conditions = []
-        for term in clean_terms:
-            term_conditions.append("instr(lower(body), lower(?)) > 0")
-            params.append(term)
-        conditions.append("(" + " OR ".join(term_conditions) + ")")
+        if clean_terms:
+            term_conditions = []
+            for term in clean_terms:
+                term_conditions.append("instr(lower(body), lower(?)) > 0")
+                params.append(term)
+            conditions.append("(" + " OR ".join(term_conditions) + ")")
         params.append(limit * 4)
         sql = (
             "SELECT * FROM documents WHERE " + " AND ".join(conditions)
