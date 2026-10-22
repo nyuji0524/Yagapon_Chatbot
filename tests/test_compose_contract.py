@@ -27,6 +27,9 @@ def test_bot_and_worker_receive_the_same_curation_policy():
         "YAGAPON_KNOWLEDGE_CURATION_RETRIES_PER_RUN",
         "YAGAPON_KNOWLEDGE_BACKFILL_STATE",
         "YAGAPON_KNOWLEDGE_PIPELINE_LOCK",
+        "YAGAPON_SCHEDULED_BACKFILL_ENABLED",
+        "YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS",
+        "YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS",
     }
 
     assert shared_policy <= set(bot_environment)

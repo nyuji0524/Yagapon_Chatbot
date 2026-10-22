@@ -16,6 +16,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 from bot.corpus import (
     backfill_channel_concurrency,
@@ -32,6 +33,10 @@ DEFAULT_INITIAL_DELAY_SECONDS = 5 * 60
 DEFAULT_RETRY_SECONDS = 15 * 60
 
 
+class ScheduledBackfillConfigurationError(ValueError):
+    """Raised when an immutable scheduler allowlist is malformed."""
+
+
 def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
     try:
         value = int(os.environ.get(name, str(default)))
@@ -41,33 +46,61 @@ def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
     return max(minimum, value)
 
 
-def configured_guild_ids() -> tuple[int, ...]:
-    """Return the explicit guild allowlist; an empty value disables all work."""
+def _configured_ids(name: str) -> tuple[int, ...]:
+    """Parse one immutable Discord-ID allowlist without accepting a subset."""
     result: list[int] = []
-    for raw in os.environ.get("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "").split(","):
+    invalid = False
+    for raw in os.environ.get(name, "").split(","):
         value = raw.strip()
-        if value.isdecimal() and int(value) > 0 and int(value) not in result:
-            result.append(int(value))
+        if not value:
+            continue
+        if not value.isdecimal() or int(value) <= 0:
+            invalid = True
+            continue
+        parsed = int(value)
+        if parsed not in result:
+            result.append(parsed)
+    if invalid:
+        raise ScheduledBackfillConfigurationError(
+            f"{name} must contain only positive decimal Discord IDs"
+        )
     return tuple(result)
 
 
+def configured_guild_ids() -> tuple[int, ...]:
+    """Return the exact explicit guild allowlist; malformed input is rejected."""
+    return _configured_ids("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS")
+
+
 def configured_channel_ids() -> frozenset[int]:
-    """Return the immutable channel/forum allowlist required by the scheduler."""
-    values = {
-        int(raw.strip())
-        for raw in os.environ.get("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "").split(",")
-        if raw.strip().isdecimal() and int(raw.strip()) > 0
-    }
-    return frozenset(values)
+    """Return the exact immutable channel/forum/thread allowlist."""
+    return frozenset(_configured_ids("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS"))
+
+
+def scheduler_requested() -> bool:
+    """Return whether the operator explicitly requested the scheduler."""
+    return (
+        os.environ.get("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false")
+        .strip()
+        .casefold()
+        == "true"
+    )
+
+
+def configured_inventory() -> tuple[tuple[int, ...], frozenset[int]]:
+    """Return the two validated immutable allowlists."""
+    return configured_guild_ids(), configured_channel_ids()
 
 
 def scheduler_enabled() -> bool:
-    return (
-        os.environ.get("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false").lower()
-        == "true"
-        and bool(configured_guild_ids())
-        and bool(configured_channel_ids())
-    )
+    if not scheduler_requested():
+        return False
+    try:
+        guild_ids, channel_ids = configured_inventory()
+    except ScheduledBackfillConfigurationError as exc:
+        log.error("Scheduled Discord backfill configuration is invalid: %s", exc)
+        return False
+    return bool(guild_ids) and bool(channel_ids)
 
 
 def next_backfill_delay(interval: int, retry_interval: int, result: dict | None) -> int:
@@ -181,8 +214,20 @@ class ScheduledBackfillManager:
         # is still being constructed. The HTTP server can become healthy
         # before Discord's on_ready event, so waiting until start() would let a
         # curation worker consume stale evidence during that startup window.
-        if scheduler_enabled():
-            self._write_waiting_checkpoint("bot-starting")
+        if scheduler_requested():
+            try:
+                guild_ids, channel_ids = configured_inventory()
+            except ScheduledBackfillConfigurationError:
+                self._write_configuration_error_checkpoint("invalid-allowlist")
+            else:
+                if not guild_ids or not channel_ids:
+                    self._write_configuration_error_checkpoint("missing-allowlist")
+                else:
+                    self._write_waiting_checkpoint(
+                        "bot-starting",
+                        guild_ids=guild_ids,
+                        channel_ids=channel_ids,
+                    )
 
     @property
     def running(self) -> bool:
@@ -198,16 +243,23 @@ class ScheduledBackfillManager:
         )
         return True
 
-    def _write_waiting_checkpoint(self, reason: str) -> None:
+    def _write_checkpoint(
+        self,
+        *,
+        status: str,
+        reason: str,
+        guild_ids: Iterable[int] = (),
+        channel_ids: Iterable[int] = (),
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        waiting = {
+        payload = {
             "schema_version": 1,
             "started_at": now,
             "completed_at": None,
-            "status": "waiting",
+            "status": status,
             "reason": reason,
-            "configured_guild_ids": [str(value) for value in configured_guild_ids()],
-            "configured_channel_ids": [str(value) for value in sorted(configured_channel_ids())],
+            "configured_guild_ids": [str(value) for value in guild_ids],
+            "configured_channel_ids": [str(value) for value in sorted(channel_ids)],
             "discovered_channel_ids": [],
             "eligible_channel_ids": [],
             "container_channel_ids": [],
@@ -215,7 +267,7 @@ class ScheduledBackfillManager:
             "guilds": {},
         }
         try:
-            _write_state(self.state_path, waiting)
+            _write_state(self.state_path, payload)
         except Exception:
             # If replacement itself fails, remove the exact checkpoint rather
             # than leaving a previous successful cycle available during boot.
@@ -224,6 +276,27 @@ class ScheduledBackfillManager:
             except OSError:
                 pass
             raise
+
+    def _write_waiting_checkpoint(
+        self,
+        reason: str,
+        *,
+        guild_ids: Iterable[int] | None = None,
+        channel_ids: Iterable[int] | None = None,
+    ) -> None:
+        if guild_ids is None or channel_ids is None:
+            configured_guilds, configured_channels = configured_inventory()
+            guild_ids = configured_guilds
+            channel_ids = configured_channels
+        self._write_checkpoint(
+            status="waiting",
+            reason=reason,
+            guild_ids=guild_ids,
+            channel_ids=channel_ids,
+        )
+
+    def _write_configuration_error_checkpoint(self, reason: str) -> None:
+        self._write_checkpoint(status="failed", reason=reason)
 
     async def stop(self) -> None:
         if self._task is None:
@@ -433,6 +506,12 @@ class ScheduledBackfillManager:
             forums_by_id = {
                 int(channel.id): channel for channel in forum_channels if getattr(channel, "id", None) is not None
             }
+            text_by_id = {
+                int(channel.id): channel
+                for channel in text_channels
+                if getattr(channel, "id", None) is not None
+            }
+            thread_parents_by_id = text_by_id | forums_by_id
             discovered_ids = {
                 int(channel.id)
                 for channel in [*text_channels, *forum_channels]
@@ -458,6 +537,10 @@ class ScheduledBackfillManager:
                     guild.me,
                 )
             }
+            readable_text_by_id = {
+                int(channel.id): channel for channel in readable_text
+            }
+            readable_thread_parents = readable_text_by_id | readable_forums
             channels_by_id = {
                 int(channel.id): channel
                 for channel in readable_text
@@ -470,8 +553,10 @@ class ScheduledBackfillManager:
             eligible_ids.update(readable_forums if not selected_ids else requested_forum_ids)
 
             undiscovered_selected_ids = selected_ids - discovered_ids
-            discover_threads = bool(readable_forums) and (
-                not selected_ids or bool(requested_forum_ids) or bool(undiscovered_selected_ids)
+            discover_threads = bool(readable_thread_parents) and (
+                (not selected_ids and bool(readable_forums))
+                or bool(requested_forum_ids)
+                or bool(undiscovered_selected_ids)
             )
             active_threads: list[object] = []
             if discover_threads:
@@ -508,12 +593,13 @@ class ScheduledBackfillManager:
                     return
                 thread_id = int(thread_id)
                 parent_id = int(getattr(parent, "id", 0) or 0)
-                if _private_thread(thread) and thread_id not in selected_ids:
+                private = _private_thread(thread)
+                if private and thread_id not in selected_ids:
                     # A bot with Administrator can enumerate private threads,
                     # but a parent forum ID must never authorize their import.
                     return
                 discovered_ids.add(thread_id)
-                if parent_id not in readable_forums:
+                if parent_id not in readable_thread_parents:
                     return
                 if not _readable_channel(
                     self.bot.config,
@@ -523,29 +609,42 @@ class ScheduledBackfillManager:
                     parent=parent,
                 ):
                     return
-                if selected_ids and thread_id not in selected_ids and parent_id not in selected_ids:
+                parent_expands_public_threads = (
+                    not private and parent_id in requested_forum_ids
+                )
+                if (
+                    selected_ids
+                    and thread_id not in selected_ids
+                    and not parent_expands_public_threads
+                ):
+                    return
+                if not selected_ids and parent_id not in readable_forums:
+                    # Preserve the legacy all-readable behavior for direct test
+                    # runs: only Forum parents expand implicitly. A TextChannel
+                    # never authorizes any child thread, especially a private one.
                     return
                 channels_by_id[thread_id] = thread
                 eligible_ids.add(thread_id)
 
             for thread in active_threads:
-                parent = _channel_parent(thread, forums_by_id)
+                parent = _channel_parent(thread, thread_parents_by_id)
                 if parent is not None:
                     admit_thread(thread, parent)
 
             undiscovered_selected_ids = selected_ids - discovered_ids
             if not selected_ids:
-                archive_forum_ids = set(readable_forums)
+                archive_parent_ids = set(readable_forums)
             else:
-                archive_forum_ids = set(requested_forum_ids)
+                archive_parent_ids = set(requested_forum_ids)
                 # An explicitly allowlisted archived thread cannot be resolved
-                # from Guild.active_threads(). Search readable forum parents,
-                # while still admitting only the exact requested thread ID.
+                # from Guild.active_threads(). Search every readable thread
+                # parent, including ordinary TextChannels, while still admitting
+                # only the exact requested thread ID.
                 if undiscovered_selected_ids:
-                    archive_forum_ids.update(readable_forums)
+                    archive_parent_ids.update(readable_thread_parents)
 
-            for forum_id in sorted(archive_forum_ids):
-                forum = readable_forums[forum_id]
+            for parent_id in sorted(archive_parent_ids):
+                parent_channel = readable_thread_parents[parent_id]
                 for private, joined, stage in (
                     (False, False, "archived-public-thread-discovery"),
                     (True, True, "archived-private-thread-discovery"),
@@ -556,7 +655,7 @@ class ScheduledBackfillManager:
                         continue
                     try:
                         archived = await _materialize_threads(
-                            forum.archived_threads(
+                            parent_channel.archived_threads(
                                 private=private,
                                 joined=joined,
                                 limit=None,
@@ -567,7 +666,7 @@ class ScheduledBackfillManager:
                     except Exception as exc:
                         summary["failures"].append(
                             {
-                                "channel_id": str(forum_id),
+                                "channel_id": str(parent_id),
                                 "stage": stage,
                                 "error_type": type(exc).__name__,
                             }
@@ -575,13 +674,13 @@ class ScheduledBackfillManager:
                         log.exception(
                             "Scheduled backfill could not list archived threads guild=%s forum=%s stage=%s",
                             guild_id,
-                            forum_id,
+                            parent_id,
                             stage,
                         )
                         continue
                     for thread in archived:
-                        parent = _channel_parent(thread, forums_by_id)
-                        if int(getattr(parent, "id", 0) or 0) != forum_id:
+                        parent = _channel_parent(thread, thread_parents_by_id)
+                        if int(getattr(parent, "id", 0) or 0) != parent_id:
                             continue
                         admit_thread(thread, parent)
 

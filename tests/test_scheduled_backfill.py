@@ -8,6 +8,7 @@ import pytest
 
 from bot.corpus import BackfillResult, BackfillSession
 from bot.scheduled_backfill import (
+    ScheduledBackfillConfigurationError,
     ScheduledBackfillManager,
     configured_guild_ids,
     next_backfill_delay,
@@ -191,6 +192,21 @@ def _forum_bot(
     return bot, archive_calls, prepared_target_ids
 
 
+def _text_thread_bot():
+    """Reuse the thread fixture with an ordinary TextChannel parent."""
+    bot, archive_calls, prepared_target_ids = _forum_bot()
+    guild = bot.get_guild(1)
+    parent = guild.forum_channels[0]
+    # The production type exposes both history() and archived_threads(). The
+    # callable history marker also prevents the old-Pycord forum fallback from
+    # treating this test double as a ForumChannel.
+    parent.history = Mock()
+    guild.text_channels = [parent]
+    guild.forum_channels = []
+    guild.channels = [parent]
+    return bot, archive_calls, prepared_target_ids
+
+
 def test_scheduler_requires_feature_gate_and_explicit_guild_and_channel_allowlists(monkeypatch):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.delenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", raising=False)
@@ -201,10 +217,47 @@ def test_scheduler_requires_feature_gate_and_explicit_guild_and_channel_allowlis
         "YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS",
         "1,invalid,2,1",
     )
-    assert scheduler_enabled() is False
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10,20")
+    with pytest.raises(ScheduledBackfillConfigurationError):
+        configured_guild_ids()
+    assert scheduler_enabled() is False
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1,2,1")
     assert configured_guild_ids() == (1, 2)
     assert scheduler_enabled() is True
+
+
+@pytest.mark.parametrize(
+    ("channel_ids", "reason"),
+    (("not-a-channel", "invalid-allowlist"), ("", "missing-allowlist")),
+)
+def test_requested_scheduler_invalidates_success_when_allowlist_is_invalid_or_empty(
+    tmp_path,
+    monkeypatch,
+    channel_ids,
+    reason,
+):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", channel_ids)
+    state_path = tmp_path / "scheduled.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = ScheduledBackfillManager(_bot(), state_path=state_path)
+
+    checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == "failed"
+    assert checkpoint["reason"] == reason
+    assert checkpoint["configured_channel_ids"] == []
+    assert manager.start() is False
 
 
 def test_backfill_retry_keeps_six_hour_success_cadence():
@@ -429,6 +482,42 @@ async def test_explicit_private_archived_thread_id_is_resolved_without_allowing_
         {"private": False, "joined": False, "limit": None, "before": None},
         {"private": True, "joined": True, "limit": None, "before": None},
     ]
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "expected_archive_calls"),
+    (
+        (47, []),
+        (
+            43,
+            [
+                {"private": False, "joined": False, "limit": None, "before": None},
+                {"private": True, "joined": True, "limit": None, "before": None},
+            ],
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_explicit_private_thread_under_text_channel_is_resolved(
+    tmp_path,
+    monkeypatch,
+    thread_id,
+    expected_archive_calls,
+):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", str(thread_id))
+    bot, archive_calls, prepared_target_ids = _text_thread_bot()
+
+    result = await ScheduledBackfillManager(
+        bot,
+        state_path=tmp_path / "scheduled.json",
+    ).run_once()
+
+    guild = result["guilds"]["1"]
+    assert result["status"] == "completed"
+    assert guild["completed_channel_ids"] == [str(thread_id)]
+    assert prepared_target_ids == [frozenset({thread_id})]
+    assert archive_calls == expected_archive_calls
 
 
 @pytest.mark.asyncio

@@ -83,8 +83,9 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 ## 定期更新と即時更新
 
 本番では、固定Guild/Channel IDのallowlistに含めたDiscord原文を差分取得し、その完了checkpointを
-確認してから議題別Knowledge整理を行う。どちらも6時間周期とし、失敗またはcheckpoint未完了時だけ
-15分後に再試行する。自動整理が生成するものは確認待ちDraft PRであり、自動マージしない。
+確認してから議題別Knowledge整理を行う。どちらも6時間周期とし、失敗またはcheckpoint未完了時は
+15分以内の短周期pollへ切り替える。配送再送はSQLiteの`next_attempt_at`（決定的jitterを含む）まで
+短周期pollを続ける。自動整理が生成するものは確認待ちDraft PRであり、自動マージしない。
 
 サーバー管理者は、同じ経路をDiscordから即時実行できる。
 
@@ -99,8 +100,10 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
   二重実行を防ぐ。
 - コマンドは即時に受付を返し、長時間処理の結果を実行チャンネルへEmbedで通知する。
 - 対象Guild/Channelはコマンド引数で変更できない。環境変数のimmutable ID allowlistだけを使う。
-- 定期取得はGuild IDとChannel IDの両方が空でない場合だけ有効になる。Forum親IDを許可すると
-  publicなactive/archived投稿を展開するが、private threadはそのthread ID自体を明示した場合だけ扱う。
+- 定期取得を`true`にする場合、Guild IDとChannel IDは正の10進Discord IDだけで構成し、両方を
+  空でなく設定する。1件でも不正なら旧checkpointを失敗状態へ同期更新して整理を止める。Forum親IDを
+  許可するとpublicなactive/archived投稿を展開するが、private threadはForum/Text親を問わず
+  そのthread ID自体を明示した場合だけ扱う。
 - `YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`はKnowledge外部化の別allowlistである。Forum親の許可を
   private投稿へ暗黙継承しないため、整理対象にする投稿は取得後にthread IDを明示して追加する。
 
@@ -200,7 +203,9 @@ YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
 指定時刻以内に完了したschema v1のcheckpointについて、対象guildがすべて`status=completed`、
 `failures=[]`、`channels_completed == channels_total`の場合だけ整理を開始する。ファイル欠落、古い時刻、
 `failed`、`deferred`、`interrupted`、一部チャンネル失敗はいずれもfail closedとなり、古いコーパスから
-新しい草案を生成しない。
+新しい草案を生成しない。workerへscheduler設定が渡されている場合はschedulerが有効で、かつ
+checkpoint内のGuild/Channel inventoryが現設定と完全一致することも必須とする。schedulerの無効化や
+設定変更前の成功checkpointは再利用しない。
 
 個人用の`gh`認証やPATを本番VMへコピーしない。キューobjectは機密検査済みの候補だけを含み、
 パイプライン処理後に`processed/`へ移動する。Draft PRは人が確認するまでマージしない。

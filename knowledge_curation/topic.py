@@ -709,6 +709,20 @@ class TopicStateStore:
             ).fetchall()
         return [record for row in rows if (record := self._topic_from_row(row)) is not None]
 
+    def retryable_schedule(self) -> tuple[int, str | None]:
+        """Return retryable bundle count and its earliest durable retry time."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT count(*) AS count,
+                          min(coalesce(next_attempt_at, '')) AS next_attempt_at
+                   FROM topics
+                   WHERE delivery_status IN ('pending','failed')
+                     AND bundle_id IS NOT NULL AND blocked=0"""
+            ).fetchone()
+        count = int(row["count"])
+        next_attempt_at = str(row["next_attempt_at"] or "") or None
+        return count, next_attempt_at
+
     def count_open_bundles(self) -> int:
         with self._connect() as connection:
             row = connection.execute(

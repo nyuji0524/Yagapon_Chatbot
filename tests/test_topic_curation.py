@@ -72,7 +72,8 @@ def test_curation_digest_changes_when_discord_lineage_changes():
     assert curation._digest(document | {"category_name": "選考"}) != original
 
 
-def test_watch_delay_retries_checkpoint_handoff_but_keeps_six_hour_cadence():
+def test_watch_delay_retries_failed_work_and_durable_delivery_schedule():
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
     assert curation.next_watch_delay(
         21_600,
         900,
@@ -88,6 +89,44 @@ def test_watch_delay_retries_checkpoint_handoff_but_keeps_six_hour_cadence():
         900,
         None,
         cycle_failed=True,
+    ) == 900
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        {"enabled": True, "checkpoint_ready": True, "failed": 1},
+    ) == 900
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "retryable": 1,
+            "next_retry_at": (now + timedelta(seconds=120)).isoformat(),
+        },
+        now=now,
+    ) == 120
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "retryable": 1,
+            "next_retry_at": (now + timedelta(microseconds=700_000)).isoformat(),
+        },
+        now=now,
+    ) == 1
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "retryable": 1,
+            "next_retry_at": (now + timedelta(seconds=1_200)).isoformat(),
+        },
+        now=now,
     ) == 900
 
 
@@ -286,6 +325,9 @@ def test_pending_delivery_remains_dirty_and_retries_with_backoff(tmp_path, monke
     assert pending.dirty is True
     assert pending.attempts == 1
     assert store.due_retries(now=now) == []
+    retryable, next_retry_at = store.retryable_schedule()
+    assert retryable == 1
+    assert next_retry_at == pending.next_attempt_at
     due = store.due_retries(now=now + timedelta(hours=1))
     assert [item.topic_id for item in due] == [identity.topic_id]
 
@@ -630,6 +672,50 @@ def test_backfill_checkpoint_gate_allows_unset_or_fresh_complete_state(tmp_path,
     assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
 
 
+def test_backfill_checkpoint_must_match_current_scheduler_inventory(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(checkpoint_payload(now)), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "123")
+    monkeypatch.setenv(
+        "YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS",
+        "10,20,30,40",
+    )
+
+    assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
+
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false")
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-invalid-current-configuration",
+    )
+
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10")
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-channel-configuration-changed",
+    )
+
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "not-a-channel")
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-invalid-current-configuration",
+    )
+
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-invalid-current-configuration",
+    )
+
+
 def test_backfill_checkpoint_accepts_forum_parent_container_plus_completed_threads(
     tmp_path,
     monkeypatch,
@@ -856,11 +942,15 @@ async def test_curate_once_keeps_pending_topic_retryable_without_regeneration(tm
 
     assert first["processed"] == 1
     assert first["open_bundles"] == 1
+    assert first["retryable"] == 1
+    assert first["next_retry_at"]
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_MAX_OPEN_BUNDLES", "1")
     second = await curation.curate_once(state_path=state, limit=3)
 
     assert second["processed"] == 0
     assert second["backpressured"] == 1
+    assert second["retryable"] == 1
+    assert second["next_retry_at"] == first["next_retry_at"]
     assert draft_mock.await_count == 1
     assert publish_mock.await_count == 1
 

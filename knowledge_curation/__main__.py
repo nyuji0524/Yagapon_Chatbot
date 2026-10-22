@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -26,6 +27,11 @@ from bot.knowledge_pipeline import knowledge_pipeline_lock
 from bot.knowledge_policy import knowledge_guild_allowed
 from bot.knowledge_publish import JST, publish_knowledge_bundle, retry_knowledge_delivery
 from bot.rag_store import RagStore
+from bot.scheduled_backfill import (
+    ScheduledBackfillConfigurationError,
+    configured_inventory,
+    scheduler_requested,
+)
 from knowledge_curation.topic import (
     AccessDecision,
     EvidenceItem,
@@ -419,13 +425,63 @@ def next_watch_delay(
     result: dict | None,
     *,
     cycle_failed: bool = False,
+    now: datetime | None = None,
 ) -> int:
     """Use the configured cadence after success and a bounded handoff retry."""
     if cycle_failed:
         return min(watch_interval, retry_interval)
     if result and result.get("enabled") and not result.get("checkpoint_ready", True):
         return min(watch_interval, retry_interval)
+    if result and int(result.get("failed") or 0) > 0:
+        return min(watch_interval, retry_interval)
+    if result and int(result.get("retryable") or 0) > 0:
+        next_retry_raw = result.get("next_retry_at")
+        if isinstance(next_retry_raw, str) and next_retry_raw:
+            try:
+                next_retry_at = datetime.fromisoformat(
+                    next_retry_raw.replace("Z", "+00:00")
+                )
+            except ValueError:
+                next_retry_at = None
+            if next_retry_at is not None and next_retry_at.tzinfo is not None:
+                current = now or datetime.now(timezone.utc)
+                if current.tzinfo is None:
+                    current = current.replace(tzinfo=timezone.utc)
+                seconds_until_retry = math.ceil(
+                    (next_retry_at.astimezone(timezone.utc) - current.astimezone(timezone.utc)).total_seconds()
+                )
+                if seconds_until_retry > 0:
+                    return min(watch_interval, retry_interval, seconds_until_retry)
+        return min(watch_interval, retry_interval)
     return watch_interval
+
+
+def _current_backfill_inventory() -> tuple[set[str], set[str]] | None:
+    """Return the configured producer inventory when one is present.
+
+    A standalone curator may intentionally consume an externally produced
+    checkpoint without receiving scheduler environment variables. Once this
+    deployment supplies scheduler configuration, however, scheduling must be
+    enabled and the checkpoint must describe that exact immutable inventory.
+    """
+    guilds_raw = os.environ.get("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "").strip()
+    channels_raw = os.environ.get("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "").strip()
+    scheduler_configured = "YAGAPON_SCHEDULED_BACKFILL_ENABLED" in os.environ
+    if not scheduler_configured and not guilds_raw and not channels_raw:
+        return None
+    if not scheduler_requested():
+        raise ScheduledBackfillConfigurationError(
+            "scheduled backfill is disabled for this checkpoint consumer"
+        )
+    guild_ids, channel_ids = configured_inventory()
+    if not guild_ids or not channel_ids:
+        raise ScheduledBackfillConfigurationError(
+            "scheduled backfill requires non-empty guild and channel allowlists"
+        )
+    return (
+        {str(value) for value in guild_ids},
+        {str(value) for value in channel_ids},
+    )
 
 
 def backfill_checkpoint_status(
@@ -442,6 +498,10 @@ def backfill_checkpoint_status(
     configured = os.environ.get("YAGAPON_KNOWLEDGE_BACKFILL_STATE", "").strip()
     if not configured:
         return True, "not-configured"
+    try:
+        current_inventory = _current_backfill_inventory()
+    except ScheduledBackfillConfigurationError:
+        return False, "checkpoint-invalid-current-configuration"
     try:
         payload = json.loads(Path(configured).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -490,6 +550,8 @@ def backfill_checkpoint_status(
         str(key) for key in guilds
     }:
         return False, "checkpoint-invalid-guild-inventory"
+    if current_inventory is not None and set(configured_guilds) != current_inventory[0]:
+        return False, "checkpoint-guild-configuration-changed"
     required_guilds = {
         value.strip()
         for value in os.environ.get("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "").split(",")
@@ -506,6 +568,8 @@ def backfill_checkpoint_status(
     missing_ids = payload.get("missing_channel_ids")
     if not all(isinstance(value, list) for value in (configured_ids, discovered_ids, eligible_ids, missing_ids)):
         return False, "checkpoint-missing-channel-inventory"
+    if current_inventory is not None and set(configured_ids) != current_inventory[1]:
+        return False, "checkpoint-channel-configuration-changed"
     if missing_ids:
         return False, "checkpoint-missing-configured-channels"
     if set(configured_ids) - set(eligible_ids):
@@ -1127,6 +1191,14 @@ def build_topic_bundle(
     return bundle_id, root, files, manifest, branch, title, body
 
 
+def _retry_schedule_result(ledger: TopicStateStore) -> dict[str, int | str | None]:
+    retryable, next_retry_at = ledger.retryable_schedule()
+    return {
+        "retryable": retryable,
+        "next_retry_at": next_retry_at,
+    }
+
+
 async def curate_once(*, state_path: Path, limit: int) -> dict:
     if os.environ.get("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "false").lower() != "true":
         return {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}
@@ -1232,6 +1304,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             "retry_succeeded": retry_succeeded,
             "reconciled": reconciled,
             "open_bundles": open_bundles,
+            **_retry_schedule_result(ledger),
         }
     if open_bundles >= max_open_bundles:
         return {
@@ -1251,6 +1324,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             "retry_succeeded": retry_succeeded,
             "reconciled": reconciled,
             "open_bundles": open_bundles,
+            **_retry_schedule_result(ledger),
         }
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     processed = queued = skipped = failed = backpressured = blocked_access = model_calls = 0
@@ -1464,6 +1538,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
         "retry_succeeded": retry_succeeded,
         "reconciled": reconciled,
         "open_bundles": ledger.count_open_bundles(),
+        **_retry_schedule_result(ledger),
     }
 
 
