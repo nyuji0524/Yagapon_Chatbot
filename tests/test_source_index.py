@@ -697,6 +697,42 @@ def test_github_app_rejects_unnecessary_read_permission(monkeypatch):
         provider()
 
 
+def test_github_app_rejects_repository_outside_requested_scope(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(
+                {
+                    "token": "installation-token",
+                    "expires_at": "2030-01-01T00:00:00Z",
+                    "permissions": {"contents": "read", "metadata": "read"},
+                    "repositories": [
+                        {"name": "yaga_support"},
+                        {"name": "Unrequested_Private_Repository"},
+                    ],
+                }
+            ).encode()
+
+    monkeypatch.setattr("source_index.github_auth.jwt.encode", lambda *_a, **_kw: "app.jwt")
+    provider = GitHubAppTokenProvider(
+        app_id="123",
+        installation_id="456",
+        private_key="-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----",
+        repositories=("Yaga_Support",),
+        clock=lambda: 1_700_000_000,
+        opener=lambda *_args, **_kwargs: Response(),
+    )
+
+    with pytest.raises(RuntimeError, match="outside the configured restriction") as exc_info:
+        provider()
+    assert "Unrequested_Private_Repository" not in str(exc_info.value)
+
+
 def test_github_app_router_is_anonymous_for_public_repository(monkeypatch):
     repositories = [
         Repository("public/repo", "main", ("src/",)),

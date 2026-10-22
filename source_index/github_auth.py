@@ -157,14 +157,20 @@ class GitHubAppTokenProvider:
                 "GitHub App installation has permissions beyond contents:read "
                 "and metadata:read; refuse to index"
             )
-        missing = {
-            name
-            for name in self.repositories
-            if name.casefold() not in returned_repositories
-        }
+        requested_repositories = {name.casefold() for name in self.repositories}
+        missing = requested_repositories - returned_repositories
         if missing:
+            missing_names = {
+                name for name in self.repositories if name.casefold() in missing
+            }
             raise RuntimeError(
                 "GitHub App installation token does not include configured repositories: "
-                + ", ".join(sorted(missing))
+                + ", ".join(sorted(missing_names))
+            )
+        unexpected = returned_repositories - requested_repositories
+        if unexpected:
+            raise RuntimeError(
+                "GitHub App installation token includes repositories outside the "
+                "configured restriction; refuse to index"
             )
         return token, expires_at
