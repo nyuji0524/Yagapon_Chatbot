@@ -419,7 +419,9 @@ def test_public_discord_document_records_trusted_auto_promotion(corpus_manager):
 
 
 @pytest.mark.asyncio
-async def test_backfilled_public_history_never_auto_promotes(corpus_manager):
+async def test_backfilled_public_history_does_not_auto_promote_by_default(
+    corpus_manager,
+):
     default_role = SimpleNamespace(id=1)
     channel = FakeChannel([fake_message(1), fake_message(2, 1)])
     channel.guild = SimpleNamespace(id=1, default_role=default_role)
@@ -437,6 +439,83 @@ async def test_backfilled_public_history_never_auto_promotes(corpus_manager):
         for item in corpus_manager._upload_document.await_args.args[3]
     }
     assert metadata["auto_promote"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_explicitly_authorized_public_history_auto_promotes(corpus_manager):
+    default_role = SimpleNamespace(id=1)
+    channel = FakeChannel([fake_message(1), fake_message(2, 1)])
+    channel.guild = SimpleNamespace(id=1, default_role=default_role)
+    channel.permissions_for = lambda role: SimpleNamespace(
+        view_channel=role is default_role,
+        read_message_history=role is default_role,
+    )
+    corpus_manager._existing_channel_documents = AsyncMock(return_value=[])
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+
+    await corpus_manager.backfill_channel(
+        channel,
+        "fileSearchStores/test",
+        full_history=True,
+        authorize_history_promotion=True,
+    )
+
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in corpus_manager._upload_document.await_args.args[3]
+    }
+    assert metadata["auto_promote"] == "true"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("category_name", "default_role_can_read"),
+    (("IT局", False), ("選考会議", True)),
+)
+async def test_explicit_history_authorization_still_rejects_private_or_protected_channels(
+    corpus_manager,
+    monkeypatch,
+    category_name,
+    default_role_can_read,
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
+    default_role = SimpleNamespace(id=1)
+    channel = FakeChannel([fake_message(1), fake_message(2, 1)])
+    channel.guild = SimpleNamespace(id=1, default_role=default_role)
+    channel.category = SimpleNamespace(id=90, name=category_name)
+    channel.permissions_for = lambda role: SimpleNamespace(
+        view_channel=default_role_can_read and role is default_role,
+        read_message_history=default_role_can_read and role is default_role,
+    )
+    corpus_manager._existing_channel_documents = AsyncMock(return_value=[])
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+
+    await corpus_manager.backfill_channel(
+        channel,
+        "fileSearchStores/test",
+        full_history=True,
+        authorize_history_promotion=True,
+    )
+
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in corpus_manager._upload_document.await_args.args[3]
+    }
+    assert metadata["auto_promote"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_history_promotion_authority_requires_full_history(corpus_manager):
+    corpus_manager._existing_channel_documents = AsyncMock()
+
+    with pytest.raises(ValueError, match="requires full_history=True"):
+        await corpus_manager.backfill_channel(
+            FakeChannel([]),
+            "fileSearchStores/test",
+            authorize_history_promotion=True,
+        )
+
+    corpus_manager._existing_channel_documents.assert_not_awaited()
 
 
 @pytest.mark.asyncio

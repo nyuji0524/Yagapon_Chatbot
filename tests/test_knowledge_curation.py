@@ -6,6 +6,7 @@ import yaml
 from bot.rag_store import RagStore
 from knowledge_curation.__main__ import (
     DecisionDraft,
+    KnowledgeCurationConfigurationError,
     build_bundle,
     classify_bureau,
     curate_once,
@@ -181,6 +182,14 @@ def test_autonomous_curation_accepts_trusted_auto_promote_metadata(monkeypatch, 
     }
 
     assert curation_document_allowed(document) is True
+    assert curation_document_allowed(
+        document,
+        current_public_channel_ids={456},
+    ) is True
+    assert curation_document_allowed(
+        document,
+        current_public_channel_ids=set(),
+    ) is False
     assert curation_document_allowed({**document, "channel_id": 0}) is False
     assert curation_document_allowed({**document, "guild_id": 999}) is False
     assert curation_document_allowed({**document, "access_scope": "restricted"}) is False
@@ -227,12 +236,16 @@ async def test_curate_once_excludes_unapproved_channel_source(tmp_path, monkeypa
 
     result = await curate_once(state_path=tmp_path / "state.sqlite3", limit=3)
 
+    assert result["source"] == 1
     assert result["eligible"] == 0
     assert result["policy_excluded"] == 1
+    assert result["actionable"] == 0
     assert result["processed"] == 0
+    assert result["open_bundles"] == 0
+    assert result["max_open_bundles"] == 5
 
 
-def test_autonomous_curation_accepts_only_explicit_channel_ids(monkeypatch):
+def test_autonomous_curation_rejects_mixed_invalid_channel_ids(monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "456,invalid")
     document = {
@@ -241,10 +254,8 @@ def test_autonomous_curation_accepts_only_explicit_channel_ids(monkeypatch):
         "access_scope": "channel",
     }
 
-    assert curation_document_allowed(document) is True
-    assert curation_document_allowed({**document, "channel_id": 457}) is False
-    assert curation_document_allowed({**document, "guild_id": 999}) is False
-    assert curation_document_allowed({**document, "access_scope": "restricted"}) is False
+    with pytest.raises(KnowledgeCurationConfigurationError):
+        curation_document_allowed(document)
 
 
 def test_explicit_channel_subset_does_not_expand_from_auto_promote(monkeypatch):
