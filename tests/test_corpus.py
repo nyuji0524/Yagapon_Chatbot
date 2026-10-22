@@ -1345,6 +1345,17 @@ def test_generated_answer_blocks_common_bare_and_assigned_token_formats(answer):
     assert generated_answer_is_sensitive("設定について教えて", answer)
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "API\u034fKEY: supersecret123",
+        "連絡先は private\u034f@example.com だぽん。",
+    ],
+)
+def test_generated_answer_invisible_characters_cannot_hide_sensitive_values(answer):
+    assert generated_answer_is_sensitive("設定について教えて", answer)
+
+
 def test_generated_answer_allows_only_exact_allowlisted_public_contacts(monkeypatch):
     monkeypatch.setenv(
         "YAGAPON_RAG_PUBLIC_CONTACT_ALLOWLIST",
@@ -2413,6 +2424,18 @@ def test_citation_safety_allows_normal_project_urls(url):
     ),
 )
 def test_citation_safety_rejects_credentials_jwt_and_private_contacts(label, url):
+    assert not citation_reference_is_safe(label, url)
+
+
+@pytest.mark.parametrize(
+    ("label", "url"),
+    [
+        ("private\u034f@example.com", "https://example.com/reference"),
+        ("API\u034fKEY: supersecret123", "https://example.com/reference"),
+        ("履歴", "https://example.com/reference?api\u034f_key=secret"),
+    ],
+)
+def test_citation_safety_rejects_invisible_character_obfuscation(label, url):
     assert not citation_reference_is_safe(label, url)
 
 

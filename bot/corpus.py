@@ -595,6 +595,7 @@ def _looks_like_non_placeholder_secret(value: str) -> bool:
 
 def generated_answer_is_sensitive(question: str, answer: str) -> bool:
     """Fail closed if generation appears to disclose credentials or private PII."""
+    answer_variants = _security_text_variants(answer)
     opaque_secret_patterns = (
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
@@ -605,19 +606,31 @@ def generated_answer_is_sensitive(question: str, answer: str) -> bool:
         r"\bAIza[0-9A-Za-z_-]{20,}\b",
         r"\bAKIA[0-9A-Z]{16}\b",
     )
-    if any(re.search(pattern, answer) for pattern in opaque_secret_patterns):
+    if any(
+        re.search(pattern, candidate)
+        for candidate in answer_variants
+        for pattern in opaque_secret_patterns
+    ):
         return True
-    assignments = re.finditer(
-        r"(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)\b|"
+    assignment_pattern = re.compile(
+        r"(?:\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)\b|"
         r"\b[A-Z][A-Z0-9_]{1,63}(?:TOKEN|SECRET|PASSWORD|KEY)\b)"
         r"\s*[:=]\s*[`\"']?([^\s`\"']{8,})",
-        answer,
+        re.IGNORECASE,
     )
-    if any(_looks_like_non_placeholder_secret(match.group(1)) for match in assignments):
+    if any(
+        _looks_like_non_placeholder_secret(match.group(1))
+        for candidate in answer_variants
+        for match in assignment_pattern.finditer(candidate)
+    ):
         return True
 
-    contacts = [match.group(0).casefold() for match in _CONTACT_EMAIL.finditer(answer)]
-    contacts.extend(match.group(0).casefold() for match in _CONTACT_PHONE.finditer(answer))
+    contacts = {
+        match.group(0).casefold()
+        for candidate in answer_variants
+        for pattern in (_CONTACT_EMAIL, _CONTACT_PHONE)
+        for match in pattern.finditer(candidate)
+    }
     if contacts:
         policy = _sensitive_request_policy(question)
         allowed = _public_contact_allowlist()
@@ -679,19 +692,34 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     source_url = str(source_url or "")
     if any(character in label or character in source_url for character in ("\x00", "\r", "\n")):
         return False
-    material = unquote(f"{label}\n{source_url}")
-    if material.count("\n") != 1 or "\r" in material or "\x00" in material:
+    normalized_url = unicodedata.normalize("NFKC", source_url)
+    if any(unicodedata.category(character)[0] in {"C", "M"} for character in normalized_url):
         return False
-    if re.search(r"(?<!\\)\]\s*\(\s*<?https?://", label, re.IGNORECASE):
+    label_variants = _security_text_variants(label)
+    materials = [unquote(f"{candidate}\n{normalized_url}") for candidate in label_variants]
+    if any(
+        re.search(r"(?<!\\)\]\s*\(\s*<?https?://", candidate, re.IGNORECASE)
+        for candidate in label_variants
+    ):
         return False
-    if any(re.search(pattern, material) for pattern in _CITATION_OPAQUE_SECRET_PATTERNS):
+    if any(
+        re.search(pattern, material)
+        for material in materials
+        for pattern in _CITATION_OPAQUE_SECRET_PATTERNS
+    ):
         return False
-    if _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material):
+    if any(
+        _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material)
+        for material in materials
+    ):
         return False
-    if re.search(
-        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
-        r"\s*[:=]\s*[^\s]{8,}",
-        material,
+    if any(
+        re.search(
+            r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
+            r"\s*[:=]\s*[^\s]{8,}",
+            material,
+        )
+        for material in materials
     ):
         return False
     if not source_url:
@@ -699,7 +727,7 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     if re.search(r"[\s\x00-\x1f\x7f<>\[\]()\\`\"']", source_url):
         return False
     try:
-        parsed = urlsplit(source_url)
+        parsed = urlsplit(normalized_url)
     except ValueError:
         return False
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:

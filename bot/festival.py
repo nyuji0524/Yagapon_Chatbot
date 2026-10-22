@@ -65,6 +65,18 @@ def festival_from_query(query: str, now: datetime | None = None) -> int | None:
     if match:
         return int(match.group(1))
 
+    try:
+        for explicit_date in _EXPLICIT_DATE_PATTERN.finditer(normalized):
+            date(
+                int(explicit_date.group(1)),
+                int(explicit_date.group(2)),
+                int(explicit_date.group(3)),
+            )
+    except ValueError:
+        # An invalid explicit date must not leave only a broad festival filter;
+        # doing so would silently answer a different, year-wide question.
+        return None
+
     dated_matches = list(
         re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?(?!\d)", normalized)
     )

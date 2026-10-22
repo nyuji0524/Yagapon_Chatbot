@@ -74,6 +74,7 @@ def test_invalid_calendar_date_does_not_create_a_filter():
 def test_invalid_day_is_not_partially_matched(query):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
 
+    assert festival_from_query(query, now) is None
     assert calendar_date_from_query(query, now) is None
     assert calendar_window_from_query(query, now) is None
 
