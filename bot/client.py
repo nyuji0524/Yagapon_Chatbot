@@ -1,6 +1,7 @@
 """YagaPon Discord Client - メイン処理 (pycord)"""
 
 import asyncio
+import io
 import logging
 import re
 
@@ -845,9 +846,26 @@ class YagaPon(discord.Bot):
             # channel-scoped evidence. Voice mode has its own in-session TTS.
 
     async def send_split_message(self, destination, text: str):
-        """コードブロックを考慮してDiscordの文字数制限内で分割送信。"""
+        """Send short answers inline and preserve long answers as one Markdown file."""
+        chunks = _split_discord_text(text)
+        if len(chunks) > 4:
+            attachment_text = text
+            if text.endswith(RAG_FEEDBACK_PROMPT):
+                attachment_text = text[: -len(RAG_FEEDBACK_PROMPT)]
+                if attachment_text.endswith("\n\n"):
+                    attachment_text = attachment_text[:-2]
+            message = await destination.send(
+                "回答が長いため、全文をMarkdownファイルにまとめたぽん。"
+                f"\n\n{RAG_FEEDBACK_PROMPT}",
+                file=discord.File(
+                    io.BytesIO(attachment_text.encode("utf-8")),
+                    filename="yagapon-answer.md",
+                ),
+                silent=True,
+            )
+            return [message]
         sent_messages = []
-        for chunk in _split_discord_text(text):
+        for chunk in chunks:
             sent_messages.append(await destination.send(chunk, silent=True))
         return sent_messages
 

@@ -8,11 +8,14 @@ import pytest
 
 from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
+    AnswerStatus,
     CorpusManager,
     answer_declares_missing_knowledge,
     backfill_channel_concurrency,
     calculate_incremental_after,
     calculate_resumable_incremental_after,
+    generated_answer_is_sensitive,
+    parse_model_answer,
     requires_comprehensive_answer,
     retrieval_metadata_filter,
     run_backfill_channels,
@@ -440,10 +443,33 @@ def test_answer_declares_missing_knowledge_checks_the_entire_answer():
 def test_answer_declares_missing_knowledge_keeps_supported_sibling_sections():
     answer = (
         "## 権限\n整理券管理者が全体管理できるぽん。\n\n"
-        "## 過去の障害\nこの項目を裏付ける記録は確認できなかったぽん。"
+        "## 過去の障害\nこの項目を裏付ける記録は確認できなかったぽん。\n"
+        "[[YAGAPON_ANSWER_STATUS:partial]]"
     )
 
     assert answer_declares_missing_knowledge(answer) is False
+
+
+def test_answer_status_only_uses_exact_trailing_control_line():
+    quoted = "資料には [[YAGAPON_ANSWER_STATUS:no_evidence]] と書かれているぽん。"
+    assert parse_model_answer(quoted).status is AnswerStatus.COMPLETE
+
+    parsed = parse_model_answer(
+        "根拠付き回答だぽん。\n"
+        "[[YAGAPON_EVIDENCE_KEYS:exact:key-a,key-b]]\n"
+        "[[YAGAPON_ANSWER_STATUS:partial]]"
+    )
+    assert parsed.status is AnswerStatus.PARTIAL
+    assert parsed.text == "根拠付き回答だぽん。"
+    assert parsed.evidence_keys == ("exact:key-a", "key-b")
+
+
+def test_all_missing_headed_legacy_answer_is_not_treated_as_supported():
+    answer = (
+        "## 権限\n記録は確認できませんでした。\n\n"
+        "## 障害\n情報は見当たりませんでした。"
+    )
+    assert answer_declares_missing_knowledge(answer) is True
 
 
 @pytest.mark.parametrize(
@@ -452,6 +478,8 @@ def test_answer_declares_missing_knowledge_keeps_supported_sibling_sections():
         "整理券の権限、データ構造、運用上の問題点を詳しく教えてください",
         "1. 権限\n2. データ構造",
         "権限は誰にありますか？過去に何が問題になりましたか？",
+        "10/9の会議内容では、IT局に関するフィードバックや指摘は何が出た？",
+        "権限を教えて\n過去の障害も教えて",
         "長い質問 " + "詳細 " * 50,
     ],
 )
@@ -502,6 +530,25 @@ def test_sensitive_request_response_allows_safe_howto_and_public_contact(questio
     assert sensitive_request_response(question) is None
 
 
+def test_generated_answer_secret_and_private_contact_scan_fails_closed():
+    assert generated_answer_is_sensitive(
+        "設定を説明して",
+        'api_key = "abcdefghijklmnopqrstuvwx"',
+    )
+    assert generated_answer_is_sensitive(
+        "担当者について教えて",
+        "連絡先は private.person@example.com だぽん。",
+    )
+    assert not generated_answer_is_sensitive(
+        "公式窓口メールアドレスを教えて",
+        "公式窓口は info@example.com だぽん。",
+    )
+    assert not generated_answer_is_sensitive(
+        "APIキーの管理方法を教えて",
+        "APIキーはSecret Managerで管理するぽん。",
+    )
+
+
 def test_committee_member_contact_remains_private_even_though_committee_contact_is_allowed():
     assert sensitive_request_response("矢上祭実行委員のメールアドレスは何ですか？") is not None
 
@@ -520,6 +567,47 @@ async def test_sensitive_query_is_blocked_before_model_or_search(corpus_manager)
     assert result.citations == ()
     assert "回答できない" in result.text
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generated_secret_is_blocked_after_grounded_model_response(corpus_manager):
+    context = SimpleNamespace(
+        title="設定資料",
+        uri="https://knowledge.example/settings",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "設定資料"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                'api_key = "abcdefghijklmnopqrstuvwx"\n'
+                "[[YAGAPON_ANSWER_STATUS:complete]]"
+            ),
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(
+                    finish_reason="STOP",
+                    grounding_metadata=SimpleNamespace(
+                        grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                        grounding_supports=[SimpleNamespace(grounding_chunk_indices=[0])],
+                    ),
+                )
+            ],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "設定資料の概要を説明して",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert result.citations == ()
+    assert "abcdefghijklmnopqrstuvwx" not in result.text
+    assert "回答を停止" in result.text
 
 
 @pytest.mark.asyncio
@@ -592,7 +680,9 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
         text=(
             "## 権限\n整理券管理者が全体管理を行うぽん。\n\n"
             "## 運用上の問題\n確認できた問題を整理したぽん。\n\n"
-            "## 未確認事項\n一部の時期については記録を確認できなかったぽん。"
+            "## 未確認事項\n一部の時期については記録を確認できなかったぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:knowledge:standby-pass]]\n"
+            "[[YAGAPON_ANSWER_STATUS:partial]]"
         ),
         usage_metadata=None,
         candidates=[
@@ -616,10 +706,135 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
     assert "## 運用上の問題" in result.text
     assert len(result.citations) == 8
     call = corpus_manager._client.aio.models.generate_content.await_args
-    assert call.kwargs["config"].max_output_tokens == 8192
+    assert call.kwargs["config"].max_output_tokens == 6144
     assert call.kwargs["config"].tools[0].file_search.top_k == 20
     assert "短さより完全性" in call.kwargs["config"].system_instruction
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["limit"] == 32
+
+
+@pytest.mark.asyncio
+async def test_compound_current_and_history_query_uses_separate_authority_filters(corpus_manager):
+    corpus_manager.rag_store.query_terms = Mock(return_value=["新歓Web"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager.rag_store.record_query = Mock(return_value="query-compound")
+
+    def response(text, *, authority, source_type, status, url):
+        context = SimpleNamespace(
+            title=source_type,
+            uri=url,
+            custom_metadata=[
+                {"key": "channel_name", "string_value": "YagamiFes-IT/Web:src/recruit.tsx"},
+                {"key": "authority", "string_value": authority},
+                {"key": "status", "string_value": status},
+                {"key": "source_type", "string_value": source_type},
+                {"key": "access_scope", "string_value": "guild"},
+                {"key": "festival", "numeric_value": 28},
+                {"key": "source_url", "string_value": url},
+            ],
+        )
+        return SimpleNamespace(
+            text=f"{text}\n[[YAGAPON_ANSWER_STATUS:complete]]",
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(
+                    finish_reason="STOP",
+                    grounding_metadata=SimpleNamespace(
+                        grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                        grounding_supports=[SimpleNamespace(grounding_chunk_indices=[0])],
+                    ),
+                )
+            ],
+        )
+
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[
+            response(
+                "現在はApp Routerで実装されているぽん。",
+                authority="repository_context",
+                source_type="source_code",
+                status="current",
+                url="https://github.example/blob/current",
+            ),
+            response(
+                "2025年4月のcommitで導入されたぽん。",
+                authority="repository_history",
+                source_type="source_code_history",
+                status="historical",
+                url="https://github.example/commit/history",
+            ),
+        ]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "新歓Webの現在の実装と、これまでの変更経緯を詳しく教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "## 現在の状態・実装" in result.text
+    assert "## 経緯・過去の記録" in result.text
+    assert "現在はApp Router" in result.text
+    assert "2025年4月のcommit" in result.text
+    calls = corpus_manager._client.aio.models.generate_content.await_args_list
+    assert len(calls) == 2
+    runtime_filter = calls[0].kwargs["config"].tools[0].file_search.metadata_filter
+    history_filter = calls[1].kwargs["config"].tools[0].file_search.metadata_filter
+    assert 'authority = "repository_context"' in runtime_filter
+    assert 'authority = "repository_history"' not in runtime_filter
+    assert 'authority = "repository_context"' not in history_filter
+    assert calls[0].kwargs["config"].max_output_tokens == 4096
+    assert calls[1].kwargs["config"].max_output_tokens == 4096
+
+
+@pytest.mark.asyncio
+async def test_explicit_evidence_keys_prevent_unused_lexical_citations(corpus_manager):
+    def hit(key, name, url):
+        return SimpleNamespace(
+            document_key=key,
+            channel_name=name,
+            festival=None,
+            source_url=url,
+            excerpt=f"{name}の根拠",
+            score=500,
+            authority="curated",
+            status="verified",
+            source_type="knowledge_repository",
+            access_scope="guild",
+            channel_id=None,
+        )
+
+    used = hit("knowledge:used", "使用資料", "https://knowledge.example/used")
+    unused = hit("knowledge:unused", "未使用資料", "https://knowledge.example/unused")
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券", "正式名称"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[used, unused])
+    corpus_manager.rag_store.record_query = Mock(return_value="query-evidence-keys")
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                "正式名称はStandby Passだぽん。\n"
+                "[[YAGAPON_EVIDENCE_KEYS:knowledge:used]]\n"
+                "[[YAGAPON_ANSWER_STATUS:complete]]"
+            ),
+            usage_metadata=None,
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "整理券の正式名称は？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert result.citations == (
+        "[確定仕様: #使用資料](https://knowledge.example/used)",
+    )
+    assert "unused" not in result.text
+    config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
+    assert config.max_output_tokens == 1024
+    assert config.tools is None
 
 
 @pytest.mark.asyncio
@@ -679,6 +894,60 @@ def test_expanded_citation_limit_still_enforces_channel_acl(corpus_manager):
     assert all("/6" not in source and "/7" not in source for source in sources)
 
 
+def test_response_sources_include_only_chunks_used_by_grounding_supports(corpus_manager):
+    chunks = [
+        SimpleNamespace(
+            retrieved_context=SimpleNamespace(
+                title=f"資料{index}",
+                uri=f"https://knowledge.example/{index}",
+                custom_metadata=[
+                    {"key": "channel_name", "string_value": f"資料{index}"},
+                    {"key": "access_scope", "string_value": "guild"},
+                ],
+            )
+        )
+        for index in range(5)
+    ]
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=chunks,
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[1, 3]),
+                        SimpleNamespace(grounding_chunk_indices=[3]),
+                    ],
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == [
+        "[#資料1](https://knowledge.example/1)",
+        "[#資料3](https://knowledge.example/3)",
+    ]
+
+
+def test_explicit_empty_grounding_supports_do_not_cite_retrieval_candidates(corpus_manager):
+    context = SimpleNamespace(
+        title="未使用候補",
+        uri="https://knowledge.example/unused",
+        custom_metadata=[{"key": "access_scope", "string_value": "guild"}],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[],
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == []
+
+
 def test_lexical_sources_deduplicates_the_same_channel_label(corpus_manager):
     hits = [
         SimpleNamespace(channel_name="仕事", source_url="https://discord.example/1"),
@@ -698,6 +967,53 @@ def test_meeting_sources_use_meeting_label_and_deduplicate_drive_url(corpus_mana
 
     assert corpus_manager._lexical_sources([hit], []) == ["[会議記録: 全体会議部屋](https://docs.example/transcript)"]
     assert corpus_manager._lexical_sources([hit], ["[会議記録: 全体会議部屋](https://docs.example/transcript)"]) == []
+
+
+def test_source_history_citations_are_not_rendered_as_discord_channels(corpus_manager):
+    hit = SimpleNamespace(
+        channel_name="YagamiFes-IT/Yagamifes_Web_2025:src/app/recruit/page.tsx",
+        source_url="https://github.com/YagamiFes-IT/Yagamifes_Web_2025/commit/abcdef123",
+        source_type="source_code_history",
+        authority="repository_history",
+        status="historical",
+        start_at="2025-04-01T00:00:00Z",
+    )
+
+    assert corpus_manager._lexical_sources([hit], []) == [
+        "[GitHub変更履歴: YagamiFes-IT/Yagamifes_Web_2025:src/app/recruit/page.tsx"
+        "（2025-04-01） [historical]](https://github.com/YagamiFes-IT/Yagamifes_Web_2025/commit/abcdef123)"
+    ]
+
+
+def test_semantic_source_history_citation_includes_commit_and_historical_status(corpus_manager):
+    context = SimpleNamespace(
+        title="history",
+        uri=None,
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "YagamiFes-IT/Yaga_Support:lib/page.dart"},
+            {"key": "source_type", "string_value": "source_code_history"},
+            {"key": "authority", "string_value": "repository_history"},
+            {"key": "status", "string_value": "historical"},
+            {"key": "commit_sha", "string_value": "abcdef1234567890"},
+            {"key": "start_at", "string_value": "2025-04-01T00:00:00Z"},
+            {"key": "source_url", "string_value": "https://github.example/commit/abcdef1"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == [
+        "[GitHub変更履歴: YagamiFes-IT/Yaga_Support:lib/page.dart @ abcdef1"
+        "（2025-04-01） [historical]](https://github.example/commit/abcdef1)"
+    ]
 
 
 def test_semantic_meeting_source_uses_meeting_label(corpus_manager):
@@ -791,6 +1107,45 @@ async def test_global_no_evidence_marker_is_never_exposed(corpus_manager, tmp_pa
     assert result.no_answer is True
     assert "YAGAPON_NO_RELEVANT_EVIDENCE" not in result.text
     assert result.citations == ()
+
+
+@pytest.mark.asyncio
+async def test_explicit_status_rollout_flag_fails_closed_when_contract_is_missing(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setattr("bot.corpus.REQUIRE_EXPLICIT_ANSWER_STATUS", True)
+    context = SimpleNamespace(
+        title="仕様",
+        uri="https://knowledge.example/spec",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "仕様"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="制御行のない回答だぽん。",
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(
+                    finish_reason="STOP",
+                    grounding_metadata=SimpleNamespace(
+                        grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                    ),
+                )
+            ],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "仕様を説明して",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert "制御行のない回答" not in result.text
 
 
 @pytest.mark.asyncio
@@ -1165,6 +1520,12 @@ async def test_query_drops_curated_source_when_curated_answer_fails(corpus_manag
     assert result.no_answer is False
     assert result.citations == ("#当日運用 [27th]",)
     assert "不十分な仕様" not in result.text
+    budgets = [
+        call.kwargs["config"].max_output_tokens
+        for call in corpus_manager._client.aio.models.generate_content.await_args_list
+    ]
+    assert budgets == [1024, 1024]
+    assert sum(budgets) <= 2048
 
 
 @pytest.mark.asyncio

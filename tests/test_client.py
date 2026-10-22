@@ -208,3 +208,22 @@ async def test_send_split_message_never_sends_empty_payload_for_long_line():
     assert sent
     assert all(call.args[0] for call in destination.send.await_args_list)
     assert sum(call.args[0].count("z") for call in destination.send.await_args_list) == 5000
+
+
+@pytest.mark.asyncio
+async def test_send_split_message_uses_one_complete_markdown_attachment_for_very_long_answer():
+    destination = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1)))
+    answer = "長い回答だぽん。\n" + "根拠の詳細\n" * 2500
+    text = f"{answer}\n\n回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
+
+    sent = await YagaPon.send_split_message(None, destination, text)
+
+    assert len(sent) == 1
+    destination.send.assert_awaited_once()
+    call = destination.send.await_args
+    assert "Markdownファイル" in call.args[0]
+    attachment = call.kwargs["file"]
+    attachment.fp.seek(0)
+    uploaded = attachment.fp.read().decode("utf-8")
+    assert uploaded == answer
+    assert attachment.filename == "yagapon-answer.md"
