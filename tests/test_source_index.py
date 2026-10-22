@@ -243,7 +243,6 @@ def test_gcs_snapshot_validates_repository_and_commit(monkeypatch):
         def download_json(self, name):
             assert name == "snapshots/main.json"
             return {
-                "schemaVersion": 1,
                 "repository": "YagamiFes-IT/YagamiFes-IT-Knowledge",
                 "commit": "a" * 40,
                 "files": {"knowledge/example.md": "本文"},
@@ -256,74 +255,6 @@ def test_gcs_snapshot_validates_repository_and_commit(monkeypatch):
 
     assert commit == "a" * 40
     assert files == [("knowledge/example.md", "本文".encode())]
-
-
-def test_gcs_snapshot_uses_repository_specific_object(monkeypatch):
-    repository = Repository(
-        name="YagamiFes-IT/Yagamifes_Web_2025",
-        ref="main",
-        include=("src/",),
-        fetch="gcs",
-        snapshot_object="source-snapshots/Yagamifes_Web_2025/main.json",
-    )
-
-    class FakeGCS:
-        def __init__(self, bucket):
-            assert bucket == "source-bucket"
-
-        def download_json(self, name):
-            assert name == repository.snapshot_object
-            return {
-                "schemaVersion": 1,
-                "repository": repository.name,
-                "commit": "b" * 40,
-                "files": {"src/app/page.tsx": "export default function Page() {}"},
-            }
-
-    monkeypatch.setenv("YAGAPON_SOURCE_SNAPSHOT_BUCKET", "source-bucket")
-    monkeypatch.setattr("source_index.__main__.GCSClient", FakeGCS)
-
-    commit, files = gcs_snapshot(repository)
-
-    assert commit == "b" * 40
-    assert files[0][0] == "src/app/page.tsx"
-
-
-def test_gcs_snapshot_rejects_wrong_schema_and_unsafe_object(monkeypatch):
-    class FakeGCS:
-        def __init__(self, _bucket):
-            pass
-
-        def download_json(self, _name):
-            return {
-                "schemaVersion": 2,
-                "repository": "example/private",
-                "commit": "a" * 40,
-                "files": {"src/app.py": "print('ok')"},
-            }
-
-    monkeypatch.setenv("YAGAPON_SOURCE_SNAPSHOT_BUCKET", "source-bucket")
-    monkeypatch.setattr("source_index.__main__.GCSClient", FakeGCS)
-    repository = Repository(
-        name="example/private",
-        ref="main",
-        include=("src/",),
-        fetch="gcs",
-        snapshot_object="source-snapshots/example/main.json",
-    )
-
-    with pytest.raises(RuntimeError, match="schema"):
-        gcs_snapshot(repository)
-
-    unsafe = Repository(
-        name="example/private",
-        ref="main",
-        include=("src/",),
-        fetch="gcs",
-        snapshot_object="../other.json",
-    )
-    with pytest.raises(RuntimeError, match="object"):
-        gcs_snapshot(unsafe)
 
 
 def test_source_chunk_has_commit_pinned_url_and_authority_metadata():

@@ -96,22 +96,17 @@ DEFAULT_REPOSITORY_MANIFEST = {
         {
             "name": "YagamiFes-IT/Yaga_Support",
             "ref": "main",
-            "fetch": "gcs",
-            "snapshot_object": "source-snapshots/Yaga_Support/main.json",
             "include": ["lib/", "test/", "docs/current_spec/", "pubspec.yaml", "firebase.json"],
         },
         {
             "name": "YagamiFes-IT/yagamifes-firebase",
             "ref": "main",
-            "fetch": "gcs",
-            "snapshot_object": "source-snapshots/yagamifes-firebase/main.json",
             "include": ["functions/", "firestore.rules", "firestore.indexes.json", "firebase.json"],
         },
         {
             "name": "YagamiFes-IT/Yagamifes_Web_2025",
             "ref": "main",
-            "fetch": "gcs",
-            "snapshot_object": "source-snapshots/Yagamifes_Web_2025/main.json",
+            "fetch": "tree",
             "include": [
                 "src/", "app/", "pages/", "components/", "lib/", "public/",
                 "package.json", "next.config.js", "next.config.mjs",
@@ -121,7 +116,6 @@ DEFAULT_REPOSITORY_MANIFEST = {
             "name": "YagamiFes-IT/YagamiFes-IT-Knowledge",
             "ref": "main",
             "fetch": "gcs",
-            "snapshot_object": "snapshots/main.json",
             "source_type": "knowledge_repository",
             "authority": "curated",
             "status": "current",
@@ -141,7 +135,6 @@ class Repository:
     ref: str
     include: tuple[str, ...]
     fetch: str = "archive"
-    snapshot_object: str | None = None
     source_type: str = "source_code"
     authority: str | None = None
     status: str | None = None
@@ -290,11 +283,6 @@ def load_repositories(path: Path) -> list[Repository]:
             ref=str(item.get("ref") or "main"),
             include=tuple(str(value) for value in item.get("include", ())),
             fetch=str(item.get("fetch") or "archive"),
-            snapshot_object=(
-                str(item["snapshot_object"])
-                if item.get("snapshot_object")
-                else None
-            ),
             source_type=str(item.get("source_type") or "source_code"),
             authority=str(item["authority"]) if item.get("authority") else None,
             status=str(item["status"]) if item.get("status") else None,
@@ -427,28 +415,13 @@ def document_policy(
 
 
 def gcs_snapshot(repository: Repository) -> tuple[str, list[tuple[str, bytes]]]:
-    bucket = (
-        os.environ.get("YAGAPON_SOURCE_SNAPSHOT_BUCKET", "").strip()
-        or os.environ.get("YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET", "").strip()
-    )
-    object_name = (
-        repository.snapshot_object
-        or os.environ.get(
-            "YAGAPON_KNOWLEDGE_SNAPSHOT_OBJECT",
-            "snapshots/main.json",
-        ).strip()
-    )
+    bucket = os.environ.get("YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET", "").strip()
+    object_name = os.environ.get(
+        "YAGAPON_KNOWLEDGE_SNAPSHOT_OBJECT", "snapshots/main.json"
+    ).strip()
     if not bucket or not object_name:
-        raise RuntimeError("Source snapshot bucket/object is not configured")
-    if (
-        object_name.startswith("/")
-        or ".." in PurePosixPath(object_name).parts
-        or not re.fullmatch(r"[0-9A-Za-z._/-]{1,500}", object_name)
-    ):
-        raise RuntimeError("Source snapshot object is invalid")
+        raise RuntimeError("Knowledge snapshot bucket/object is not configured")
     payload = GCSClient(bucket).download_json(object_name)
-    if payload.get("schemaVersion") != 1:
-        raise RuntimeError("Source snapshot schema is invalid")
     if payload.get("repository") != repository.name:
         raise RuntimeError("Knowledge snapshot repository does not match the manifest")
     commit = str(payload.get("commit") or "")
@@ -610,7 +583,6 @@ def repository_manifest_digest(repository: Repository) -> str:
         "ref": repository.ref,
         "include": repository.include,
         "fetch": repository.fetch,
-        "snapshot_object": repository.snapshot_object,
         "source_type": repository.source_type,
         "authority": repository.authority,
         "status": repository.status,
