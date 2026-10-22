@@ -220,6 +220,16 @@ def test_weekday_ordinal_is_not_mistaken_for_a_calendar_month(query):
     assert calendar_window_from_query(query, now, festival=27) is None
 
 
+@pytest.mark.parametrize(
+    "query",
+    ["例年この時期は何をしてる？", "過去のこの時期のトラブルは？", "この時期は毎年何をする？"],
+)
+def test_multi_year_season_question_is_not_narrowed_to_one_year(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now) is None
+
+
 def test_exact_date_does_not_also_create_a_month_window():
     now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
 

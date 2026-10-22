@@ -1473,6 +1473,11 @@ def test_trusted_capability_response_does_not_capture_domain_question():
     assert trusted_capability_response("やがぽんについて教えて") is None
     assert trusted_capability_response("おしゃべりやがぽんとは？") is not None
     assert trusted_capability_response("やがぽんBotの使い方") is not None
+    assert trusted_capability_response("おしゃべりやがぽんとは別の企画について教えて") is None
+    assert trusted_capability_response("あなたとは違う意見をまとめて") is None
+    assert trusted_capability_response("君とは別の担当者について教えて") is None
+    assert trusted_capability_response("このBotの機能ではなく整理券について教えて") is None
+    assert trusted_capability_response("おしゃべりやがぽんの使い方を教えて") is not None
 
 
 @pytest.mark.asyncio

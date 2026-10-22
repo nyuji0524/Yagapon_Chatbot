@@ -842,13 +842,24 @@ def trusted_capability_response(question: str) -> str | None:
         r"この(?:ai|bot|ボット)|あなた|君|きみ)"
     )
     capability_intent = (
-        r"(?:(?:は|が|の)?(?:何|なに)ができる|(?:の)?できること|"
+        r"(?:(?:は|が|の)?(?:何|なに)ができる(?:の|ん)?|(?:の)?できること|"
         r"(?:の)?機能(?:一覧)?|(?:の)?使い方|(?:は)?どんな(?:ai|bot|ボット))"
     )
-    identity_intent = r"(?:(?:自身)?について(?:教えて|説明して)?|とは)"
-    if re.search(bot_subject + r"(?:自身)?" + capability_intent, normalized):
+    request_suffix = r"(?:(?:を|について)?(?:教えて|説明して)(?:ください|下さい)?)?"
+    identity_intent = (
+        r"(?:(?:自身)?について(?:教えて|説明して)?|"
+        r"とは(?:(?:何|なに)(?:ですか)?|どんな(?:ai|bot|ボット)(?:ですか)?)?)"
+    )
+    if re.fullmatch(
+        bot_subject
+        + r"(?:自身)?"
+        + capability_intent
+        + request_suffix
+        + r"[。！？!?、,.]*",
+        normalized,
+    ):
         return _TRUSTED_CAPABILITY_RESPONSE
-    if re.search(bot_subject + identity_intent, normalized):
+    if re.fullmatch(bot_subject + identity_intent + r"[。！？!?、,.]*", normalized):
         return _TRUSTED_CAPABILITY_RESPONSE
     return None
 

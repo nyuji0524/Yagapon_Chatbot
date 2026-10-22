@@ -178,6 +178,14 @@ def calendar_window_from_query(
     )
     current = (now or datetime.now(JST)).astimezone(JST).date()
 
+    if (
+        re.search(r"例年|毎年|過去", normalized)
+        and re.search(r"今頃|この時期|今月", normalized)
+    ):
+        # These ask for the same season across multiple operating years.  A
+        # single calendar year would discard the very comparisons requested.
+        return None
+
     explicit_matches = list(re.finditer(
         r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?",
         normalized,
