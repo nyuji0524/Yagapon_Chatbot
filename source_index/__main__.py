@@ -305,7 +305,8 @@ HISTORY_SECRET_PATTERNS = {
 SOURCE_SECRET_REDACTION_MARKER = "[credential-like source line redacted]"
 SOURCE_SECRET_RESOURCE_ASSIGNMENT = re.compile(
     r"(?m)^(?P<prefix>[ \t]*(?:export[ \t]+)?)"
-    r"(?P<key>[A-Z][A-Z0-9_]*_SECRET)=(?P<value>[^\s#]+)[ \t]*\r?$"
+    r"(?P<key>[A-Z][A-Z0-9_]*_SECRET)=(?P<quote>['\"]?)"
+    r"(?P<value>[^\s#'\"]+)(?P=quote)[ \t]*\r?$"
 )
 SOURCE_SECRET_URL_QUERY = re.compile(
     r"(?i)[a-z][a-z0-9+.-]{0,31}://[^\s'\"<>]*?[?&](?:"
@@ -2230,7 +2231,13 @@ def _mask_secret_manager_resource_names(text: str) -> str:
             )
         )
         if full_resource:
-            replacements.append(match.span("value"))
+            quote_length = len(match.group("quote"))
+            replacements.append(
+                (
+                    match.start("value") - quote_length,
+                    match.end("value") + quote_length,
+                )
+            )
     for start, end in reversed(replacements):
         marker = "${SECRET_RESOURCE}"
         replacement = (marker + " " * (end - start))[: end - start]

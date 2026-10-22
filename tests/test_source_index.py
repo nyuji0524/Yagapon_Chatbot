@@ -232,10 +232,12 @@ def test_source_secret_scanner_allows_runtime_identifiers_and_definitions(source
     assert not contains_secret(source)
 
 
-def test_source_secret_scanner_allows_explicit_secret_manager_resource_name():
+@pytest.mark.parametrize("quote", ("", "'", '"'))
+def test_source_secret_scanner_allows_explicit_secret_manager_resource_name(quote):
     source = (
-        "YAGAPON_GOOGLE_OAUTH_SECRET="
-        "projects/yagamiatlas/secrets/yagapon-google-drive-oauth/versions/latest\r\n"
+        f"YAGAPON_GOOGLE_OAUTH_SECRET={quote}"
+        f"projects/yagamiatlas/secrets/yagapon-google-drive-oauth/versions/latest{quote}"
+        "\r\n"
     )
 
     assert not contains_secret(source)
