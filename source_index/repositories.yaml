@@ -4,17 +4,23 @@ repositories:
     include: [bot/, api/, knowledge_sync/, knowledge_catalog/, rag_eval/, reviewer/, source_index/, deploy/, .github/workflows/, main.py, compose.yaml, Dockerfile]
   - name: YagamiFes-IT/Yaga_Support
     ref: main
+    fetch: gcs
+    snapshot_object: source-snapshots/Yaga_Support/main.json
     include: [lib/, test/, docs/current_spec/, pubspec.yaml, firebase.json]
   - name: YagamiFes-IT/yagamifes-firebase
     ref: main
+    fetch: gcs
+    snapshot_object: source-snapshots/yagamifes-firebase/main.json
     include: [functions/, firestore.rules, firestore.indexes.json, firebase.json]
   - name: YagamiFes-IT/Yagamifes_Web_2025
     ref: main
-    fetch: tree
+    fetch: gcs
+    snapshot_object: source-snapshots/Yagamifes_Web_2025/main.json
     include: [src/, app/, pages/, components/, lib/, public/, package.json, next.config.js, next.config.mjs]
   - name: YagamiFes-IT/YagamiFes-IT-Knowledge
     ref: main
     fetch: gcs
+    snapshot_object: snapshots/main.json
     source_type: knowledge_repository
     authority: curated
     status: current
