@@ -1141,6 +1141,34 @@ async def test_mirror_audit_reports_missing_duplicate_and_mismatched_documents(
 
 
 @pytest.mark.asyncio
+async def test_mirror_audit_excludes_sqlite_only_builtin_references(corpus_manager):
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+    corpus_manager.rag_store.document_references = Mock(
+        return_value=[
+            *(
+                {
+                    "document_key": f"builtin-{index}",
+                    "remote_name": "",
+                    "source_type": "builtin_reference",
+                }
+                for index in range(5)
+            ),
+            {
+                "document_key": "legacy-discord",
+                "remote_name": "",
+                "source_type": "discord_conversation",
+            },
+        ]
+    )
+
+    result = await corpus_manager.audit_remote_mirror("fileSearchStores/test", 1)
+
+    assert result["local_documents"] == 1
+    assert result["local_only"] == 1
+    assert result["examples"]["local_only"] == ["legacy-discord"]
+
+
+@pytest.mark.asyncio
 async def test_query_filters_explicit_festival_and_records_trace(corpus_manager, tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "true")
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")

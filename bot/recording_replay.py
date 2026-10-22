@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,10 +35,144 @@ from bot.recording import (
 
 log = logging.getLogger("yagapon.recording_replay")
 
+REPLAY_TERMINAL_CHECKPOINTS = {
+    "completed": "replay_completed",
+    "failed": "replay_failed",
+    "interrupted": "replay_interrupted",
+}
+
 
 def replay_root() -> Path:
     configured = os.environ.get("YAGAPON_REPLAY_DIR")
     return Path(configured) if configured else recording_root().parent / "replays"
+
+
+def _atomic_json_write(path: Path, payload: dict) -> None:
+    """Replace one JSON checkpoint without exposing a partially written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            json.dump(payload, destination, ensure_ascii=False, indent=2)
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _nonempty_file_within(path_value: str, root: Path) -> Path | None:
+    """Resolve a declared artifact only when it is a non-empty file below root."""
+    if not path_value:
+        return None
+    try:
+        resolved = Path(path_value).resolve()
+        resolved.relative_to(root.resolve())
+        if resolved.is_file() and resolved.stat().st_size > 0:
+            return resolved
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def reconcile_completed_replay_checkpoints(root: Path | None = None) -> dict[str, int]:
+    """Repair only proven-complete legacy replay checkpoints.
+
+    Older replay runs persisted ``metadata.json`` as ``processing`` while the
+    authoritative ``job.json`` reached ``completed``.  A terminal job alone is
+    not sufficient evidence: both durable local artifacts, the archived
+    transcript, and the checkpoint/job identity must agree before this function
+    atomically changes the checkpoint status.  It never regenerates or deletes
+    meeting data.
+    """
+    root = root or replay_root()
+    result = {
+        "inspected": 0,
+        "reconciled": 0,
+        "skipped_non_completed": 0,
+        "skipped_non_processing": 0,
+        "skipped_invalid": 0,
+        "skipped_missing_artifacts": 0,
+        "write_failed": 0,
+    }
+    if not root.is_dir():
+        return result
+
+    transcript_archive = transcript_root().resolve()
+    for job_path in sorted(root.glob("*/job.json")):
+        result["inspected"] += 1
+        work_dir = job_path.parent
+        metadata_path = work_dir / "metadata.json"
+        try:
+            stored = json.loads(job_path.read_text(encoding="utf-8"))
+            job = ReplayJob(**stored)
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            result["skipped_invalid"] += 1
+            continue
+
+        if job.status != "completed" or job.stage != "completed":
+            result["skipped_non_completed"] += 1
+            continue
+        if metadata.get("status") != "processing":
+            result["skipped_non_processing"] += 1
+            continue
+        if (
+            job.id != work_dir.name
+            or str(metadata.get("source_session_id") or "") != job.source_session_id
+            or str(metadata.get("source_guild_id") or "") != str(job.source_guild_id)
+            or str(metadata.get("target_guild_id") or "") != str(job.target_guild_id)
+        ):
+            result["skipped_invalid"] += 1
+            continue
+
+        work_transcript = _nonempty_file_within(
+            str(work_dir / "transcript.md"),
+            work_dir,
+        )
+        work_minutes = _nonempty_file_within(job.minutes_path, work_dir)
+        archived_transcript = _nonempty_file_within(
+            job.transcript_path,
+            transcript_archive,
+        )
+        expected_archived_transcript = (
+            transcript_archive / str(job.target_guild_id) / f"{job.id}.md"
+        ).resolve()
+        if (
+            work_transcript is None
+            or work_minutes is None
+            or work_minutes != (work_dir / "minutes.md").resolve()
+            or archived_transcript is None
+            or archived_transcript != expected_archived_transcript
+        ):
+            result["skipped_missing_artifacts"] += 1
+            continue
+
+        now = datetime.now(timezone.utc).isoformat()
+        reconciled = {
+            **metadata,
+            "status": REPLAY_TERMINAL_CHECKPOINTS["completed"],
+            "job_status": job.status,
+            "job_stage": job.stage,
+            "reconciled_from_status": "processing",
+            "reconciled_at": now,
+            "updated_at": now,
+        }
+        try:
+            _atomic_json_write(metadata_path, reconciled)
+        except OSError:
+            result["write_failed"] += 1
+            log.exception("Could not reconcile completed replay checkpoint")
+        else:
+            result["reconciled"] += 1
+    return result
 
 
 def _drive_session_id(artifact: "RecordingArtifact", target_guild_id: int) -> str:
@@ -274,9 +409,7 @@ class ReadOnlyReplaySink:
             "updated_at": datetime.now(timezone.utc).isoformat(),
             **extra,
         })
-        temporary = self._metadata_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, self._metadata_path)
+        _atomic_json_write(self._metadata_path, current)
 
     def checkpoint(self, *, offsets, speaker_labels, transcript_path=None, status="processing", **extra):
         self._write_metadata(
@@ -312,6 +445,24 @@ class RecordingReplayManager:
 
     def active(self) -> bool:
         return any(job.status in {"queued", "running"} for job in self.jobs.values())
+
+    @staticmethod
+    def reconcile_completed_checkpoints() -> dict[str, int]:
+        return reconcile_completed_replay_checkpoints()
+
+    @staticmethod
+    def _mark_checkpoint(
+        sink: ReadOnlyReplaySink | None,
+        status: str,
+        **details,
+    ) -> None:
+        """Persist a terminal sink state without masking the replay outcome."""
+        if sink is None:
+            return
+        try:
+            sink.mark(status, **details)
+        except Exception:
+            log.exception("Could not persist replay terminal checkpoint status=%s", status)
 
     def start(
         self,
@@ -403,6 +554,7 @@ class RecordingReplayManager:
         self._stage(job, "preparing")
         work_dir = replay_root() / job.id
         work_dir.mkdir(parents=True, exist_ok=True)
+        replay_sink: ReadOnlyReplaySink | None = None
         try:
             await target_channel.send(
                 f"🧪 長時間録音のテスト議事録生成を開始します。\n"
@@ -437,9 +589,10 @@ class RecordingReplayManager:
                     ),
                     VoiceMode.LISTEN,
                 )
-                session.recording_sink = ReadOnlyReplaySink(
+                replay_sink = ReadOnlyReplaySink(
                     artifact, job.target_guild_id, job.id
                 )
+                session.recording_sink = replay_sink
                 session.started_at = meeting_datetime(artifact.started_at or None)
                 await session._drain_recording()
                 await session._persist_transcript()
@@ -570,6 +723,12 @@ class RecordingReplayManager:
 
             job.status = "completed"
             self._stage(job, "completed")
+            self._mark_checkpoint(
+                replay_sink,
+                REPLAY_TERMINAL_CHECKPOINTS["completed"],
+                job_status=job.status,
+                job_stage=job.stage,
+            )
             self.bot.operations.record_event(
                 "recording_replay", "minutes", "success",
                 guild_id=job.target_guild_id, item_key=job.id,
@@ -580,17 +739,35 @@ class RecordingReplayManager:
                 },
             )
         except asyncio.CancelledError:
+            interrupted_stage = job.stage
             job.status = "interrupted"
             job.stage = "interrupted"
             job.error_type = "CancelledError"
             job.updated_at = datetime.now(timezone.utc).isoformat()
             self._persist_job(job)
+            self._mark_checkpoint(
+                replay_sink,
+                REPLAY_TERMINAL_CHECKPOINTS["interrupted"],
+                job_status=job.status,
+                job_stage=job.stage,
+                interrupted_stage=interrupted_stage,
+                error=job.error_type,
+            )
             raise
         except Exception as exc:
             failed_stage = job.stage
             job.status = "failed"
             job.stage = "failed"
             job.error_type = type(exc).__name__
+            self._persist_job(job)
+            self._mark_checkpoint(
+                replay_sink,
+                REPLAY_TERMINAL_CHECKPOINTS["failed"],
+                job_status=job.status,
+                job_stage=job.stage,
+                failed_stage=failed_stage,
+                error=job.error_type,
+            )
             self.bot.operations.record_event(
                 "recording_replay", "minutes", "failed",
                 guild_id=job.target_guild_id, item_key=job.id,

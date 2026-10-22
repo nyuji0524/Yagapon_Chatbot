@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot.gdrive import (
+    DOCS_SCOPE,
+    DRIVE_FILE_SCOPE,
     DriveWriter,
     _artifact_key,
     _extract_folder_id,
@@ -14,6 +16,7 @@ from bot.gdrive import (
     upload_transcript,
 )
 from bot.google_credentials import GoogleCredentialScopeError, load_google_credentials
+from knowledge_sync.drive import READONLY_SCOPE
 
 
 def execute_result(value=None, error: Exception | None = None):
@@ -28,6 +31,22 @@ def execute_result(value=None, error: Exception | None = None):
 def test_extract_folder_id():
     assert _extract_folder_id("https://drive.google.com/drive/folders/folder_123") == "folder_123"
     assert _extract_folder_id("https://example.com/no-folder") is None
+
+
+def test_drive_writer_requests_read_scope_for_configured_parent():
+    credentials = object()
+    with (
+        patch(
+            "bot.gdrive.load_google_credentials",
+            return_value=(credentials, "user-oauth-file"),
+        ) as loader,
+        patch("bot.gdrive.build"),
+    ):
+        writer = DriveWriter()
+
+    assert writer.credential_source == "user-oauth-file"
+    requested_scopes = loader.call_args.args[0]
+    assert set(requested_scopes) == {READONLY_SCOPE, DRIVE_FILE_SCOPE, DOCS_SCOPE}
 
 
 def test_read_meeting_material_requires_configured_folder_scope(monkeypatch):

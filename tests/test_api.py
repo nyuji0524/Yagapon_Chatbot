@@ -238,6 +238,44 @@ def test_app_startup_reconciles_stale_backfill_jobs(tmp_path):
         assert bot.operations.get_job(unrelated_job_id)["status"] == "running"
 
 
+def test_app_startup_reconciles_completed_replay_checkpoints(tmp_path):
+    from bot.operations import OperationalStore
+    from knowledge_catalog.store import CatalogStore
+
+    _, bot = make_client()
+    bot.operations = OperationalStore(tmp_path / "operations.sqlite3")
+    bot.catalog = CatalogStore(tmp_path / "catalog.json")
+    bot.recording_replays.reconcile_completed_checkpoints = Mock(
+        return_value={"inspected": 4, "reconciled": 2}
+    )
+
+    with TestClient(create_app(bot)):
+        pass
+
+    bot.recording_replays.reconcile_completed_checkpoints.assert_called_once_with()
+    events = bot.operations.recent_events()
+    assert any(
+        entry["component"] == "recording_replay"
+        and entry["event"] == "startup_reconcile"
+        and entry["outcome"] == "success"
+        and entry["details"]["checkpoints_reconciled"] == 2
+        for entry in events
+    )
+
+
+def test_app_startup_survives_replay_reconciliation_telemetry_failure():
+    _, bot = make_client()
+    bot.recording_replays.reconcile_completed_checkpoints = Mock(
+        return_value={"inspected": 1, "reconciled": 1}
+    )
+    bot.operations.record_event = Mock(side_effect=RuntimeError("database locked"))
+
+    with TestClient(create_app(bot)) as client:
+        assert client.get("/health").status_code == 200
+
+    bot.operations.record_event.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_api_shutdown_cancels_tasks_releases_guards_and_marks_jobs():
     _, bot = make_client()

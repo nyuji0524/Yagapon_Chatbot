@@ -72,6 +72,40 @@ async def _lifespan(app: FastAPI):
                 "interrupted",
                 details={"jobs_reconciled": len(interrupted)},
             )
+    replay_manager = getattr(bot, "recording_replays", None)
+    replay_reconciliation = None
+    if replay_manager is not None and hasattr(
+        replay_manager,
+        "reconcile_completed_checkpoints",
+    ):
+        try:
+            replay_reconciliation = await asyncio.to_thread(
+                replay_manager.reconcile_completed_checkpoints,
+            )
+        except Exception:
+            # A maintenance reconciliation must never make Discord/API
+            # unavailable.  It is fail-closed and can be retried next startup.
+            log.exception("Completed replay checkpoint reconciliation failed")
+    if replay_reconciliation and replay_reconciliation.get("reconciled"):
+        reconciled = int(replay_reconciliation["reconciled"])
+        log.warning("Reconciled %s completed replay checkpoint(s)", reconciled)
+        if operations is not None and hasattr(operations, "record_event"):
+            try:
+                operations.record_event(
+                    "recording_replay",
+                    "startup_reconcile",
+                    "success",
+                    details={
+                        "checkpoints_reconciled": reconciled,
+                        "checkpoints_inspected": int(
+                            replay_reconciliation.get("inspected") or 0
+                        ),
+                    },
+                )
+            except Exception:
+                # Reconciliation telemetry is best-effort. A locked or damaged
+                # operations database must not prevent the API from starting.
+                log.exception("Could not record replay reconciliation event")
     try:
         yield
     finally:

@@ -80,6 +80,25 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 
 申請IDは内容ハッシュを含む。同じ原本でも内容が変われば別申請となり、過去PRを黙って上書きしない。
 
+### 旧outboxを移行する
+
+現行の再送情報を持たない旧bundleは、まず書き込みを行わない診断を実行する。
+
+```bash
+python -m bot.knowledge_outbox_migrate --bundle-id <旧bundle ID>
+```
+
+診断は文字起こしのSHA-256、宣言済み成果物、機密パターン、移行先の衝突を確認する。
+`eligible=true`を確認し、元ディレクトリを別媒体へ退避した後だけ`--apply`を付ける。
+
+```bash
+python -m bot.knowledge_outbox_migrate --bundle-id <旧bundle ID> --apply
+```
+
+`--apply`もGCS送信やPR作成は行わない。元bundleを変更・削除せず、現行再送形式の新bundleを
+原子的に作るだけである。新bundleを再度確認してから`/knowledge retry`で明示的に送信し、
+`processed/`とDraft PR、ファイルハッシュが一致するまで旧bundleを保持する。
+
 ## Draft PRで確認すること
 
 1. 原本リンク、取得範囲、日時、年度が正しい。
