@@ -79,7 +79,7 @@ MAX_GITHUB_JSON_BYTES = 25_000_000
 CHUNK_CHARS = 36_000
 SOURCE_UPLOAD_CONCURRENCY_DEFAULT = 2
 SOURCE_UPLOAD_CONCURRENCY_MAX = 8
-SOURCE_POLICY_VERSION = 9
+SOURCE_POLICY_VERSION = 10
 DEFAULT_SOURCE_HISTORY_SINCE = "2024-10-01T00:00:00+09:00"
 SOURCE_HISTORY_PAGE_SIZE = 100
 SOURCE_HISTORY_MAX_COMMITS_DEFAULT = 2_000
@@ -105,10 +105,28 @@ SOURCE_SECRET_PATTERNS = {
     for key, value in SENSITIVE_PATTERNS.items()
     if key != "credential-assignment"
 }
-SOURCE_SECRET_KEY_PATTERN = (
-    r"[A-Za-z0-9_-]*(?:password|passwd|パスワード|client[_ -]?secret|secret|"
-    r"api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token)"
+SOURCE_SECRET_PATTERNS.update(
+    {
+        "jwt": re.compile(
+            r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\."
+            r"[A-Za-z0-9_-]{5,}\b"
+        ),
+        "authorization-value": re.compile(
+            r"(?i)\bauthorization\b\s*[:=]\s*['\"]?(?:bearer|basic)\s+"
+            r"[A-Za-z0-9._~+/=-]{8,}"
+        ),
+    }
 )
+SOURCE_SECRET_KEY_PATTERN = (
+    r"(?:authorization|[A-Za-z0-9_-]{0,128}(?:password|passwd|パスワード|client[_ -]?secret|secret|"
+    r"api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token)"
+    r")"
+)
+SOURCE_SECRET_OPERATOR_PATTERN = (
+    r"(?::=|={2,3}(?!=|>)|(?:\*\*|//|\?\?|\|\||&&|<<|>>|[+*/%&|^-])=|"
+    r":(?!=)|=(?!=|>))"
+)
+SOURCE_SECRET_GAP_PATTERN = r"[ \t\r\n]{0,4096}"
 SOURCE_SECRET_QUOTED_LITERAL_PATTERN = (
     r'(?:(?:[rubf]{1,2})?"(?P<double>(?:\\.|[^"\\\r\n]){8,})"|'
     r"(?:[rubf]{1,2})?'(?P<single>(?:\\.|[^'\\\r\n]){8,})'|"
@@ -118,61 +136,49 @@ SOURCE_SECRET_LITERAL_PATTERN = (
     SOURCE_SECRET_QUOTED_LITERAL_PATTERN
     + r"|(?P<unquoted>[^\s'\"`,;#]{8,})"
 )
-SOURCE_SECRET_ASSIGNMENT = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?P<key>" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
-    r"[ \t]*(?P<operator>[:=])[ \t]*"
-    r"(?:" + SOURCE_SECRET_LITERAL_PATTERN + r")"
-)
 SOURCE_SECRET_BLOCK_ASSIGNMENT = re.compile(
     r"(?im)^(?P<indent>[ \t]*)(?P<sequence>-[ \t]+)?"
     r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
     r"[ \t]*:[ \t]*[>|](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*"
     r"(?:#[^\r\n]*)?\r?\n"
 )
-SOURCE_SECRET_FALLBACK_ASSIGNMENT = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
-    r"\s*[:=][^\r\n]{0,4096}?"
-    r"(?:\|\||\?\?|\bor\b|\belse\b)\s*"
-    r"(?:" + SOURCE_SECRET_LITERAL_PATTERN + r")"
-)
-SOURCE_SECRET_DEFAULT_ARGUMENT = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
-    r"\s*[:=][^\r\n]{0,4096}?"
-    r"(?:getenv|string\.fromenvironment|"
-    r"(?:environ|config|settings|credentials|vault)\.get|read_secret)"
-    r"\([^,\r\n]+,\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*)?"
-    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
-)
-SOURCE_SECRET_TERNARY_TRUE_ASSIGNMENT = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?\s*[:=]"
-    r"[^?\r\n]{0,4096}\?\s*"
-    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
-)
-SOURCE_SECRET_TERNARY_FALSE_ASSIGNMENT = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?\s*[:=]"
-    r"[^?\r\n]{0,2048}\?[^:\r\n]{0,2048}:\s*"
-    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
-)
-SOURCE_SECRET_WRAPPED_LITERAL_ASSIGNMENT = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?\s*[:=]\s*"
-    r"(?P<wrapper>[A-Za-z_][A-Za-z0-9_.]*)\s*\(\s*"
-    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
-)
 SOURCE_SECRET_ASSIGNMENT_START = re.compile(
-    r"(?imx)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
-    r"[ \t]*(?P<operator>[:=])[ \t]*"
+    r"(?imsx)(?<![A-Za-z0-9_])\$?(?:"
+    r"[A-Za-z_$][A-Za-z0-9_.$]*(?:"
+    + SOURCE_SECRET_GAP_PATTERN
+    + r"\[[^\]\r\n]+\])*"
+    + SOURCE_SECRET_GAP_PATTERN
+    + r"\["
+    + SOURCE_SECRET_GAP_PATTERN
+    + r"['\"`]"
+    r"(?P<bracket_key>"
+    + SOURCE_SECRET_KEY_PATTERN
+    + r")['\"`]"
+    + SOURCE_SECRET_GAP_PATTERN
+    + r"\]|"
+    r"['\"`]?(?P<key>"
+    + SOURCE_SECRET_KEY_PATTERN
+    + r")['\"`]?"
+    r")"
+    + SOURCE_SECRET_GAP_PATTERN
+    + r"(?P<operator>"
+    + SOURCE_SECRET_OPERATOR_PATTERN
+    + r")"
+    + SOURCE_SECRET_GAP_PATTERN
 )
 SOURCE_SECRET_QUOTED_VALUE = re.compile(
     SOURCE_SECRET_QUOTED_LITERAL_PATTERN,
     re.IGNORECASE | re.VERBOSE,
+)
+SOURCE_SECRET_ANY_QUOTED_VALUE = re.compile(
+    r'(?:(?:[rubf]{1,2})?"(?P<double>(?:\\.|[^"\\\r\n])*)"|'
+    r"(?:[rubf]{1,2})?'(?P<single>(?:\\.|[^'\\\r\n])*)'|"
+    r"`(?P<backtick>(?:\\.|[^`\\])*)`)",
+    re.IGNORECASE | re.VERBOSE,
+)
+SOURCE_SECRET_TRIPLE_QUOTED_VALUE = re.compile(
+    r'(?is)(?:[rubf]{1,2})?(?:"""(?P<double>.*?)"""|'
+    r"'''(?P<single>.*?)''')"
 )
 SOURCE_SECRET_RHS_FALLBACK = re.compile(
     r"(?ix)(?:\|\||\?\?|\bor\b|\belse\b)\s*"
@@ -187,6 +193,20 @@ SOURCE_SECRET_TYPE_ANNOTATION = re.compile(
 )
 SOURCE_SECRET_RHS_MAX_CHARS = 4_096
 SOURCE_SECRET_RHS_MAX_LINES = 16
+SOURCE_SECRET_LONG_LINE_KEY_LIMIT = 16
+SOURCE_SECRET_KEY_HINTS = (
+    "authorization",
+    "password",
+    "passwd",
+    "パスワード",
+    "client_secret",
+    "client-secret",
+    "api_key",
+    "api-key",
+    "apikey",
+    "secret",
+    "token",
+)
 SOURCE_SECRET_RUNTIME_READERS = frozenset(
     {
         "config.get",
@@ -196,7 +216,6 @@ SOURCE_SECRET_RUNTIME_READERS = frozenset(
         "os.environ.get",
         "os.getenv",
         "read_secret",
-        "secret",
         "settings.get",
         "string.fromenvironment",
         "vault.get",
@@ -207,30 +226,48 @@ SOURCE_SECRET_RUNTIME_CALL_START = re.compile(
     + "|".join(
         sorted((re.escape(value) for value in SOURCE_SECRET_RUNTIME_READERS), key=len, reverse=True)
     )
-    + r")\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*)?"
+    + r")\s*\(\s*"
 )
 SOURCE_SECRET_RUNTIME_SUBSCRIPT_START = re.compile(
     r"(?i)(?<![A-Za-z0-9_.])os\.environ\s*\[\s*"
 )
-SOURCE_SECRET_LOOKUP_CALL_START = re.compile(
-    r"(?i)(?<![A-Za-z0-9_.])"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*"
-    r"(?:get|getenv|getelementbyid|read_secret)\s*\(\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*)?"
-)
-SOURCE_SECRET_LOOKUP_SUBSCRIPT_START = re.compile(
-    r"(?i)(?:[A-Za-z_][A-Za-z0-9_.]*|\])\s*\[\s*"
+SOURCE_AUTH_CLAIM_KEYS = frozenset(
+    {
+        "admin",
+        "aud",
+        "auth_time",
+        "departments",
+        "email",
+        "email_verified",
+        "exp",
+        "firebase",
+        "iat",
+        "isadmin",
+        "iss",
+        "roles",
+        "sign_in_provider",
+        "sub",
+        "uid",
+        "user_id",
+    }
 )
 SOURCE_SECRET_PLACEHOLDER = re.compile(
-    r"(?i)(?:^|[-_./<>{}\s])"
-    r"(?:example|sample|placeholder|changeme|change-me|replace|redacted|"
-    r"fixture|dummy|fake|not-a-real|your|xxxxx+|todo|goes-here)"
-    r"(?:$|[-_./<>{}\s])"
+    r"(?i)^(?:"
+    r"(?:example|sample|dummy|fake|fixture)[-_ ](?:password|passwd|secret|"
+    r"api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|"
+    r"credential|value)(?:[-_ ]for[-_ ](?:docs?|tests?|examples?))?|"
+    r"placeholder(?:[-_ ](?:password|secret|api[-_ ]?key|token|value))?|"
+    r"replace[-_ ]with[-_ ]your[-_ ](?:password|secret|api[-_ ]?key|token)|"
+    r"not[-_ ]a[-_ ]real[-_ ](?:password|secret|api[-_ ]?key|token)|"
+    r"your[-_ ](?:password|secret|api[-_ ]?key|token)(?:[-_ ]here)?|"
+    r"changeme|change-me|redacted|xxxxx+|todo|goes-here|missing|available"
+    r")$"
 )
 SOURCE_SECRET_TEMPLATE = re.compile(
     r"(?ix)(?:"
-    r"\$[A-Z_][A-Z0-9_]*|\$\{[A-Z_][A-Z0-9_]*\}|"
-    r"%[A-Z_][A-Z0-9_]*%|\{\{[^{}\r\n]+\}\}|"
+    r"\$[A-Z_][A-Z0-9_]*|\$\{[A-Z_][A-Z0-9_]*(?::[-+?=])?\}|"
+    r"\$\{\{[^{}\r\n]+\}\}|%[A-Z_][A-Z0-9_]*%|"
+    r"\{\{[^{}\r\n]+\}\}|"
     r"<[A-Z_][A-Z0-9_-]*>"
     r")"
 )
@@ -265,6 +302,43 @@ HISTORY_SECRET_PATTERNS = {
         r"[A-Za-z0-9._~+/=-]{8,}"
     ),
 }
+SOURCE_SECRET_REDACTION_MARKER = "[credential-like source line redacted]"
+SOURCE_SECRET_RESOURCE_ASSIGNMENT = re.compile(
+    r"(?m)^(?P<prefix>[ \t]*(?:export[ \t]+)?)"
+    r"(?P<key>[A-Z][A-Z0-9_]*_SECRET)=(?P<value>[^\s#]+)[ \t]*\r?$"
+)
+SOURCE_SECRET_URL_QUERY = re.compile(
+    r"(?i)[a-z][a-z0-9+.-]{0,31}://[^\s'\"<>]*?[?&](?:"
+    + SOURCE_SECRET_KEY_PATTERN
+    + r")=(?P<value>[^&#\s'\"<>]+)"
+)
+SOURCE_SECRET_URL_USERINFO = re.compile(
+    r"(?i)[a-z][a-z0-9+.-]{0,31}://[^:/@\s'\"<>]*:"
+    r"(?P<value>[^/@\s'\"<>]+)@"
+)
+SOURCE_SECRET_FUNCTION_CALL = re.compile(
+    r"(?is)(?<![A-Za-z0-9_])\$?"
+    r"(?:token|secret|password|api[_]?key|access[_]?token|refresh[_]?token)"
+    + SOURCE_SECRET_GAP_PATTERN
+    + r"\(\s*(?:value\s*[:=]\s*)?"
+    r"(?P<quote>['\"`])(?P<value>.*?)(?P=quote)"
+)
+SOURCE_SECRET_XML_ELEMENT = re.compile(
+    r"(?is)<(?P<key>"
+    + SOURCE_SECRET_KEY_PATTERN
+    + r")\b[^>]*>(?P<value>[^<]+)</(?P=key)\s*>"
+)
+SOURCE_SECRET_SHELL_DEFAULT = re.compile(
+    r"(?is)\$\{(?:"
+    + SOURCE_SECRET_KEY_PATTERN
+    + r"):[-+?=](?P<value>[^}]*)\}"
+)
+SOURCE_SECRET_HTML_TAG = re.compile(r"(?is)<[^>]{1,4096}>")
+SOURCE_SECRET_HTML_ATTRIBUTE = re.compile(
+    r"(?is)\b(?P<name>[A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*"
+    r"(?:(?P<quote>['\"])(?P<quoted_value>.*?)(?P=quote)|"
+    r"(?P<unquoted_value>[^\s'\"=<>`]+))"
+)
 DEFAULT_REPOSITORY_MANIFEST = {
     "repositories": [
         {
@@ -1238,7 +1312,7 @@ def _source_secret_rhs_continues(value: str) -> bool:
         return True
     return bool(
         re.search(
-            r"(?ix)(?:\\|\|\||&&|\?\?|[=,+*/?]|\b(?:and|or|else))\s*$",
+            r"(?ix)(?:\\|\|\||&&|\?\?|[=+*/?]|\b(?:and|or|else))\s*$",
             stripped,
         )
     ) or (stripped.endswith(":") and "?" in stripped)
@@ -1256,25 +1330,65 @@ def _source_secret_continuation_line(value: str, base_indent: int) -> bool:
     )
 
 
+def _mask_source_block_comments(text: str) -> str:
+    """Replace complete block comments in linear time while preserving offsets."""
+    characters: list[str] | None = None
+    cursor = 0
+    while True:
+        start = text.find("/*", cursor)
+        if start < 0:
+            break
+        end = text.find("*/", start + 2)
+        if end < 0:
+            break
+        if characters is None:
+            characters = list(text)
+        for index in range(start, end + 2):
+            if characters[index] not in "\r\n":
+                characters[index] = " "
+        cursor = end + 2
+    return "".join(characters) if characters is not None else text
+
+
+def _source_secret_match_is_assignment(match: re.Match[str]) -> bool:
+    """Reject URL/string fragments and control-flow clauses that look assigned."""
+    text = match.string
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    leading = text[line_start : match.start()]
+    if _source_secret_open_quote(leading) is not None:
+        return False
+    template_start = leading.rfind("${")
+    if template_start > leading.rfind("}"):
+        template_end = text.find("}", match.end())
+        if template_end >= 0 and SOURCE_SECRET_TEMPLATE.fullmatch(
+            text[line_start + template_start : template_end + 1]
+        ):
+            return False
+    if match.groupdict().get("operator") == ":" and "?" in leading:
+        ternary_tail = leading.rsplit("?", 1)[1]
+        if not any(delimiter in ternary_tail for delimiter in "{["):
+            return False
+    return not re.match(
+        r"\s*(?:if|elif|while|for|case|match)\b",
+        leading,
+        re.IGNORECASE,
+    )
+
+
 def _bounded_source_secret_assignments(
     text: str,
-) -> list[tuple[str, str, bool]]:
+) -> list[tuple[str, str, str, bool, int, int]]:
     """Extract small logical RHS windows; an overlong continuation fails closed."""
     assignments = []
     for match in SOURCE_SECRET_ASSIGNMENT_START.finditer(text):
         line_start = text.rfind("\n", 0, match.start()) + 1
         leading = text[line_start:match.start()]
-        if _source_secret_open_quote(leading) is not None:
-            continue
-        if match.group("operator") == ":" and re.match(
-            r"\s*(?:if|elif|while|for|case|match)\b",
-            leading,
-            re.IGNORECASE,
-        ):
+        if not _source_secret_match_is_assignment(match):
             continue
         indentation_text = leading[: len(leading) - len(leading.lstrip(" \t"))]
         base_indent = len(indentation_text.expandtabs(8))
         cursor = match.end()
+        assignment_end = cursor
         parts = []
         characters = 0
         truncated = False
@@ -1283,6 +1397,7 @@ def _bounded_source_secret_assignments(
             if line_end < 0:
                 line_end = len(text)
             part = text[cursor:line_end].rstrip("\r")
+            assignment_end = line_end
             additional = len(part) + (1 if parts else 0)
             if (
                 len(parts) >= SOURCE_SECRET_RHS_MAX_LINES
@@ -1314,7 +1429,32 @@ def _bounded_source_secret_assignments(
             ):
                 break
             cursor = next_start
-        assignments.append((match.group("operator"), "\n".join(parts), truncated))
+        assignments.append(
+            (
+                match.group("key") or match.group("bracket_key"),
+                match.group("operator"),
+                "\n".join(parts),
+                truncated,
+                match.start(),
+                assignment_end,
+            )
+        )
+    return assignments
+
+
+def _source_secret_assignments_for_scan(
+    text: str,
+) -> list[tuple[str, str, str, bool, int, int]]:
+    """Scan raw text and a same-length comment-masked structural view."""
+    variants = (text, _mask_source_block_comments(text))
+    assignments = []
+    seen = set()
+    for variant in variants:
+        for assignment in _bounded_source_secret_assignments(variant):
+            if assignment in seen:
+                continue
+            seen.add(assignment)
+            assignments.append(assignment)
     return assignments
 
 
@@ -1333,6 +1473,39 @@ def _source_secret_open_quote(value: str) -> str | None:
         elif character == quote:
             quote = None
     return quote
+
+
+def _source_secret_multiline_literals(value: str) -> list[str]:
+    """Return literals whose delimiters span a physical newline."""
+    literals = []
+    index = 0
+    while index < len(value):
+        quote = value[index]
+        if quote not in {'"', "'", "`"}:
+            index += 1
+            continue
+        delimiter = quote * 3 if value.startswith(quote * 3, index) else quote
+        cursor = index + len(delimiter)
+        content_start = cursor
+        escaped = False
+        while cursor < len(value):
+            if escaped:
+                escaped = False
+                cursor += 1
+                continue
+            if value[cursor] == "\\":
+                escaped = True
+                cursor += 1
+                continue
+            if value.startswith(delimiter, cursor):
+                content = value[content_start:cursor]
+                if "\n" in content or "\r" in content:
+                    literals.append(content)
+                cursor += len(delimiter)
+                break
+            cursor += 1
+        index = max(cursor, index + 1)
+    return literals
 
 
 def _source_secret_actual_rhs(operator: str, value: str) -> str:
@@ -1364,23 +1537,29 @@ def _source_secret_first_expression(value: str) -> str:
         elif character in "([{":
             depth += 1
         elif character in ")]}":
-            depth = max(0, depth - 1)
+            if depth == 0:
+                return value[:index]
+            depth -= 1
         elif depth == 0 and character in ",;":
             return value[:index]
     return value
 
 
-def _source_secret_runtime_lookup_spans(value: str) -> set[tuple[int, int]]:
+def _source_secret_runtime_lookup_spans(
+    _key: str,
+    value: str,
+) -> set[tuple[int, int]]:
     spans = set()
     for pattern in (
         SOURCE_SECRET_RUNTIME_CALL_START,
         SOURCE_SECRET_RUNTIME_SUBSCRIPT_START,
-        SOURCE_SECRET_LOOKUP_CALL_START,
-        SOURCE_SECRET_LOOKUP_SUBSCRIPT_START,
     ):
         for reader in pattern.finditer(value):
-            literal = SOURCE_SECRET_QUOTED_VALUE.match(value, reader.end())
-            if literal is not None:
+            literal = SOURCE_SECRET_ANY_QUOTED_VALUE.match(value, reader.end())
+            if literal is None:
+                continue
+            literal_value, _quoted = _source_secret_match_value(literal)
+            if re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", literal_value):
                 spans.add(literal.span())
     return spans
 
@@ -1394,13 +1573,256 @@ def _source_secret_literal_is_reference(
         return True
     if re.fullmatch(r"s/\^[A-Z_][A-Z0-9_]*=//p", value):
         return True
-    return expression[match.end() :].lstrip().startswith(":")
+    return (
+        "?" not in expression[: match.start()]
+        and expression[match.end() :].lstrip().startswith(":")
+    )
 
 
-def _concrete_source_secret_rhs(operator: str, raw_value: str) -> bool:
+def _source_secret_is_placeholder(value: str) -> bool:
+    """Accept only a complete, explicitly marked non-production value."""
+    return SOURCE_SECRET_PLACEHOLDER.fullmatch(value.strip()) is not None
+
+
+def _source_secret_embedded_literal_is_safe(value: str) -> bool:
+    """Return true only for a complete placeholder or runtime template."""
+    normalized = value.strip()
+    return bool(
+        not normalized
+        or _source_secret_is_placeholder(normalized)
+        or SOURCE_SECRET_TEMPLATE.fullmatch(normalized)
+    )
+
+
+def _contains_embedded_source_secret(text: str) -> bool:
+    """Catch credentials outside ordinary assignments (URLs, calls, and XML)."""
+    for pattern in (
+        SOURCE_SECRET_URL_QUERY,
+        SOURCE_SECRET_URL_USERINFO,
+        SOURCE_SECRET_FUNCTION_CALL,
+        SOURCE_SECRET_XML_ELEMENT,
+        SOURCE_SECRET_SHELL_DEFAULT,
+    ):
+        for match in pattern.finditer(text):
+            if not _source_secret_embedded_literal_is_safe(match.group("value")):
+                return True
+    for tag in SOURCE_SECRET_HTML_TAG.finditer(text):
+        attributes = []
+        for match in SOURCE_SECRET_HTML_ATTRIBUTE.finditer(tag.group(0)):
+            value = match.group("quoted_value")
+            if value is None:
+                value = match.group("unquoted_value")
+            attributes.append((match.group("name").casefold(), value))
+        credential_keys = [
+            value for name, value in attributes if name in {"key", "name"}
+        ]
+        credential_values = [
+            value for name, value in attributes if name in {"content", "value"}
+        ]
+        if any(
+            re.fullmatch(SOURCE_SECRET_KEY_PATTERN, key, re.IGNORECASE)
+            for key in credential_keys
+        ) and any(
+            not _source_secret_embedded_literal_is_safe(value)
+            for value in credential_values
+        ):
+            return True
+    return False
+
+
+def _source_secret_safe_runtime_expression(key: str, value: str) -> bool:
+    """Allow a small, fully consumed grammar of runtime-only secret reads."""
+    compact = value.strip().rstrip(",;")
+    if compact.casefold() in {"false", "null", "none", "true", "undefined"}:
+        return True
+    if SOURCE_SECRET_TEMPLATE.fullmatch(compact):
+        return True
+    if _source_secret_identifier_reference(key, compact):
+        return True
+    html_attribute = re.fullmatch(
+        r"(?is)(?P<quote>['\"])(?P<value>.*?)(?P=quote)\s*/?>",
+        compact,
+    )
+    if html_attribute is not None and _source_secret_embedded_literal_is_safe(
+        html_attribute.group("value")
+    ):
+        return True
+    literal = SOURCE_SECRET_ANY_QUOTED_VALUE.fullmatch(compact)
+    if literal is not None:
+        literal_value, _quoted = _source_secret_match_value(literal)
+        if _source_secret_embedded_literal_is_safe(literal_value):
+            return True
+    placeholder_wrapper = re.fullmatch(
+        r"(?is)SecretStr\s*\(\s*(?:value\s*=\s*)?"
+        r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)\s*\)",
+        compact,
+    )
+    if placeholder_wrapper is not None:
+        return _source_secret_embedded_literal_is_safe(
+            placeholder_wrapper.group("value")
+        )
+    fallback = re.fullmatch(
+        r"(?is)(?P<primary>.+?)\s*(?:\|\||\?\?|\bor\b)\s*"
+        r"(?P<quote>['\"`])(?P<fallback>.*?)(?P=quote)",
+        compact,
+    )
+    if fallback is not None:
+        return bool(
+            _source_secret_identifier_reference(key, fallback.group("primary").strip())
+            and _source_secret_embedded_literal_is_safe(fallback.group("fallback"))
+        )
+    runtime_readers = "|".join(
+        sorted(
+            (re.escape(reader) for reader in SOURCE_SECRET_RUNTIME_READERS),
+            key=len,
+            reverse=True,
+        )
+    )
+    runtime_call = re.fullmatch(
+        r"(?is)(?:"
+        + runtime_readers
+        + r")\s*\(\s*['\"](?P<name>[A-Z][A-Z0-9_]{2,127})['\"]"
+        r"\s*(?:,\s*(?:(?:defaultValue|default)\s*[:=]\s*)?"
+        r"(?:['\"]{2}|None|null|undefined))?\s*\)",
+        compact,
+    )
+    if runtime_call is not None:
+        return True
+    if re.fullmatch(
+        r"(?is)os\.environ\s*\[\s*['\"][A-Z][A-Z0-9_]{2,127}['\"]\s*\]",
+        compact,
+    ):
+        return True
+    wrapper = re.fullmatch(
+        r"(?is)(?:SecretStr|str)\s*\((?P<inner>.*)\)",
+        compact,
+    )
+    if wrapper is not None:
+        return _source_secret_safe_runtime_expression(key, wrapper.group("inner"))
+    byte_reference = re.fullmatch(
+        r"(?is)(?:bytes|bytearray)\s*\((?P<reference>[^()]*)\)",
+        compact,
+    )
+    if byte_reference is not None and _source_secret_identifier_reference(
+        key,
+        byte_reference.group("reference").strip(),
+    ):
+        return True
+    authorization = re.fullmatch(
+        r"(?is)(?:f|r?f)?['\"](?:bearer|basic)\s+"
+        r"(?:\$?\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\})['\"]|"
+        r"`(?:bearer|basic)\s+\$\{(?P<js>[A-Za-z_][A-Za-z0-9_]*)\}`|"
+        r"['\"](?:bearer|basic)\s+['\"]\s*\+\s*"
+        r"(?P<joined>[A-Za-z_][A-Za-z0-9_.]*)",
+        compact,
+    )
+    if authorization is not None:
+        reference = next(
+            item
+            for item in (
+                authorization.group("braced"),
+                authorization.group("js"),
+                authorization.group("joined"),
+            )
+            if item is not None
+        )
+        return _source_secret_identifier_reference(key, reference)
+    return False
+
+
+def _concrete_source_secret_rhs(key: str, operator: str, raw_value: str) -> bool:
     """Inspect every literal in one bounded sensitive assignment expression."""
     value = _source_secret_actual_rhs(operator, raw_value)
-    lookup_spans = _source_secret_runtime_lookup_spans(value)
+    compact = re.sub(r"\s+", " ", value).strip().rstrip(",;")
+    if _source_secret_safe_runtime_definition(key, value):
+        return False
+    if compact.startswith(("{", "[")):
+        depth, quote = _source_secret_delimiter_state(compact)
+        if depth == 0 and quote is None:
+            return not _source_secret_safe_claim_container(key, compact)
+    if re.search(r"\\\r?\n", value):
+        return True
+    for multiline_literal in _source_secret_multiline_literals(value):
+        normalized_literal = multiline_literal.strip()
+        if not normalized_literal:
+            continue
+        if _source_secret_is_placeholder(normalized_literal):
+            continue
+        if SOURCE_SECRET_TEMPLATE.fullmatch(normalized_literal):
+            continue
+        return True
+    lookup_spans = _source_secret_runtime_lookup_spans(key, value)
+    for triple_literal in SOURCE_SECRET_TRIPLE_QUOTED_VALUE.finditer(value):
+        literal_value = next(
+            item
+            for item in (
+                triple_literal.group("double"),
+                triple_literal.group("single"),
+            )
+            if item is not None
+        )
+        normalized = literal_value.strip()
+        if not normalized:
+            continue
+        if _source_secret_is_placeholder(normalized):
+            continue
+        if SOURCE_SECRET_TEMPLATE.fullmatch(normalized):
+            continue
+        return True
+    short_concrete_literals = []
+    for literal in SOURCE_SECRET_ANY_QUOTED_VALUE.finditer(value):
+        literal_value, _quoted = _source_secret_match_value(literal)
+        if not literal_value or literal.span() in lookup_spans:
+            continue
+        authorization_template = re.fullmatch(
+            r"(?i)(?:bearer|basic)\s+(?:\$?\{(?P<reference>[A-Za-z_][A-Za-z0-9_]*)\})",
+            literal_value,
+        )
+        if (
+            re.sub(r"[^a-z0-9]", "", key.casefold()) == "authorization"
+            and authorization_template is not None
+            and _source_secret_identifier_reference(
+                key,
+                authorization_template.group("reference"),
+            )
+        ):
+            lookup_spans.add(literal.span())
+            continue
+        if _source_secret_literal_is_reference(literal_value, literal, value):
+            continue
+        if _source_secret_is_placeholder(literal_value):
+            continue
+        if SOURCE_SECRET_TEMPLATE.fullmatch(literal_value):
+            continue
+        short_concrete_literals.append(literal)
+    if len(short_concrete_literals) >= 2:
+        return True
+    if short_concrete_literals:
+        literal = short_concrete_literals[0]
+        literal_value, _quoted = _source_secret_match_value(literal)
+        before = value[: literal.start()].rstrip()
+        after = value[literal.end() :].lstrip()
+        if re.search(r"(?:^|[^A-Za-z0-9_])\d+\s*\*\s*$", before) or re.match(
+            r"\*\s*\d+\b",
+            after,
+        ):
+            return True
+        known_scheme = literal_value.casefold() in {"basic ", "bearer "}
+        residual = value[: literal.start()] + value[literal.end() :]
+        identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", residual)
+        if not (
+            known_scheme
+            and any(
+                _source_secret_identifier_reference(key, identifier)
+                for identifier in identifiers
+            )
+        ):
+            return True
+    if re.search(r"(?is)\b(?:bytes|bytearray)\s*\(", compact) and re.search(
+        r"(?i)(?<![A-Za-z0-9_])(?:0x[0-9a-f]+|\d+)(?![A-Za-z0-9_])",
+        compact,
+    ):
+        return True
     for literal in SOURCE_SECRET_QUOTED_VALUE.finditer(value):
         literal_value, _quoted = _source_secret_match_value(literal)
         if literal.span() in lookup_spans or _source_secret_literal_is_reference(
@@ -1413,24 +1835,235 @@ def _concrete_source_secret_rhs(operator: str, raw_value: str) -> bool:
             literal_value,
             operator="=",
             quoted=True,
+            key=key,
         ):
             return True
     for fallback in SOURCE_SECRET_RHS_FALLBACK.finditer(value):
-        if _concrete_source_secret_fallback(fallback):
+        if _concrete_source_secret_fallback(fallback, key=key):
             return True
-    compact = re.sub(r"\s+", " ", value).strip().rstrip(",;")
     if operator == ":" and re.fullmatch(r"[>|](?:[+-][1-9]?|[1-9][+-]?)?", compact):
         return False
-    if (
-        len(compact) >= 8
-        and re.fullmatch(r"[^\s()\[\]{}'\"`]+", compact)
+    if len(compact) >= 8 and (
+        re.fullmatch(r"[^\s()\[\]{}'\"`]+", compact)
+        or compact.startswith("${")
     ):
         return _concrete_source_secret_value(
             compact,
             operator=operator,
             quoted=False,
+            key=key,
         )
+    if not compact:
+        return False
+    if operator == ":" and compact.casefold() in {"str", "string"}:
+        return False
+    if operator in {"==", "==="}:
+        comparison = compact
+        for literal in reversed(list(SOURCE_SECRET_ANY_QUOTED_VALUE.finditer(compact))):
+            literal_value, _quoted = _source_secret_match_value(literal)
+            if not _source_secret_embedded_literal_is_safe(literal_value):
+                break
+            comparison = comparison[: literal.start()] + "SAFE" + comparison[literal.end() :]
+        else:
+            if re.fullmatch(
+                r"(?is)(?:null|none|undefined)\s*\?\s*SAFE\s*:\s*SAFE",
+                comparison,
+            ):
+                return False
+    return not _source_secret_safe_runtime_expression(key, compact)
+
+
+def _source_secret_safe_runtime_definition(key: str, value: str) -> bool:
+    """Allow only definitions whose argument is provably metadata or a scanner."""
+    compact = value.strip().rstrip(";, ")
+    secret_name = re.fullmatch(
+        r"(?i)definesecret\(\s*['\"](?P<name>[A-Z][A-Z0-9_]{2,127})"
+        r"['\"]\s*\)",
+        compact,
+    )
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
+    if secret_name is not None:
+        normalized_name = re.sub(
+            r"[^a-z0-9]", "", secret_name.group("name").casefold()
+        )
+        return normalized_key == normalized_name
+
+    callable_definition = re.fullmatch(
+        r"(?is)oncall\(\s*\{(?P<config>[^{}]*)\}\s*,\s*"
+        r"[A-Za-z_][A-Za-z0-9_.]*\s*,?\s*\)",
+        compact,
+    )
+    if callable_definition is not None:
+        config = callable_definition.group("config")
+        fields = {}
+        for part in config.split(","):
+            if not part.strip():
+                continue
+            field = re.fullmatch(
+                r"\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<value>.+?)\s*",
+                part,
+            )
+            if field is None:
+                return False
+            field_key = field.group("key").casefold()
+            if field_key in fields:
+                return False
+            fields[field_key] = field.group("value")
+        if not fields or not fields.keys() <= {"region", "timeoutseconds"}:
+            return False
+        region = fields.get("region")
+        timeout = fields.get("timeoutseconds")
+        return bool(
+            region
+            and re.fullmatch(r"['\"][a-z]+-[a-z]+[1-9][0-9]*['\"]", region)
+            and (timeout is None or re.fullmatch(r"[1-9][0-9]{0,3}", timeout))
+        )
+
+    compiled_pattern = re.fullmatch(
+        r"(?is)re\.compile\(\s*(?:r|u|b|br|rb)?(?P<quote>['\"])"
+        r"(?P<pattern>(?:\\.|(?!\1).)*)(?P=quote)\s*\)",
+        compact,
+    )
+    if compiled_pattern is not None:
+        pattern = compiled_pattern.group("pattern")
+        # These are exact, reviewed credential-detector definitions used in
+        # this repository.  A generic re.compile exemption would let a real
+        # password through, and even provider-prefix heuristics can be abused
+        # by a concrete value that happens to start with that prefix.
+        safe_scanner_patterns = (
+            (
+                "discordtoken",
+                r"\bmfa\.[A-Za-z0-9_-]{20,}\b|\b[MN][A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{20,}\b",
+            ),
+            (
+                "githubtoken",
+                r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bgh[pousr]_[A-Za-z0-9]{30,}\b",
+            ),
+            ("googleapikey", r"\bAIza[0-9A-Za-z_-]{30,}\b"),
+            (
+                "oauthtoken",
+                r"\b(?:ya29\.[A-Za-z0-9_-]{20,}|1//[A-Za-z0-9_-]{20,})\b",
+            ),
+        )
+        return (normalized_key, pattern) in safe_scanner_patterns
     return False
+
+
+def _source_secret_safe_claim_container(key: str, value: str) -> bool:
+    """Parse the complete claim object; any unconsumed syntax fails closed."""
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
+    if "token" not in normalized_key or not value.startswith("{"):
+        return False
+    source = value
+    source_length = len(source)
+
+    def skip_space(index: int) -> int:
+        while index < source_length and source[index].isspace():
+            index += 1
+        return index
+
+    def parse_string(index: int) -> tuple[str, int] | None:
+        if index >= source_length or source[index] not in {'"', "'"}:
+            return None
+        quote = source[index]
+        cursor = index + 1
+        characters = []
+        while cursor < source_length:
+            character = source[cursor]
+            if character == quote:
+                return "".join(characters), cursor + 1
+            # Escaped claim literals can conceal a credential and are not
+            # needed by the small set of metadata values allowed here.
+            if character == "\\" or character in "\r\n":
+                return None
+            characters.append(character)
+            cursor += 1
+        return None
+
+    def safe_quoted_claim(field: str, literal: str) -> bool:
+        normalized = literal.casefold()
+        if _source_secret_is_placeholder(normalized):
+            return True
+        if re.fullmatch(r"(?:[^@\s]+@)?example\.(?:com|org|net|test)", normalized):
+            return True
+        if re.fullmatch(
+            r"(?:admin|operator|user|visitor)-(?:\d+|test|fixture|dummy)",
+            normalized,
+        ):
+            return True
+        return field == "sign_in_provider" and normalized in {
+            "anonymous",
+            "custom",
+            "email_link",
+            "google.com",
+            "password",
+        }
+
+    def parse_value(field: str, index: int) -> int | None:
+        index = skip_space(index)
+        if index >= source_length:
+            return None
+        if source[index] == "{":
+            return parse_object(index)
+        if source[index] == "[":
+            cursor = skip_space(index + 1)
+            return cursor + 1 if cursor < source_length and source[cursor] == "]" else None
+        quoted = parse_string(index)
+        if quoted is not None:
+            literal, cursor = quoted
+            return cursor if safe_quoted_claim(field, literal) else None
+        cursor = index
+        while cursor < source_length and source[cursor] not in ",}":
+            cursor += 1
+        scalar = source[index:cursor].strip()
+        if scalar.casefold() in {"false", "null", "true", "undefined"}:
+            return cursor
+        if re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", scalar):
+            return cursor
+        return cursor if _source_secret_identifier_reference(field, scalar) else None
+
+    def parse_object(index: int) -> int | None:
+        cursor = skip_space(index)
+        if cursor >= source_length or source[cursor] != "{":
+            return None
+        cursor = skip_space(cursor + 1)
+        if cursor < source_length and source[cursor] == "}":
+            return cursor + 1
+        while cursor < source_length:
+            quoted_key = parse_string(cursor)
+            if quoted_key is not None:
+                field, cursor = quoted_key
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field) is None:
+                    return None
+            else:
+                field_match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", source[cursor:])
+                if field_match is None:
+                    return None
+                field = field_match.group(0)
+                cursor += len(field)
+            normalized_field = field.casefold()
+            if normalized_field not in SOURCE_AUTH_CLAIM_KEYS:
+                return None
+            cursor = skip_space(cursor)
+            if cursor >= source_length or source[cursor] != ":":
+                return None
+            parsed_value = parse_value(normalized_field, cursor + 1)
+            if parsed_value is None:
+                return None
+            cursor = skip_space(parsed_value)
+            if cursor >= source_length:
+                return None
+            if source[cursor] == "}":
+                return cursor + 1
+            if source[cursor] != ",":
+                return None
+            cursor = skip_space(cursor + 1)
+            if cursor < source_length and source[cursor] == "}":
+                return cursor + 1
+        return None
+
+    parsed = parse_object(0)
+    return parsed is not None and skip_space(parsed) == source_length
 
 
 def _concrete_source_secret_value(
@@ -1438,11 +2071,12 @@ def _concrete_source_secret_value(
     *,
     operator: str,
     quoted: bool,
+    key: str | None = None,
 ) -> bool:
     """Separate credential literals from types, placeholders, and references."""
     value = value.strip()
     normalized = value.casefold()
-    if SOURCE_SECRET_PLACEHOLDER.search(normalized):
+    if _source_secret_is_placeholder(normalized):
         return False
     if SOURCE_SECRET_TEMPLATE.fullmatch(value):
         return False
@@ -1459,6 +2093,9 @@ def _concrete_source_secret_value(
         return False
     if value.startswith(("*", "&", "!")):
         return False
+    reference = value.rstrip(")]}")
+    if key and _source_secret_identifier_reference(key, reference):
+        return False
     if re.match(
         r"(?i)(?:os\.(?:environ|environ\.get|getenv)|process\.env|"
         r"(?:read_)?secret|settings\.|config\.|self\.|this\.|"
@@ -1467,7 +2104,7 @@ def _concrete_source_secret_value(
     ):
         return False
     if operator == "=" and re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
-        return False
+        return bool(key and re.fullmatch(r"[A-Z][A-Z0-9_]*", key))
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*\([^\r\n]*\)", value):
         return False
     if any(character in value for character in "([") and re.fullmatch(
@@ -1507,24 +2144,51 @@ def _source_secret_match_value(match: re.Match[str]) -> tuple[str, bool]:
     return value, quoted
 
 
-def _concrete_source_secret(match: re.Match[str]) -> bool:
-    value, quoted = _source_secret_match_value(match)
-    return _concrete_source_secret_value(
-        value,
-        operator=match.group("operator"),
-        quoted=quoted,
+def _source_secret_identifier_reference(key: str, value: str) -> bool:
+    """Recognize a credential-named variable/member reference, not its value."""
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+        return False
+    compact = re.sub(r"\s+", "", value)
+    identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", compact)
+    if not identifiers or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*(?:\?*\.[A-Za-z_][A-Za-z0-9_]*|\(\))*",
+        compact,
+    ):
+        return False
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
+    normalized_reference = re.sub(r"[^a-z0-9]", "", identifiers[-1].casefold())
+    sensitive_terms = ("password", "passwd", "secret", "apikey", "token")
+    return (
+        normalized_key == normalized_reference
+        or normalized_key.endswith(normalized_reference)
+        or normalized_reference.endswith(normalized_key)
+        or (
+            normalized_key == "authorization"
+            and any(term in normalized_reference for term in ("auth", "token"))
+        )
+        or any(
+            term in normalized_key and term in normalized_reference
+            for term in sensitive_terms
+        )
     )
 
 
-def _concrete_source_secret_fallback(match: re.Match[str]) -> bool:
+def _concrete_source_secret_fallback(
+    match: re.Match[str],
+    *,
+    key: str,
+) -> bool:
     value, quoted = _source_secret_match_value(match)
-    return _concrete_source_secret_value(value, operator="=", quoted=quoted)
-
-
-def _concrete_source_secret_wrapper(match: re.Match[str]) -> bool:
-    if match.group("wrapper").casefold() in SOURCE_SECRET_RUNTIME_READERS:
+    if not quoted and any(
+        character in value for character in "(){}[]"
+    ):
         return False
-    return _concrete_source_secret_fallback(match)
+    return _concrete_source_secret_value(
+        value,
+        operator="=",
+        quoted=quoted,
+        key=key,
+    )
 
 
 def _contains_source_secret_block(text: str) -> bool:
@@ -1548,34 +2212,54 @@ def _contains_source_secret_block(text: str) -> bool:
     return False
 
 
-def contains_secret(text: str) -> bool:
-    if any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values()):
-        return True
-    for operator, value, truncated in _bounded_source_secret_assignments(text):
-        if truncated or _concrete_source_secret_rhs(operator, value):
-            return True
-    if any(
-        _concrete_source_secret(match)
-        for match in SOURCE_SECRET_ASSIGNMENT.finditer(text)
-    ):
-        return True
-    if any(
-        _concrete_source_secret_fallback(match)
-        for pattern in (
-            SOURCE_SECRET_FALLBACK_ASSIGNMENT,
-            SOURCE_SECRET_DEFAULT_ARGUMENT,
-            SOURCE_SECRET_TERNARY_TRUE_ASSIGNMENT,
-            SOURCE_SECRET_TERNARY_FALSE_ASSIGNMENT,
+def _mask_secret_manager_resource_names(text: str) -> str:
+    """Mask configured Secret Manager identifiers, never arbitrary secret values."""
+    assignments = list(SOURCE_SECRET_RESOURCE_ASSIGNMENT.finditer(text))
+    replacements = []
+    for match in assignments:
+        value = match.group("value")
+        full_resource = bool(
+            re.fullmatch(
+                r"projects/[A-Za-z0-9._-]+/secrets/[A-Za-z0-9._-]+"
+                r"(?:/versions/[A-Za-z0-9._-]+)?",
+                value,
+            )
         )
-        for match in pattern.finditer(text)
-    ):
+        if full_resource:
+            replacements.append(match.span("value"))
+    for start, end in reversed(replacements):
+        marker = "${SECRET_RESOURCE}"
+        replacement = (marker + " " * (end - start))[: end - start]
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
+def _contains_pathological_sensitive_line(text: str) -> bool:
+    """Fail closed before structural regexes see a dense minified line."""
+    for line in text.split("\n"):
+        if len(line) <= SOURCE_SECRET_RHS_MAX_CHARS:
+            continue
+        normalized = line.casefold()
+        key_count = sum(normalized.count(hint) for hint in SOURCE_SECRET_KEY_HINTS)
+        if key_count >= SOURCE_SECRET_LONG_LINE_KEY_LIMIT:
+            return True
+    return False
+
+
+def contains_secret(text: str) -> bool:
+    scanned = _mask_secret_manager_resource_names(text)
+    if _contains_pathological_sensitive_line(scanned):
         return True
-    if any(
-        _concrete_source_secret_wrapper(match)
-        for match in SOURCE_SECRET_WRAPPED_LITERAL_ASSIGNMENT.finditer(text)
-    ):
+    if any(pattern.search(scanned) for pattern in SOURCE_SECRET_PATTERNS.values()):
         return True
-    return _contains_source_secret_block(text)
+    if _contains_embedded_source_secret(scanned):
+        return True
+    for key, operator, value, truncated, _start, _end in (
+        _source_secret_assignments_for_scan(scanned)
+    ):
+        if truncated or _concrete_source_secret_rhs(key, operator, value):
+            return True
+    return _contains_source_secret_block(scanned)
 
 
 def contains_history_secret(text: str) -> bool:
@@ -1584,6 +2268,75 @@ def contains_history_secret(text: str) -> bool:
         return True
     normalized_diff = re.sub(r"(?m)^(?:\+(?!\+\+)|-(?!--))", "", text)
     return contains_secret(normalized_diff)
+
+
+def redact_source_secrets(text: str) -> tuple[str, int] | None:
+    """Redact bounded current-source credential lines, otherwise fail closed.
+
+    Historical patches keep their stricter all-or-nothing policy.  A complete,
+    bounded multiline assignment can be removed as a unit; an overlong or
+    otherwise unbounded expression excludes the whole file.  Every sanitized
+    snapshot is scanned again before it is returned.
+    """
+    # Partial-redaction spans support LF and CRLF only.  For another Unicode
+    # line separator, scan an LF-normalized view too: retain a clean file, but
+    # fail closed instead of attempting offset-sensitive redaction when either
+    # view has credential-like content.
+    if re.search(r"\r(?!\n)|[\v\f\x85\u2028\u2029]", text):
+        normalized_lines = text.replace("\r\n", "\n")
+        normalized_lines = re.sub(
+            r"[\r\v\f\x85\u2028\u2029]",
+            "\n",
+            normalized_lines,
+        )
+        if contains_secret(text) or contains_secret(normalized_lines):
+            return None
+        return text, 0
+    if not contains_secret(text):
+        return text, 0
+    if _contains_pathological_sensitive_line(text):
+        return None
+    if SOURCE_SECRET_PATTERNS["private-key"].search(text):
+        return None
+    if SOURCE_SECRET_BLOCK_ASSIGNMENT.search(text):
+        return None
+    scanned = _mask_secret_manager_resource_names(text)
+    assignment_line_indexes: set[int] = set()
+    for key, operator, value, truncated, start, end in (
+        _source_secret_assignments_for_scan(scanned)
+    ):
+        if truncated:
+            return None
+        if not _concrete_source_secret_rhs(key, operator, value):
+            continue
+        first_line = scanned.count("\n", 0, start)
+        last_line = scanned.count("\n", 0, end)
+        assignment_line_indexes.update(range(first_line, last_line + 1))
+
+    redacted_lines = []
+    redaction_count = 0
+    lf_lines = text.split("\n")
+    for index, raw_line in enumerate(lf_lines):
+        has_lf = index < len(lf_lines) - 1
+        has_crlf = has_lf and raw_line.endswith("\r")
+        content = raw_line[:-1] if has_crlf else raw_line
+        ending = "\r\n" if has_crlf else "\n" if has_lf else ""
+        if index in assignment_line_indexes or contains_secret(content):
+            indentation = content[: len(content) - len(content.lstrip(" \t"))]
+            redacted_lines.append(
+                f"{indentation}{SOURCE_SECRET_REDACTION_MARKER}{ending}"
+            )
+            redaction_count += 1
+        else:
+            redacted_lines.append(f"{content}{ending}")
+
+    sanitized = "".join(redacted_lines)
+    if redaction_count == 0 or contains_secret(sanitized):
+        return None
+    meaningful = sanitized.replace(SOURCE_SECRET_REDACTION_MARKER, "").strip()
+    if not meaningful:
+        return None
+    return sanitized, redaction_count
 
 
 def document_policy(
@@ -2477,7 +3230,8 @@ async def sync_once(args) -> dict:
                 except UnicodeDecodeError:
                     skipped += 1
                     continue
-                if contains_secret(content):
+                sanitized_source = redact_source_secrets(content)
+                if sanitized_source is None:
                     log.warning(
                         "Skipping source with credential-like content: %s:%s",
                         repository.name,
@@ -2485,6 +3239,14 @@ async def sync_once(args) -> dict:
                     )
                     skipped += 1
                     continue
+                content, redaction_count = sanitized_source
+                if redaction_count:
+                    log.warning(
+                        "Redacted %d credential-like source line(s): %s:%s",
+                        redaction_count,
+                        repository.name,
+                        path,
+                    )
                 policy = document_policy(
                     repository,
                     path,
