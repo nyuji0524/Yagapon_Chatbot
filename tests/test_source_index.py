@@ -97,6 +97,9 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
         'password = f"ProdRealSecret123"',
         "password = `ProdRealSecret123`",
         "password = process.env.DB_PASSWORD || `ProdRealSecret123`",
+        'const dbPassword =\n  "ProdRealSecret123";',
+        'password: SecretStr = SecretStr("ProdRealSecret123")',
+        'password = SecretStr(value="ProdRealSecret123")',
     ),
 )
 def test_source_secret_scanner_blocks_common_live_secret_forms(assignment):
@@ -129,6 +132,13 @@ def test_source_secret_scanner_blocks_yaml_block_scalars():
             'dbPassword = String.fromEnvironment("DB_PASSWORD", '
             'defaultValue: "ProdRealSecret123")'
         ),
+        (
+            "const dbPassword =\n"
+            "  process.env.DB_PASSWORD ||\n"
+            '  "ProdRealSecret123";'
+        ),
+        'password = os.getenv("DB_PASSWORD", SecretStr("ProdRealSecret123"))',
+        'password = os.getenv("DB_PASSWORD") or SecretStr("ProdRealSecret123")',
         "token = read_secret('TOKEN') or production-token-value",
     ),
 )
@@ -174,12 +184,24 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         "password: replace-with-your-password",
         'api_key = "example-api-key-for-docs"',
         'password = SecretStr("example-password")',
+        'password = SecretStr(value="example-password")',
+        (
+            'password: SecretStr = SecretStr(os.getenv("DB_PASSWORD", ""))'
+        ),
+        'password = os.getenv(\n  "DB_PASSWORD",\n  ""\n)',
+        "const dbPassword =\n  process.env.DB_PASSWORD;",
         "password = process.env.DB_PASSWORD || `example-password`",
         "token = access_token",
     ),
 )
 def test_source_secret_scanner_allows_types_references_and_placeholders(assignment):
     assert not contains_secret(assignment)
+
+
+def test_source_secret_scanner_fails_closed_when_assignment_rhs_exceeds_bound():
+    assignment = "password = choose_secret(\n" + "  runtime_value,\n" * 20 + ")"
+
+    assert contains_secret(assignment)
 
 
 def test_history_secret_scanner_fails_closed_for_removed_credentials():

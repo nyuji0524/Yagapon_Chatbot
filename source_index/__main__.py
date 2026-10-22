@@ -79,7 +79,7 @@ MAX_GITHUB_JSON_BYTES = 25_000_000
 CHUNK_CHARS = 36_000
 SOURCE_UPLOAD_CONCURRENCY_DEFAULT = 2
 SOURCE_UPLOAD_CONCURRENCY_MAX = 8
-SOURCE_POLICY_VERSION = 8
+SOURCE_POLICY_VERSION = 9
 DEFAULT_SOURCE_HISTORY_SINCE = "2024-10-01T00:00:00+09:00"
 SOURCE_HISTORY_PAGE_SIZE = 100
 SOURCE_HISTORY_MAX_COMMITS_DEFAULT = 2_000
@@ -165,6 +165,28 @@ SOURCE_SECRET_WRAPPED_LITERAL_ASSIGNMENT = re.compile(
     r"(?P<wrapper>[A-Za-z_][A-Za-z0-9_.]*)\s*\(\s*"
     r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
 )
+SOURCE_SECRET_ASSIGNMENT_START = re.compile(
+    r"(?imx)(?<![A-Za-z0-9_])"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
+    r"[ \t]*(?P<operator>[:=])[ \t]*"
+)
+SOURCE_SECRET_QUOTED_VALUE = re.compile(
+    SOURCE_SECRET_QUOTED_LITERAL_PATTERN,
+    re.IGNORECASE | re.VERBOSE,
+)
+SOURCE_SECRET_RHS_FALLBACK = re.compile(
+    r"(?ix)(?:\|\||\?\?|\bor\b|\belse\b)\s*"
+    r"(?:" + SOURCE_SECRET_LITERAL_PATTERN + r")"
+)
+SOURCE_SECRET_TYPE_ANNOTATION = re.compile(
+    r"(?is)^\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_.]*"
+    r"(?:\s*\[[^\]\r\n]{0,256}\])?"
+    r"(?:\s*\|\s*[A-Za-z_][A-Za-z0-9_.]*)*)"
+    r"\s*=\s*(?P<value>.+)$"
+)
+SOURCE_SECRET_RHS_MAX_CHARS = 4_096
+SOURCE_SECRET_RHS_MAX_LINES = 16
 SOURCE_SECRET_RUNTIME_READERS = frozenset(
     {
         "config.get",
@@ -179,6 +201,25 @@ SOURCE_SECRET_RUNTIME_READERS = frozenset(
         "string.fromenvironment",
         "vault.get",
     }
+)
+SOURCE_SECRET_RUNTIME_CALL_START = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.])(?:"
+    + "|".join(
+        sorted((re.escape(value) for value in SOURCE_SECRET_RUNTIME_READERS), key=len, reverse=True)
+    )
+    + r")\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*)?"
+)
+SOURCE_SECRET_RUNTIME_SUBSCRIPT_START = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.])os\.environ\s*\[\s*"
+)
+SOURCE_SECRET_LOOKUP_CALL_START = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.])"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*"
+    r"(?:get|getenv|getelementbyid|read_secret)\s*\(\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*)?"
+)
+SOURCE_SECRET_LOOKUP_SUBSCRIPT_START = re.compile(
+    r"(?i)(?:[A-Za-z_][A-Za-z0-9_.]*|\])\s*\[\s*"
 )
 SOURCE_SECRET_PLACEHOLDER = re.compile(
     r"(?i)(?:^|[-_./<>{}\s])"
@@ -1141,6 +1182,235 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
     )
 
 
+def _source_secret_delimiter_state(value: str) -> tuple[int, str | None]:
+    """Return bracket depth and any unterminated quote in a bounded RHS."""
+    depth = 0
+    quote = None
+    escaped = False
+    for character in value:
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if character == quote:
+                quote = None
+            continue
+        if character in {'"', "'", "`"}:
+            quote = character
+        elif character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth = max(0, depth - 1)
+    return depth, quote
+
+
+def _source_secret_rhs_continues(value: str) -> bool:
+    stripped = value.rstrip()
+    if not stripped:
+        return True
+    depth, quote = _source_secret_delimiter_state(value)
+    if depth or quote is not None:
+        return True
+    return bool(
+        re.search(
+            r"(?ix)(?:\\|\|\||&&|\?\?|[=,+*/?]|\b(?:and|or|else))\s*$",
+            stripped,
+        )
+    ) or (stripped.endswith(":") and "?" in stripped)
+
+
+def _source_secret_continuation_line(value: str, base_indent: int) -> bool:
+    stripped = value.lstrip(" \t")
+    if not stripped:
+        return False
+    indentation = len(value[: len(value) - len(stripped)].expandtabs(8))
+    if indentation <= base_indent:
+        return False
+    return stripped.startswith(("||", "&&", "??", "?", ":", ".")) or bool(
+        re.match(r"(?i)(?:and|or|else)\b", stripped)
+    )
+
+
+def _bounded_source_secret_assignments(
+    text: str,
+) -> list[tuple[str, str, bool]]:
+    """Extract small logical RHS windows; an overlong continuation fails closed."""
+    assignments = []
+    for match in SOURCE_SECRET_ASSIGNMENT_START.finditer(text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        leading = text[line_start:match.start()]
+        if _source_secret_open_quote(leading) is not None:
+            continue
+        if match.group("operator") == ":" and re.match(
+            r"\s*(?:if|elif|while|for|case|match)\b",
+            leading,
+            re.IGNORECASE,
+        ):
+            continue
+        indentation_text = leading[: len(leading) - len(leading.lstrip(" \t"))]
+        base_indent = len(indentation_text.expandtabs(8))
+        cursor = match.end()
+        parts = []
+        characters = 0
+        truncated = False
+        while True:
+            line_end = text.find("\n", cursor)
+            if line_end < 0:
+                line_end = len(text)
+            part = text[cursor:line_end].rstrip("\r")
+            additional = len(part) + (1 if parts else 0)
+            if (
+                len(parts) >= SOURCE_SECRET_RHS_MAX_LINES
+                or characters + additional > SOURCE_SECRET_RHS_MAX_CHARS
+            ):
+                truncated = True
+                break
+            parts.append(part)
+            characters += additional
+            joined = "\n".join(parts)
+            continues = _source_secret_rhs_continues(joined)
+            if line_end >= len(text):
+                truncated = truncated or (continues and bool(joined.strip()))
+                break
+            next_start = line_end + 1
+            next_end = text.find("\n", next_start)
+            if next_end < 0:
+                next_end = len(text)
+            next_line = text[next_start:next_end].rstrip("\r")
+            if not joined.strip():
+                next_stripped = next_line.lstrip(" \t")
+                next_indentation = len(
+                    next_line[: len(next_line) - len(next_stripped)].expandtabs(8)
+                )
+                continues = bool(next_stripped) and next_indentation > base_indent
+            if not continues and not _source_secret_continuation_line(
+                next_line,
+                base_indent,
+            ):
+                break
+            cursor = next_start
+        assignments.append((match.group("operator"), "\n".join(parts), truncated))
+    return assignments
+
+
+def _source_secret_open_quote(value: str) -> str | None:
+    quote = None
+    escaped = False
+    for character in value:
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if quote is None and character in {'"', "'", "`"}:
+            quote = character
+        elif character == quote:
+            quote = None
+    return quote
+
+
+def _source_secret_actual_rhs(operator: str, value: str) -> str:
+    value = _source_secret_first_expression(value)
+    if operator != ":":
+        return value
+    annotation = SOURCE_SECRET_TYPE_ANNOTATION.fullmatch(value.strip())
+    return annotation.group("value") if annotation else value
+
+
+def _source_secret_first_expression(value: str) -> str:
+    """Stop at a top-level statement/argument boundary, preserving nested calls."""
+    depth = 0
+    quote = None
+    escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if character == quote:
+                quote = None
+            continue
+        if character in {'"', "'", "`"}:
+            quote = character
+        elif character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and character in ",;":
+            return value[:index]
+    return value
+
+
+def _source_secret_runtime_lookup_spans(value: str) -> set[tuple[int, int]]:
+    spans = set()
+    for pattern in (
+        SOURCE_SECRET_RUNTIME_CALL_START,
+        SOURCE_SECRET_RUNTIME_SUBSCRIPT_START,
+        SOURCE_SECRET_LOOKUP_CALL_START,
+        SOURCE_SECRET_LOOKUP_SUBSCRIPT_START,
+    ):
+        for reader in pattern.finditer(value):
+            literal = SOURCE_SECRET_QUOTED_VALUE.match(value, reader.end())
+            if literal is not None:
+                spans.add(literal.span())
+    return spans
+
+
+def _source_secret_literal_is_reference(
+    value: str,
+    match: re.Match[str],
+    expression: str,
+) -> bool:
+    if re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", value):
+        return True
+    if re.fullmatch(r"s/\^[A-Z_][A-Z0-9_]*=//p", value):
+        return True
+    return expression[match.end() :].lstrip().startswith(":")
+
+
+def _concrete_source_secret_rhs(operator: str, raw_value: str) -> bool:
+    """Inspect every literal in one bounded sensitive assignment expression."""
+    value = _source_secret_actual_rhs(operator, raw_value)
+    lookup_spans = _source_secret_runtime_lookup_spans(value)
+    for literal in SOURCE_SECRET_QUOTED_VALUE.finditer(value):
+        literal_value, _quoted = _source_secret_match_value(literal)
+        if literal.span() in lookup_spans or _source_secret_literal_is_reference(
+            literal_value,
+            literal,
+            value,
+        ):
+            continue
+        if _concrete_source_secret_value(
+            literal_value,
+            operator="=",
+            quoted=True,
+        ):
+            return True
+    for fallback in SOURCE_SECRET_RHS_FALLBACK.finditer(value):
+        if _concrete_source_secret_fallback(fallback):
+            return True
+    compact = re.sub(r"\s+", " ", value).strip().rstrip(",;")
+    if operator == ":" and re.fullmatch(r"[>|](?:[+-][1-9]?|[1-9][+-]?)?", compact):
+        return False
+    if (
+        len(compact) >= 8
+        and re.fullmatch(r"[^\s()\[\]{}'\"`]+", compact)
+    ):
+        return _concrete_source_secret_value(
+            compact,
+            operator=operator,
+            quoted=False,
+        )
+    return False
+
+
 def _concrete_source_secret_value(
     value: str,
     *,
@@ -1259,6 +1529,9 @@ def _contains_source_secret_block(text: str) -> bool:
 def contains_secret(text: str) -> bool:
     if any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values()):
         return True
+    for operator, value, truncated in _bounded_source_secret_assignments(text):
+        if truncated or _concrete_source_secret_rhs(operator, value):
+            return True
     if any(
         _concrete_source_secret(match)
         for match in SOURCE_SECRET_ASSIGNMENT.finditer(text)
