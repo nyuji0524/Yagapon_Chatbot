@@ -14,6 +14,7 @@ from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     AnswerStatus,
     CorpusManager,
+    _select_lexical_context_hits,
     answer_declares_missing_knowledge,
     backfill_channel_concurrency,
     calculate_incremental_after,
@@ -26,6 +27,7 @@ from bot.corpus import (
     run_backfill_channels,
     sensitive_request_response,
     trusted_capability_response,
+    trusted_festival_mapping_response,
 )
 from bot.festival import CalendarWindow
 from bot.firebase_knowledge import FirebaseEvidence
@@ -36,13 +38,166 @@ from bot.knowledge_pipeline import (
     knowledge_pipeline_lock,
     release_knowledge_pipeline_lock,
 )
-from bot.rag_store import RagStore
+from bot.rag_store import LexicalHit, RagStore
 
 
 @pytest.fixture
 def corpus_manager():
     with patch("bot.corpus.genai.Client"):
         yield CorpusManager()
+
+
+def lexical_hit(
+    key: str,
+    *,
+    score: int,
+    authority: str,
+    source_type: str,
+    status: str = "historical",
+) -> LexicalHit:
+    return LexicalHit(
+        document_key=key,
+        channel_name=key,
+        festival=27,
+        source_url=f"https://example.com/{key}",
+        excerpt=key,
+        score=score,
+        authority=authority,
+        status=status,
+        source_type=source_type,
+    )
+
+
+def test_history_context_reserves_narrative_sources_after_authority_ranking():
+    hits = [
+        lexical_hit(
+            f"commit-{index}",
+            score=500 - index,
+            authority="repository_history",
+            source_type="source_code_history",
+        )
+        for index in range(8)
+    ]
+    hits.extend(
+        [
+            lexical_hit(
+                "discord-operation",
+                score=310,
+                authority="conversation",
+                source_type="discord_conversation",
+                status="raw",
+            ),
+            lexical_hit(
+                "meeting-review",
+                score=300,
+                authority="reviewed_record",
+                source_type="meeting_minutes",
+            ),
+        ]
+    )
+
+    selected = _select_lexical_context_hits(
+        hits,
+        question_kind=QuestionKind.HISTORY,
+        limit=6,
+    )
+
+    assert len(selected) == 6
+    assert {hit.document_key for hit in selected}.issuperset(
+        {"discord-operation", "meeting-review"}
+    )
+
+
+def test_non_history_context_keeps_direct_authority_priority():
+    raw = lexical_hit(
+        "raw-conversation",
+        score=900,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    deployed = lexical_hit(
+        "deployed-rules",
+        score=100,
+        authority="deployed_implementation",
+        source_type="source_code",
+        status="deployed",
+    )
+
+    selected = _select_lexical_context_hits(
+        [raw, deployed],
+        question_kind=QuestionKind.AUTHORIZATION,
+        limit=1,
+    )
+
+    assert selected == [deployed]
+
+
+def test_small_history_context_limit_does_not_replace_best_hit():
+    implementation = lexical_hit(
+        "implementation",
+        score=900,
+        authority="repository_history",
+        source_type="source_code_history",
+    )
+    conversation = lexical_hit(
+        "conversation",
+        score=100,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+
+    selected = _select_lexical_context_hits(
+        [implementation, conversation],
+        question_kind=QuestionKind.HISTORY,
+        limit=1,
+    )
+
+    assert selected == [implementation]
+
+
+@pytest.mark.asyncio
+async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus_manager):
+    implementation = lexical_hit(
+        "implementation",
+        score=500,
+        authority="repository_history",
+        source_type="source_code_history",
+    )
+    conversation = lexical_hit(
+        "on-site-report",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券"])
+    corpus_manager.rag_store.search_exact = Mock(
+        return_value=[implementation, conversation]
+    )
+    corpus_manager.rag_store.record_query = Mock(return_value="query-history")
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("stop after request inspection")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券運用で問題になった点は何ですか",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    call = corpus_manager._client.aio.models.generate_content.await_args
+    assert call.kwargs["config"].tools is not None
+    assert call.kwargs["config"].thinking_config.thinking_level == "MEDIUM"
+    assert "implementation" in call.kwargs["contents"]
+    assert "on-site-report" in call.kwargs["contents"]
+    assert corpus_manager.rag_store.search_exact.call_args.kwargs["question_kind"] is (
+        QuestionKind.HISTORY
+    )
 
 
 def add_message(manager: CorpusManager, *, content: str = "テストメッセージ", timestamp=None):
@@ -1559,6 +1714,69 @@ async def test_capability_help_is_deterministic_and_skips_retrieval(corpus_manag
     assert result.citations == ()
     assert "Firebase" in result.text
     assert corpus_manager._query_counts == {}
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+    corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
+    corpus_manager.rag_store.query_terms.assert_not_called()
+
+
+def test_trusted_festival_mapping_response_uses_operating_year_rule():
+    response = trusted_festival_mapping_response(
+        "2026年9月30日と2026年10月1日はそれぞれ何th？"
+    )
+
+    assert response is not None
+    text, festivals = response
+    assert festivals == (27, 28)
+    assert "2026-09-30: **27th**" in text
+    assert "2026-10-01: **28th**" in text
+
+
+@pytest.mark.asyncio
+async def test_festival_mapping_is_deterministic_and_keeps_timeless_canonical_source(
+    corpus_manager,
+):
+    corpus_manager._client.aio.models.generate_content = AsyncMock()
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock()
+    corpus_manager.rag_store.query_terms = Mock()
+    corpus_manager.rag_store.search_exact = Mock()
+
+    result = await corpus_manager.query_with_trace(
+        "2026年9月30日と2026年10月1日はそれぞれ何th？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert result.festival is None
+    assert "2026-09-30: **27th**" in result.text
+    assert "2026-10-01: **28th**" in result.text
+    assert result.lexical_keys == ("builtin:festival-operating-year",)
+    assert result.citations == (
+        "[確定仕様: #矢上祭の年度区分]"
+        "(https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/"
+        "docs/festival-operating-year.md)",
+    )
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+    corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
+    corpus_manager.rag_store.query_terms.assert_not_called()
+    corpus_manager.rag_store.search_exact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invalid_explicit_date_is_rejected_before_retrieval(corpus_manager):
+    corpus_manager._client.aio.models.generate_content = AsyncMock()
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock()
+    corpus_manager.rag_store.query_terms = Mock()
+
+    result = await corpus_manager.query_with_trace(
+        "2026年2月29日は何thですか",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert result.festival is None
+    assert "実在しない" in result.text
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
     corpus_manager.firebase_knowledge.evidence_for.assert_not_awaited()
     corpus_manager.rag_store.query_terms.assert_not_called()

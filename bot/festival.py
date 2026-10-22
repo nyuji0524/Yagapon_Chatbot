@@ -13,8 +13,29 @@ _EXPLICIT_DATE_PATTERN = re.compile(
     r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(\d+)\s*"
     r"(?:月|[/.-])\s*(\d+)\s*日?(?!\d)"
 )
+_EXPLICIT_MONTH_PATTERN = re.compile(
+    r"(?<!\d)(20\d{2})\s*(?:"
+    r"年\s*(\d{1,2})\s*月|[/.-]\s*(\d{1,2})(?!\d))"
+)
 _RANGE_SEPARATOR_PATTERN = re.compile(
     r"(?:から|まで|[〜～~]|\.{2,}|[–—]|(?<=\s)-|-(?=\s))"
+)
+_FESTIVAL_MAPPING_INTENT_PATTERN = re.compile(
+    r"(?:何\s*th|(?:何|どの)\s*(?:年度|回次)|年度\s*(?:区分|分類)|"
+    r"(?:矢上祭|矢実)(?:の)?\s*(?:(?:第\s*)?何回(?:目)?|回次)|"
+    r"(?:第\s*)?何回(?:目)?(?:の)?\s*(?:矢上祭|矢実))",
+    re.IGNORECASE,
+)
+_QUERY_DIGIT_TRANSLATION = str.maketrans(
+    "０１２３４５６７８９／．－",
+    "0123456789/.-",
+)
+_FESTIVAL_MAPPING_FILLER_PATTERN = re.compile(
+    r"(?:それぞれ|各日|各日付|日付|どちら|年度|回次|区分|分類|だけ|のみ|単に|"
+    r"教えて(?:ください|下さい)?|答えて(?:ください|下さい)?|"
+    r"判定(?:して(?:ください|下さい)?)?|属(?:する|しますか)|"
+    r"該当(?:する|しますか)|な(?:る|りますか)|ですか|でしょうか|お願いします)",
+    re.IGNORECASE,
 )
 
 
@@ -58,9 +79,75 @@ def festival_period(number: int) -> FestivalPeriod:
     )
 
 
+def _festival_mapping_date_matches(query: str) -> tuple[str, list[re.Match[str]]] | None:
+    """Return date tokens only when the whole question is a year mapping."""
+    normalized = query.translate(_QUERY_DIGIT_TRANSLATION).strip()
+    if not _FESTIVAL_MAPPING_INTENT_PATTERN.search(normalized):
+        return None
+    matches = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
+    if not matches:
+        return None
+    residual = _EXPLICIT_DATE_PATTERN.sub(" ", normalized)
+    residual = _FESTIVAL_MAPPING_INTENT_PATTERN.sub(" ", residual)
+    residual = _FESTIVAL_MAPPING_FILLER_PATTERN.sub(" ", residual)
+    residual = re.sub(
+        r"[\s、。,.!?！？・/／:：()（）\[\]「」『』とや及びまたははのをにがもでへからか]+",
+        "",
+        residual,
+    )
+    if residual:
+        return None
+    return normalized, matches
+
+
+def has_invalid_explicit_calendar_reference(query: str) -> bool:
+    """Reject impossible fully-qualified dates before broad retrieval."""
+    normalized = query.translate(_QUERY_DIGIT_TRANSLATION).strip()
+    try:
+        for match in _EXPLICIT_DATE_PATTERN.finditer(normalized):
+            date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return True
+    for match in _EXPLICIT_MONTH_PATTERN.finditer(normalized):
+        month = int(match.group(2) or match.group(3))
+        if not 1 <= month <= 12:
+            return True
+    return False
+
+
+def festival_subject_dates_from_query(query: str) -> tuple[date, ...]:
+    """Return calendar dates that the user asks to classify into festival years.
+
+    A question such as ``2026-09-30と2026-10-01はそれぞれ何th`` uses the
+    two dates as *subjects*. They are not timestamps of Discord messages or
+    other evidence. Keeping this distinction explicit prevents retrieval from
+    filtering the timeless operating-year contract out of the evidence set.
+
+    Invalid or non-mapping questions return an empty tuple so callers retain
+    their normal fail-closed date parsing and retrieval behavior.
+    """
+    mapping = _festival_mapping_date_matches(query)
+    if mapping is None:
+        return ()
+    _normalized, matches = mapping
+    values: list[date] = []
+    try:
+        for match in matches:
+            value = date(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+            )
+            if value not in values:
+                values.append(value)
+    except ValueError:
+        return ()
+    return tuple(values)
+
+
 def festival_from_query(query: str, now: datetime | None = None) -> int | None:
     """Resolve explicit/relative festival references; leave timeless queries unfiltered."""
-    normalized = query.strip()
+    normalized = query.translate(_QUERY_DIGIT_TRANSLATION).strip()
     try:
         for explicit_date in _EXPLICIT_DATE_PATTERN.finditer(normalized):
             date(
@@ -115,9 +202,9 @@ def calendar_date_from_query(
     so a question on 2026-10-21 resolves to 2026-10-09 instead of searching all
     festival years.
     """
-    normalized = query.translate(
-        str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
-    )
+    normalized = query.translate(_QUERY_DIGIT_TRANSLATION)
+    if festival_subject_dates_from_query(normalized):
+        return None
     explicit_matches = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
     # A single-date filter must not silently discard evidence for comparison
     # questions containing two distinct dates.
@@ -188,11 +275,11 @@ def calendar_window_from_query(
     is usually discussed over several days and a one-day filter would make a
     natural question such as "去年の今頃" miss almost every relevant record.
     """
-    if calendar_date_from_query(query, now, festival=festival) is not None:
+    normalized = query.translate(_QUERY_DIGIT_TRANSLATION)
+    if festival_subject_dates_from_query(normalized):
         return None
-    normalized = query.translate(
-        str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
-    )
+    if calendar_date_from_query(normalized, now, festival=festival) is not None:
+        return None
     current = (now or datetime.now(JST)).astimezone(JST).date()
 
     explicit_dates = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))

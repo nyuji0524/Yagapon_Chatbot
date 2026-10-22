@@ -30,6 +30,9 @@ from bot.festival import (
     festival_from_query,
     festival_metadata_filter,
     festival_number,
+    festival_period,
+    festival_subject_dates_from_query,
+    has_invalid_explicit_calendar_reference,
 )
 from bot.firebase_knowledge import (
     COLLECTIONS,
@@ -48,6 +51,7 @@ from bot.knowledge_authority import (
     can_answer_directly,
     classify_question_facets,
     direct_authorities,
+    is_history_narrative_source,
 )
 from bot.knowledge_pipeline import (
     KnowledgePipelineBusy,
@@ -141,6 +145,11 @@ BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
 BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
 BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
 BUILTIN_SOURCE_TYPE = "builtin_reference"
+FESTIVAL_OPERATING_YEAR_DOCUMENT_KEY = "builtin:festival-operating-year"
+FESTIVAL_OPERATING_YEAR_SOURCE_URL = (
+    "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/"
+    "docs/festival-operating-year.md"
+)
 
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -215,6 +224,78 @@ def requires_comprehensive_answer(question: str) -> bool:
         listed_lines >= 2
         or sum(bool(re.search(r"(?:教えて|知りたい|まとめ|確認)", line)) for line in nonempty_lines) >= 2
     )
+
+
+def _select_lexical_context_hits(
+    hits: list[LexicalHit],
+    *,
+    question_kind: QuestionKind,
+    limit: int,
+) -> list[LexicalHit]:
+    """Rank exact hits while preserving explanatory evidence for history.
+
+    Current-state and authorization questions continue to rank direct,
+    reviewed authorities first. Historical questions instead rank lexical
+    relevance first and reserve part of the bounded context for Discord or
+    meeting records, which explain requests and operational problems that a
+    repository diff alone cannot establish.
+    """
+    if limit <= 0:
+        return []
+    if question_kind is not QuestionKind.HISTORY:
+        return sorted(
+            hits,
+            key=lambda hit: (
+                can_answer_directly(question_kind, hit.authority, hit.status),
+                hit.score,
+                authority_score(question_kind, hit.authority, hit.status),
+            ),
+            reverse=True,
+        )[:limit]
+
+    ranked = sorted(
+        hits,
+        key=lambda hit: (
+            hit.score,
+            authority_score(question_kind, hit.authority, hit.status),
+            can_answer_directly(question_kind, hit.authority, hit.status),
+        ),
+        reverse=True,
+    )
+    selected = ranked[:limit]
+    narrative_hits = [
+        hit for hit in ranked if is_history_narrative_source(hit.source_type)
+    ]
+    reserved = min(len(narrative_hits), max(1, limit // 3)) if limit >= 3 else 0
+    selected_narratives = sum(
+        is_history_narrative_source(hit.source_type) for hit in selected
+    )
+    if selected_narratives >= reserved:
+        return selected
+
+    selected_keys = {hit.document_key for hit in selected}
+    replacements = (
+        hit for hit in narrative_hits if hit.document_key not in selected_keys
+    )
+    for replacement in replacements:
+        replace_at = next(
+            (
+                index
+                for index in range(len(selected) - 1, -1, -1)
+                if not is_history_narrative_source(selected[index].source_type)
+            ),
+            None,
+        )
+        if replace_at is None:
+            break
+        selected[replace_at] = replacement
+        selected_narratives += 1
+        if selected_narratives >= reserved:
+            break
+
+    rank = {hit.document_key: index for index, hit in enumerate(ranked)}
+    selected.sort(key=lambda hit: rank[hit.document_key])
+    return selected
 
 
 def backfill_channel_concurrency() -> int:
@@ -935,6 +1016,28 @@ def trusted_capability_response(question: str) -> str | None:
     if re.fullmatch(bot_subject + identity_intent + r"[。！？!?、,.]*", normalized):
         return _TRUSTED_CAPABILITY_RESPONSE
     return None
+
+
+def trusted_festival_mapping_response(question: str) -> tuple[str, tuple[int, ...]] | None:
+    """Render explicit date-to-festival mappings from the canonical rule.
+
+    This narrow deterministic path exists because the dates in a mapping
+    question are values to classify, not evidence timestamps. It deliberately
+    accepts only fully-qualified valid dates plus an explicit mapping intent;
+    all other date questions continue through the ACL-aware RAG pipeline.
+    """
+    subject_dates = festival_subject_dates_from_query(question)
+    if not subject_dates:
+        return None
+    mappings = tuple(festival_number(value) for value in subject_dates)
+    lines = ["矢上祭実行委員会の年度区分は、毎年10月1日に切り替わるぽん。", ""]
+    for value, number in zip(subject_dates, mappings, strict=True):
+        period = festival_period(number)
+        lines.append(
+            f"- {value.isoformat()}: **{number}th** "
+            f"（{period.starts_on.isoformat()} 〜 {period.ends_on.isoformat()}）"
+        )
+    return "\n".join(lines), mappings
 
 
 @dataclass
@@ -1763,6 +1866,33 @@ class CorpusManager:
                 festival=festival,
                 no_answer=False,
             )
+        if has_invalid_explicit_calendar_reference(question):
+            return RagAnswer(
+                text=(
+                    "指定された日付は実在しないため、その条件では検索できないぽん。"
+                    "年月日を確認して、もう一度質問してほしいぽん。"
+                ),
+                festival=None,
+                no_answer=True,
+            )
+        festival_mapping = trusted_festival_mapping_response(question)
+        if festival_mapping:
+            mapping_text, mapped_festivals = festival_mapping
+            citation = (
+                "[確定仕様: #矢上祭の年度区分]"
+                f"({FESTIVAL_OPERATING_YEAR_SOURCE_URL})"
+            )
+            return RagAnswer(
+                text=mapping_text + "\n\n**参照**\n- " + citation,
+                citations=(citation,),
+                festival=(
+                    mapped_festivals[0]
+                    if len(set(mapped_festivals)) == 1
+                    else None
+                ),
+                no_answer=False,
+                lexical_keys=(FESTIVAL_OPERATING_YEAR_DOCUMENT_KEY,),
+            )
         if guild_id and not self._check_rate_limit(guild_id):
             return RagAnswer(
                 text=(
@@ -1934,23 +2064,23 @@ class CorpusManager:
                 date_to=target_date_to,
                 allowed_channel_ids=allowed_channel_ids,
                 allow_unrestricted_conversations=allow_unrestricted_conversations,
+                question_kind=question_kind,
                 limit=lexical_candidate_limit,
             )
             if guild_id
             else []
         )
-        lexical_hits.sort(
-            key=lambda hit: (
-                can_answer_directly(question_kind, hit.authority, hit.status),
-                hit.score,
-                authority_score(question_kind, hit.authority, hit.status),
-            ),
-            reverse=True,
+        lexical_hits = _select_lexical_context_hits(
+            lexical_hits,
+            question_kind=question_kind,
+            limit=lexical_context_limit,
         )
-        lexical_hits = lexical_hits[:lexical_context_limit]
         authoritative_hits = [
             hit for hit in lexical_hits if can_answer_directly(question_kind, hit.authority, hit.status)
         ]
+        cross_source_history = question_kind is QuestionKind.HISTORY and any(
+            is_history_narrative_source(hit.source_type) for hit in lexical_hits
+        )
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -2076,7 +2206,11 @@ class CorpusManager:
                 QuestionKind.RUNTIME,
                 QuestionKind.GENERAL,
             }
-            if not comprehensive and (authoritative_hits or direct_runtime_evidence):
+            if (
+                not comprehensive
+                and not cross_source_history
+                and (authoritative_hits or direct_runtime_evidence)
+            ):
                 # Each attempt is an independent model call. Reserving most of
                 # the output allowance for a later retry made the first valid
                 # evidence path truncate, while subtracting a failed call's
@@ -2106,7 +2240,7 @@ class CorpusManager:
             if not has_answer:
                 search_hits = (
                     lexical_hits
-                    if comprehensive
+                    if comprehensive or cross_source_history
                     else [hit for hit in lexical_hits if hit not in authoritative_hits]
                 )
                 if not allows_unreviewed_evidence(question_kind):
@@ -2128,7 +2262,9 @@ class CorpusManager:
                         contents=self._question_with_evidence(question, search_context),
                         config=generation_config(
                             model,
-                            thinking_level="medium" if comprehensive else "low",
+                            thinking_level=(
+                                "medium" if comprehensive or cross_source_history else "low"
+                            ),
                             max_output_tokens=primary_budget,
                             system_instruction=system,
                             tools=[types.Tool(file_search=search)],

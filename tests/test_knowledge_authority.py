@@ -9,6 +9,7 @@ from bot.knowledge_authority import (
     classify_question,
     classify_question_facets,
     direct_authorities,
+    is_history_narrative_source,
 )
 
 
@@ -103,3 +104,19 @@ def test_direct_authorities_are_stable_and_exclude_conversation():
     assert authorities == tuple(sorted(authorities))
     assert "deployed_implementation" in authorities
     assert "conversation" not in authorities
+
+
+@pytest.mark.parametrize(
+    "source_type",
+    ("discord_conversation", "meeting_transcript", "meeting_minutes", "meeting_source"),
+)
+def test_history_narrative_sources_cover_conversations_and_meeting_artifacts(source_type):
+    assert is_history_narrative_source(source_type)
+
+
+@pytest.mark.parametrize(
+    "source_type",
+    ("source_code_history", "source_code", "knowledge_repository", ""),
+)
+def test_repository_sources_are_not_mistaken_for_history_narratives(source_type):
+    assert not is_history_narrative_source(source_type)

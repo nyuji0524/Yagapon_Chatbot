@@ -88,11 +88,14 @@
   category: historical-summary
   question: "27thの整理券運用で問題になった点は何ですか"
   expected_any: ["整理券"]
-  reference_facts: ["Discordの27th記録を根拠に整理券運用の問題点を要約し、記録にない問題は追加しない"]
+  reference_facts:
+    - "Discordの27th記録を根拠に整理券運用の問題点を要約し、記録にない問題は追加しない"
+    - "当日記録にはキャンセル枠の再取得、受付人員、QR読み取り、通常列と整理券列の運用に関する問題がある"
   forbidden: ["記録なし"]
   expected_festival: 27
   must_cite: true
   min_sources: 1
+  expected_source_any: ["Discord会話", "議事録"]
 
 - id: deliberately-unknown
   category: no-answer

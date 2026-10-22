@@ -463,7 +463,133 @@ def test_query_terms_split_common_operational_compounds():
 
     assert "整理券運用" in terms
     assert "整理券" in terms
-    assert "運用" in terms
+    assert "運用" not in terms
+    assert "なった点" not in terms
+
+
+def test_query_terms_drop_generic_history_noise_but_keep_subject():
+    terms = RagStore.query_terms(
+        "10/9の会議内容では、IT局の運用で問題になった点は何ですか？"
+    )
+
+    assert "IT局" in terms
+    assert not {"会議内容", "運用", "問題", "問題点", "なった点"} & set(terms)
+
+
+def test_history_search_reserves_conversation_before_repository_history_limit(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+    ]
+    for index in range(100):
+        store.upsert_document(
+            f"documents/history-{index}",
+            f"新歓Webの変更履歴。外部からの要求を実装したコミット {index}",
+            [
+                *common,
+                {"key": "document_key", "string_value": f"history-{index}"},
+                {"key": "authority", "string_value": "repository_history"},
+                {"key": "status", "string_value": "historical"},
+                {"key": "source_type", "string_value": "source_code_history"},
+                {"key": "end_at", "string_value": f"2026-09-{(index % 28) + 1:02d}"},
+            ],
+        )
+    store.upsert_document(
+        "documents/meeting",
+        "新歓Webについて他局から要求された内容は、申請期限の表示だった。",
+        [
+            *common,
+            {"key": "document_key", "string_value": "meeting"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "source_type", "string_value": "meeting_transcript"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["新歓Web", "他局", "要求"],
+        festival=27,
+        question_kind="history",
+        limit=4,
+    )
+
+    assert "meeting" in {hit.document_key for hit in hits}
+    assert [hit.score for hit in hits] == sorted(
+        (hit.score for hit in hits), reverse=True
+    )
+
+
+def test_history_reservation_does_not_bypass_channel_acl(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    for key, channel_id in (("allowed", 10), ("private", 99)):
+        store.upsert_document(
+            f"documents/{key}",
+            f"新歓Webについて他局から要求された内容 {key}",
+            [
+                {"key": "guild_id", "numeric_value": 1},
+                {"key": "document_key", "string_value": key},
+                {"key": "festival", "numeric_value": 27},
+                {"key": "access_scope", "string_value": "channel"},
+                {"key": "channel_id", "numeric_value": channel_id},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "status", "string_value": "raw"},
+                {"key": "source_type", "string_value": "discord_conversation"},
+            ],
+        )
+
+    hits = store.search_exact(
+        1,
+        ["新歓Web", "他局", "要求"],
+        festival=27,
+        allowed_channel_ids=(10,),
+        question_kind="history",
+        limit=4,
+    )
+
+    assert [hit.document_key for hit in hits] == ["allowed"]
+
+
+def test_sql_candidate_limit_uses_relevance_before_recency(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "authority", "string_value": "repository_history"},
+        {"key": "status", "string_value": "historical"},
+        {"key": "source_type", "string_value": "source_code_history"},
+    ]
+    for index in range(100):
+        store.upsert_document(
+            f"documents/generic-{index}",
+            f"新歓Webの一般的な変更 {index}",
+            [
+                *common,
+                {"key": "document_key", "string_value": f"generic-{index}"},
+                {"key": "end_at", "string_value": "2026-09-30"},
+            ],
+        )
+    store.upsert_document(
+        "documents/specific",
+        "新歓Webについて外部と他局から受けた要求をまとめた古い記録。",
+        [
+            *common,
+            {"key": "document_key", "string_value": "specific"},
+            {"key": "end_at", "string_value": "2025-01-01"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["新歓Web", "外部", "他局", "要求"],
+        festival=27,
+        limit=4,
+    )
+
+    assert hits[0].document_key == "specific"
 
 
 def test_query_terms_keep_cross_team_and_data_contract_cues():

@@ -9,6 +9,8 @@ from bot.festival import (
     festival_from_query,
     festival_number,
     festival_period,
+    festival_subject_dates_from_query,
+    has_invalid_explicit_calendar_reference,
 )
 
 
@@ -105,6 +107,70 @@ def test_multiple_explicit_dates_do_not_create_a_single_date_filter():
         "2026年9月30日と2026年10月1日はそれぞれ何thですか",
         now,
     ) is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2026年9月30日と2026年10月1日はそれぞれ何thですか",
+        "2026/9/30と2026/10/1の年度区分を教えて",
+        "２０２６年９月３０日と２０２６年１０月１日はどの回次？",
+        "2026年9月30日の矢上祭の回次だけ教えてください",
+        "2026年9月30日がどの年度かだけ判定してください",
+    ],
+)
+def test_festival_mapping_dates_are_subjects_not_evidence_filters(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    expected_dates = [date(2026, 9, 30)]
+    if "10月1日" in query or "10/1" in query or "１０月１日" in query:
+        expected_dates.append(date(2026, 10, 1))
+    assert festival_subject_dates_from_query(query) == tuple(expected_dates)
+    assert calendar_date_from_query(query, now) is None
+    assert calendar_window_from_query(query, now) is None
+
+
+def test_non_mapping_date_question_keeps_evidence_date_semantics():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_subject_dates_from_query("2026年9月30日の会議内容") == ()
+    assert festival_subject_dates_from_query("2026年9月30日に会議は何回ありましたか") == ()
+    assert calendar_date_from_query("2026年9月30日の会議内容", now) == date(
+        2026, 9, 30
+    )
+
+
+def test_compound_mapping_question_keeps_normal_evidence_date_semantics():
+    query = "2026年9月30日は何th？また、その日の会議内容も教えて"
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_subject_dates_from_query(query) == ()
+    assert calendar_date_from_query(query, now) == date(2026, 9, 30)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2026年2月29日は何thですか",
+        "2024年10月32日の会議",
+        "2024年13月の活動",
+        "2024/13の活動",
+    ],
+)
+def test_invalid_explicit_calendar_reference_is_detected(query):
+    assert has_invalid_explicit_calendar_reference(query) is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2024年150人の参加者がいました",
+        "2024年13回目の定例会議です",
+        "2024年度は15人で運用しました",
+    ],
+)
+def test_quantities_after_year_are_not_treated_as_invalid_months(query):
+    assert has_invalid_explicit_calendar_reference(query) is False
 
 
 @pytest.mark.parametrize("query", ["1.5倍速", "2-3人で参加", "1-2時間", "gemini-3.1-flash", "2/3人"])
