@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from bot.corpus import (
     backfill_channel_concurrency,
     calculate_incremental_after,
     calculate_resumable_incremental_after,
+    citation_reference_is_safe,
     generated_answer_is_sensitive,
     parse_model_answer,
     requires_comprehensive_answer,
@@ -710,7 +712,8 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
     assert "## 運用上の問題" in result.text
     assert len(result.citations) == 8
     call = corpus_manager._client.aio.models.generate_content.await_args
-    assert call.kwargs["config"].max_output_tokens == 6144
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    assert call.kwargs["config"].max_output_tokens == 3072
     assert call.kwargs["config"].tools[0].file_search.top_k == 20
     assert "短さより完全性" in call.kwargs["config"].system_instruction
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["limit"] == 32
@@ -952,6 +955,192 @@ def test_explicit_empty_grounding_supports_do_not_cite_retrieval_candidates(corp
     assert corpus_manager._response_sources(response) == []
 
 
+def test_missing_grounding_supports_uses_observable_compatibility_fallback(
+    corpus_manager,
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr("bot.corpus.REQUIRE_GROUNDING_SUPPORTS", False)
+    caplog.set_level(logging.WARNING, logger="yagapon.corpus")
+    context = SimpleNamespace(
+        title="仕様",
+        uri="https://github.com/YagamiFes-IT/Yaga_Support",
+        custom_metadata=[{"key": "access_scope", "string_value": "guild"}],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == [
+        "[仕様](https://github.com/YagamiFes-IT/Yaga_Support)"
+    ]
+    assert "grounding_supports missing" in caplog.text
+    assert "https://github.com" not in caplog.text
+
+
+def test_required_grounding_supports_fails_closed_when_metadata_is_missing(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setattr("bot.corpus.REQUIRE_GROUNDING_SUPPORTS", True)
+    context = SimpleNamespace(
+        title="仕様",
+        uri="https://github.com/YagamiFes-IT/Yaga_Support",
+        custom_metadata=[{"key": "access_scope", "string_value": "guild"}],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == []
+
+
+@pytest.mark.asyncio
+async def test_required_grounding_supports_rejects_an_ungrounded_semantic_answer(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setattr("bot.corpus.REQUIRE_GROUNDING_SUPPORTS", True)
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager.rag_store.record_query = Mock(return_value="query-grounding-required")
+    context = SimpleNamespace(
+        title="仕様",
+        uri="https://github.com/YagamiFes-IT/Yaga_Support",
+        custom_metadata=[{"key": "access_scope", "string_value": "guild"}],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                "根拠があるように見える回答だぽん。\n"
+                "[[YAGAPON_ANSWER_STATUS:complete]]"
+            ),
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(
+                    finish_reason="STOP",
+                    grounding_metadata=SimpleNamespace(
+                        grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                    ),
+                )
+            ],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "仕様を説明して",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert result.citations == ()
+    assert "根拠があるように見える回答" not in result.text
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://github.com/YagamiFes-IT/Yaga_Support/commit/abcdef1",
+        "https://discord.com/channels/1/2/3",
+        "https://drive.google.com/file/d/public-id/view?usp=drive_link",
+        "https://docs.google.com/document/d/public-id/edit?tab=t.0",
+    ),
+)
+def test_citation_safety_allows_normal_project_urls(url):
+    assert citation_reference_is_safe("正式な参照", url)
+
+
+@pytest.mark.parametrize(
+    ("label", "url"),
+    (
+        ("連絡先 private.person@example.com", "https://example.com/reference"),
+        ("担当者 090-1234-5678", "https://example.com/reference"),
+        (
+            "履歴",
+            "https://example.com/reference?access_token=super-secret-credential",
+        ),
+        (
+            "履歴",
+            "https://example.com/eyJhbGciOiJIUzI1NiJ9.abcdefghijklmno.abcdefghijklmno",
+        ),
+        ("履歴", "https://user:password@example.com/reference"),
+    ),
+)
+def test_citation_safety_rejects_credentials_jwt_and_private_contacts(label, url):
+    assert not citation_reference_is_safe(label, url)
+
+
+def test_source_renderers_drop_unsafe_labels_and_urls(corpus_manager):
+    lexical_hits = [
+        SimpleNamespace(
+            channel_name="private.person@example.com",
+            source_url="https://discord.com/channels/1/2/3",
+            source_type="discord_history",
+            authority="conversation",
+        ),
+        SimpleNamespace(
+            channel_name="安全な履歴",
+            source_url="https://github.com/example/repo?token=super-secret-credential",
+            source_type="source_code_history",
+            authority="repository_history",
+            start_at="2026-10-01T00:00:00Z",
+        ),
+    ]
+    firebase = [
+        SimpleNamespace(
+            title="担当 090-1234-5678",
+            source_url="https://console.firebase.google.com/project/example",
+        )
+    ]
+
+    assert corpus_manager._lexical_sources(lexical_hits, []) == []
+    assert corpus_manager._firebase_sources(firebase, []) == []
+
+
+def test_file_search_sources_drop_unsafe_grounded_metadata(corpus_manager):
+    contexts = [
+        SimpleNamespace(
+            title="private.person@example.com",
+            uri="https://docs.google.com/document/d/public-id/edit",
+            custom_metadata=[{"key": "access_scope", "string_value": "guild"}],
+        ),
+        SimpleNamespace(
+            title="安全そうな題名",
+            uri="https://example.com/reference?client_secret=super-secret-value",
+            custom_metadata=[{"key": "access_scope", "string_value": "guild"}],
+        ),
+    ]
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[
+                        SimpleNamespace(retrieved_context=context) for context in contexts
+                    ],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0, 1])
+                    ],
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response) == []
+
+
 def test_lexical_sources_deduplicates_the_same_channel_label(corpus_manager):
     hits = [
         SimpleNamespace(channel_name="仕事", source_url="https://discord.example/1"),
@@ -1117,8 +1306,10 @@ async def test_global_no_evidence_marker_is_never_exposed(corpus_manager, tmp_pa
 async def test_explicit_status_rollout_flag_fails_closed_when_contract_is_missing(
     corpus_manager,
     monkeypatch,
+    caplog,
 ):
     monkeypatch.setattr("bot.corpus.REQUIRE_EXPLICIT_ANSWER_STATUS", True)
+    caplog.set_level(logging.WARNING, logger="yagapon.corpus")
     context = SimpleNamespace(
         title="仕様",
         uri="https://knowledge.example/spec",
@@ -1150,6 +1341,8 @@ async def test_explicit_status_rollout_flag_fails_closed_when_contract_is_missin
 
     assert result.no_answer is True
     assert "制御行のない回答" not in result.text
+    assert "missing explicit status control line" in caplog.text
+    assert "制御行のない回答" not in caplog.text
 
 
 @pytest.mark.asyncio

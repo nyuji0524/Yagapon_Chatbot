@@ -1,3 +1,5 @@
+import pytest
+
 from bot.knowledge_authority import (
     QuestionKind,
     allows_unreviewed_evidence,
@@ -56,6 +58,29 @@ def test_compound_question_keeps_authority_facets_separate():
     )
     assert classify_question_facets("権限と過去の障害を教えて") == (
         QuestionKind.AUTHORIZATION,
+        QuestionKind.HISTORY,
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
+        "IT局へのフィードバックは？",
+        "どんな指摘がありましたか？",
+        "今年の反省を教えて",
+        "発生した問題を知りたい",
+        "障害の内容を教えて",
+        "何が出た？",
+        "当日の意見をまとめて",
+    ),
+)
+def test_history_feedback_terms_do_not_require_meeting_word(question):
+    assert classify_question_facets(question) == (QuestionKind.HISTORY,)
+
+
+def test_current_problem_keeps_runtime_and_history_facets():
+    assert classify_question_facets("現在の問題を教えて") == (
+        QuestionKind.RUNTIME,
         QuestionKind.HISTORY,
     )
 

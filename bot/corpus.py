@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from google import genai
@@ -90,6 +91,9 @@ RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS = 12
 GLOBAL_NO_EVIDENCE_MARKER = "[[YAGAPON_NO_RELEVANT_EVIDENCE]]"
 REQUIRE_EXPLICIT_ANSWER_STATUS = (
     os.environ.get("YAGAPON_RAG_REQUIRE_ANSWER_STATUS", "false").lower() == "true"
+)
+REQUIRE_GROUNDING_SUPPORTS = (
+    os.environ.get("YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS", "false").lower() == "true"
 )
 
 
@@ -400,6 +404,90 @@ def generated_answer_is_sensitive(question: str, answer: str) -> bool:
     if not public_contact_request and re.search(r"(?<!\d)0\d{1,4}-\d{1,4}-\d{3,4}(?!\d)", answer):
         return True
     return False
+
+
+_CITATION_OPAQUE_SECRET_PATTERNS = (
+    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+    r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
+    r"\bAIza[0-9A-Za-z_-]{20,}\b",
+    r"\bAKIA[0-9A-Z]{16}\b",
+)
+_CITATION_PRIVATE_EMAIL = re.compile(
+    r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])",
+    re.IGNORECASE,
+)
+_CITATION_PRIVATE_PHONE = re.compile(r"(?<!\d)0\d{1,4}-\d{1,4}-\d{3,4}(?!\d)")
+_CITATION_SECRET_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "credential",
+    "key",
+    "password",
+    "secret",
+    "signature",
+    "token",
+    "x-amz-credential",
+    "x-amz-signature",
+    "x-goog-credential",
+    "x-goog-signature",
+}
+
+
+def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
+    """Reject citations that could disclose a credential or private contact.
+
+    Citation metadata is retrieved content and is therefore untrusted. This
+    check deliberately allows ordinary GitHub, Discord and Google Drive URLs,
+    while rejecting signed/credential-bearing URLs and contact details.
+    """
+    label = str(label or "")
+    source_url = str(source_url or "")
+    if any(character in label or character in source_url for character in ("\x00", "\r", "\n")):
+        return False
+    material = unquote(f"{label}\n{source_url}")
+    if material.count("\n") != 1 or "\r" in material or "\x00" in material:
+        return False
+    if "](http" in label.casefold():
+        return False
+    if any(re.search(pattern, material) for pattern in _CITATION_OPAQUE_SECRET_PATTERNS):
+        return False
+    if _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material):
+        return False
+    if re.search(
+        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
+        r"\s*[:=]\s*[^\s]{8,}",
+        material,
+    ):
+        return False
+    if not source_url:
+        return True
+    try:
+        parsed = urlsplit(source_url)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    try:
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError:
+        return False
+    return not any(key.casefold() in _CITATION_SECRET_QUERY_KEYS for key, _ in query)
+
+
+def rendered_citation_is_safe(citation: str) -> bool:
+    """Defense-in-depth validation immediately before citation rendering."""
+    value = str(citation or "")
+    if "\n" in value or "\r" in value:
+        return False
+    if value.startswith("[") and value.endswith(")") and "](" in value:
+        label_with_prefix, _, url_with_suffix = value.rpartition("](")
+        return citation_reference_is_safe(label_with_prefix[1:], url_with_suffix[:-1])
+    return citation_reference_is_safe(value)
 
 
 def sensitive_request_response(question: str) -> str | None:
@@ -1219,6 +1307,15 @@ class CorpusManager:
             )
 
         sources = list(dict.fromkeys(source for result in results for source in result.citations))
+        unsafe_source_count = sum(not rendered_citation_is_safe(source) for source in sources)
+        if unsafe_source_count:
+            log.warning(
+                "Blocked unsafe RAG citation metadata (count=%s guild=%s actor=%s)",
+                unsafe_source_count,
+                guild_id,
+                actor_id,
+            )
+            sources = [source for source in sources if rendered_citation_is_safe(source)]
         lexical_keys = tuple(
             dict.fromkeys(key for result in results for key in result.lexical_keys)
         )
@@ -1423,6 +1520,17 @@ class CorpusManager:
                     if item.document_key in selected or f"runtime:{item.document_key}" in selected
                 ]
 
+            def observe_answer_contract(parsed: ParsedModelAnswer, *, stage: str) -> None:
+                if not parsed.explicit_status:
+                    log.warning(
+                        "RAG answer missing explicit status control line "
+                        "(stage=%s kind=%s guild=%s required=%s)",
+                        stage,
+                        question_kind.value,
+                        guild_id,
+                        REQUIRE_EXPLICIT_ANSWER_STATUS,
+                    )
+
             def usable(parsed: ParsedModelAnswer) -> bool:
                 return (
                     bool(parsed.text)
@@ -1445,6 +1553,7 @@ class CorpusManager:
                 )
                 remaining_output_tokens = max(512, max_output_tokens - direct_budget)
                 parsed = parse_model_answer(authoritative_answer or "")
+                observe_answer_contract(parsed, stage="direct")
                 if usable(parsed):
                     used_lexical_hits = selected_lexical_hits(authoritative_hits, parsed)
                     used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
@@ -1488,6 +1597,7 @@ class CorpusManager:
                 log_usage(log, "rag_query", model, response)
                 require_complete_model_output(response, operation="rag_query")
                 parsed = parse_model_answer((response.text or "").strip())
+                observe_answer_contract(parsed, stage="file_search")
                 answer = parsed.text or "回答を生成できなかったぽん..."
                 has_answer = usable(parsed)
                 # File Search metadata filtering stays disabled while legacy
@@ -1523,6 +1633,7 @@ class CorpusManager:
                         max_output_tokens=recovery_budget,
                     )
                     recovered = parse_model_answer(recovered_answer or "")
+                    observe_answer_contract(recovered, stage="exact_recovery")
                     if usable(recovered):
                         used_lexical_hits = selected_lexical_hits(search_hits, recovered)
                         used_firebase = selected_firebase_evidence(firebase_evidence, recovered)
@@ -1659,6 +1770,9 @@ class CorpusManager:
                 label += " [historical]"
             if label in seen_labels:
                 continue
+            if not citation_reference_is_safe(label, hit.source_url):
+                log.warning("Blocked unsafe exact-search citation metadata")
+                continue
             value = f"[{label}]({hit.source_url})" if hit.source_url else label
             if value not in existing and value not in rendered:
                 rendered.append(value)
@@ -1669,7 +1783,11 @@ class CorpusManager:
     def _firebase_sources(evidence: list[FirebaseEvidence], existing: list[str]) -> list[str]:
         rendered = []
         for item in evidence:
-            value = f"[Firebase現在値: {item.title}]({item.source_url})"
+            label = f"Firebase現在値: {item.title}"
+            if not citation_reference_is_safe(label, item.source_url):
+                log.warning("Blocked unsafe Firebase citation metadata")
+                continue
+            value = f"[{label}]({item.source_url})"
             if value not in existing and value not in rendered:
                 rendered.append(value)
         return rendered
@@ -1693,7 +1811,16 @@ class CorpusManager:
         grounding = getattr(candidates[0], "grounding_metadata", None)
         chunks = getattr(grounding, "grounding_chunks", None) or []
         supports = getattr(grounding, "grounding_supports", None)
-        if supports is not None:
+        if supports is None and chunks:
+            log.warning(
+                "File Search grounding_supports missing; semantic citation fallback "
+                "(required=%s chunk_count=%s)",
+                REQUIRE_GROUNDING_SUPPORTS,
+                len(chunks),
+            )
+            if REQUIRE_GROUNDING_SUPPORTS:
+                return []
+        elif supports is not None:
             supported_indices = []
             for support in supports:
                 for index in getattr(support, "grounding_chunk_indices", None) or ():
@@ -1784,6 +1911,9 @@ class CorpusManager:
                 details.append(str(status))
             if details:
                 label += f" [{' / '.join(details)}]"
+            if not citation_reference_is_safe(label, url or ""):
+                log.warning("Blocked unsafe File Search citation metadata")
+                continue
             rendered = f"[{label}]({url})" if url else label
             if rendered not in seen:
                 seen.add(rendered)
