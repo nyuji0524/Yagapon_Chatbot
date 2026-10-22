@@ -79,7 +79,11 @@ def test_empty_direct_secret_falls_back_to_mounted_file(tmp_path, monkeypatch):
 
 def test_bot_requires_file_search_grounding_supports_by_default():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    environment = compose["services"]["yagapon"]["environment"]
 
-    assert compose["services"]["yagapon"]["environment"][
-        "YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS"
-    ] == "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}"
+    assert environment["YAGAPON_RAG_REQUIRE_ANSWER_STATUS"] == (
+        "${YAGAPON_RAG_REQUIRE_ANSWER_STATUS:-true}"
+    )
+    assert environment["YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS"] == (
+        "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}"
+    )

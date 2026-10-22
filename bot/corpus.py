@@ -94,8 +94,13 @@ RAG_COMPREHENSIVE_LEXICAL_CANDIDATES = 32
 RAG_LEXICAL_CONTEXT_HITS = 6
 RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS = 12
 GLOBAL_NO_EVIDENCE_MARKER = "[[YAGAPON_NO_RELEVANT_EVIDENCE]]"
-REQUIRE_EXPLICIT_ANSWER_STATUS = (
-    os.environ.get("YAGAPON_RAG_REQUIRE_ANSWER_STATUS", "false").lower() == "true"
+def _explicit_answer_status_required(value: str | None) -> bool:
+    """Fail closed unless legacy answer parsing is explicitly requested."""
+    return (value if value is not None else "true").strip().casefold() != "false"
+
+
+REQUIRE_EXPLICIT_ANSWER_STATUS = _explicit_answer_status_required(
+    os.environ.get("YAGAPON_RAG_REQUIRE_ANSWER_STATUS")
 )
 
 

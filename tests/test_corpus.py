@@ -1489,6 +1489,20 @@ def test_grounding_support_requirement_is_fail_closed_by_default(value, expected
     assert corpus_module._grounding_supports_required(value) is expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (None, True),
+        ("", True),
+        ("true", True),
+        ("invalid", True),
+        (" FALSE ", False),
+    ),
+)
+def test_answer_status_requirement_is_fail_closed_by_default(value, expected):
+    assert corpus_module._explicit_answer_status_required(value) is expected
+
+
 def test_missing_grounding_supports_uses_observable_compatibility_fallback(
     corpus_manager,
     monkeypatch,
@@ -1914,6 +1928,54 @@ async def test_explicit_status_rollout_flag_fails_closed_when_contract_is_missin
 
 
 @pytest.mark.asyncio
+async def test_explicit_false_preserves_legacy_answer_status_compatibility(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setattr("bot.corpus.REQUIRE_EXPLICIT_ANSWER_STATUS", False)
+    context = SimpleNamespace(
+        title="仕様",
+        uri="https://knowledge.example/spec",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "仕様"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="制御行のない旧形式の回答だぽん。",
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(
+                    finish_reason="STOP",
+                    grounding_metadata=SimpleNamespace(
+                        grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                        grounding_supports=[
+                            SimpleNamespace(
+                                grounding_chunk_indices=[0],
+                                segment=SimpleNamespace(
+                                    text="制御行のない旧形式の回答だぽん。"
+                                ),
+                            )
+                        ],
+                    ),
+                )
+            ],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "仕様を説明して",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert result.text.startswith("制御行のない旧形式の回答")
+    assert result.citations == ("[#仕様](https://knowledge.example/spec)",)
+
+
+@pytest.mark.asyncio
 async def test_query_rejects_evidence_from_a_different_festival(corpus_manager, tmp_path):
     corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
     context = SimpleNamespace(
@@ -2257,7 +2319,11 @@ async def test_query_rebuilds_answer_from_same_festival_lexical_evidence(corpus_
         ],
     )
     lexical_response = SimpleNamespace(
-        text="28thのIT局長はBさんだぽん。",
+        text=(
+            "28thのIT局長はBさんだぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:exact:current-role]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
         usage_metadata=None,
         candidates=[],
     )
@@ -2345,7 +2411,11 @@ async def test_query_prefers_reviewed_lexical_evidence(corpus_manager, tmp_path)
         ],
     )
     recovered_response = SimpleNamespace(
-        text="全体管理は神または整理券管理者、自団体の受付は企画メンバーだぽん。",
+        text=(
+            "全体管理は神または整理券管理者、自団体の受付は企画メンバーだぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:exact:builtin:access]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
         usage_metadata=None,
         candidates=[],
     )
@@ -2424,7 +2494,10 @@ async def test_query_drops_curated_source_when_curated_answer_fails(corpus_manag
         ],
     )
     missing_response = SimpleNamespace(
-        text="その件の記録は確認できなかったぽん。",
+        text=(
+            "その件の記録は確認できなかったぽん。\n"
+            "[[YAGAPON_ANSWER_STATUS:no_evidence]]"
+        ),
         usage_metadata=None,
         candidates=[],
     )
@@ -2437,7 +2510,10 @@ async def test_query_drops_curated_source_when_curated_answer_fails(corpus_manag
         ],
     )
     semantic_response = SimpleNamespace(
-        text="整理券は当日受付で利用したぽん。",
+        text=(
+            "整理券は当日受付で利用したぽん。\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
         usage_metadata=None,
         candidates=[
             SimpleNamespace(
@@ -2494,7 +2570,11 @@ async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpu
         candidates=[],
     )
     recovered_response = SimpleNamespace(
-        text="ITラボではAI鬼ごっこと福澤先生寝かしつけを実施していたぽん。",
+        text=(
+            "ITラボではAI鬼ごっこと福澤先生寝かしつけを実施していたぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:exact:it-lab]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
         usage_metadata=None,
         candidates=[],
     )
@@ -2844,7 +2924,7 @@ async def test_query_filters_explicit_festival_and_records_trace(corpus_manager,
         ],
     )
     response = SimpleNamespace(
-        text="27thの回答",
+        text="27thの回答\n[[YAGAPON_ANSWER_STATUS:complete]]",
         usage_metadata=None,
         candidates=[
             SimpleNamespace(
