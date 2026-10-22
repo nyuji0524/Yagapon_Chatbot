@@ -117,6 +117,26 @@ def _knowledge_refresh_status(result: dict) -> str:
     return "completed"
 
 
+def _bounded_complete_lines(lines: list[str], *, limit: int = 1024) -> str:
+    """Fit a Discord field without splitting a line or Markdown token."""
+    selected: list[str] = []
+    for line in lines:
+        candidate = "\n".join([*selected, line])
+        if len(candidate) > limit:
+            break
+        selected.append(line)
+    omitted = len(lines) - len(selected)
+    if omitted:
+        marker = f"…（残り{omitted}年度は省略）"
+        while selected and len("\n".join([*selected, marker])) > limit:
+            selected.pop()
+            omitted += 1
+            marker = f"…（残り{omitted}年度は省略）"
+        if len(marker) <= limit:
+            selected.append(marker)
+    return "\n".join(selected)
+
+
 def _knowledge_refresh_embed(result: dict) -> discord.Embed:
     status = _knowledge_refresh_status(result)
     presentations = {
@@ -168,7 +188,7 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
             ]
             embed.add_field(
                 name="年度別結果（10月〜翌9月）",
-                value="\n".join(lines)[:1024],
+                value=_bounded_complete_lines(lines),
                 inline=False,
             )
     curation = result.get("curation") or {}

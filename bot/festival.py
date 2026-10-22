@@ -179,10 +179,24 @@ def calendar_window_from_query(
             relative_month = (current.year - 1, 12)
         else:
             relative_month = (current.year, current.month - 1)
+        if festival is not None:
+            period = festival_period(festival)
+            month = relative_month[1]
+            relative_month = (
+                period.starts_on.year if month >= 10 else period.ends_on.year,
+                month,
+            )
     elif re.search(r"(?:去年|昨年|昨年度).{0,4}(?:今頃|この時期|今月)", normalized):
         relative_month = (current.year - 1, current.month)
     elif re.search(r"今頃|この時期|今月", normalized):
-        relative_month = (current.year, current.month)
+        if festival is None:
+            relative_month = (current.year, current.month)
+        else:
+            period = festival_period(festival)
+            relative_month = (
+                period.starts_on.year if current.month >= 10 else period.ends_on.year,
+                current.month,
+            )
     if relative_month:
         return _month_window(*relative_month)
 

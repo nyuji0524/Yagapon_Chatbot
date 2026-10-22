@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -11,6 +12,7 @@ from bot.commands.knowledge import (
     _curation_batch_limit,
     _discord_messages,
     _knowledge_guild_allowed,
+    _knowledge_refresh_embed,
     _knowledge_refresh_status,
     _permission_channel,
     _protected_channel,
@@ -32,6 +34,47 @@ def test_curation_batch_limit_is_bounded(monkeypatch):
 
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_BATCH", "invalid")
     assert _curation_batch_limit() == 3
+
+
+def test_knowledge_refresh_embed_never_splits_annual_result_lines():
+    festivals = {
+        f"{number}th": {
+            "messages_indexed": number * 100,
+            "documents_uploaded": number * 10,
+            "documents_replaced": number,
+        }
+        for number in range(1, 80)
+    }
+    result = {
+        "mode": "historical",
+        "backfill": {
+            "status": "completed",
+            "guilds": {
+                "1": {
+                    "channels_completed": 1,
+                    "channels_total": 1,
+                    "messages_indexed": 1,
+                    "documents_uploaded": 1,
+                    "documents_replaced": 0,
+                    "festivals": festivals,
+                }
+            },
+        },
+        "curation": {},
+    }
+
+    embed = _knowledge_refresh_embed(result)
+    value = next(
+        field.value for field in embed.fields if field.name == "年度別結果（10月〜翌9月）"
+    )
+
+    assert len(value) <= 1024
+    assert "省略" in value
+    for line in value.splitlines():
+        assert line.startswith("…（残り") or re.fullmatch(
+            r"\*\*\d+th\*\* — 発言 \d+ / 文書 \d+ / 置換 \d+",
+            line,
+        )
 
 
 def test_registered_refresh_exposes_runtime_option_type_to_pycord():

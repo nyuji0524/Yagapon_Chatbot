@@ -703,6 +703,46 @@ def rendered_citation_is_safe(citation: str) -> bool:
     return citation_reference_is_safe(value)
 
 
+_INSTRUCTION_OVERRIDE_PATTERN = re.compile(
+    r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
+    r"(?:previous|prior|above|system|developer)\s+"
+    r"(?:instructions?|rules?|prompts?|messages?)|"
+    r"(?:これまで|以前|前の|上記|システム|開発者)(?:の)?"
+    r"(?:指示|命令|ルール|プロンプト|メッセージ)(?:を)?"
+    r"(?:無視|忘れ|破棄|上書き|解除|回避)",
+    re.IGNORECASE,
+)
+
+
+def _instruction_override_request(normalized: str) -> bool:
+    """Distinguish an override command from a question about past overrides."""
+    for match in _INSTRUCTION_OVERRIDE_PATTERN.finditer(normalized):
+        prefix = normalized[max(0, match.start() - 80):match.start()]
+        suffix = normalized[match.end():match.end() + 40]
+        japanese_retrospective = bool(
+            re.match(
+                r"(?:した|された|していた|されていた|している|されている)"
+                r"(?:理由|経緯|背景|仕組み|意味)|"
+                r"(?:の)?(?:理由|経緯|背景|仕組み|意味)|(?:について|とは)",
+                suffix,
+            )
+        ) or bool(
+            re.search(r"(?:なぜ|どうして).{0,40}$", prefix)
+            and re.match(r"(?:した|された|していた|されていた)", suffix)
+        )
+        english_retrospective = bool(
+            re.search(
+                r"\b(?:why|how|when)\s+(?:did|was|were)(?:\s+[a-z]+){0,6}\s*$",
+                prefix,
+                re.IGNORECASE,
+            )
+        )
+        if japanese_retrospective or english_retrospective:
+            continue
+        return True
+    return False
+
+
 def sensitive_request_response(question: str) -> str | None:
     """Block unsafe requests before any user-controlled retrieval is attempted."""
     normalized = " ".join(question.casefold().split())
@@ -739,18 +779,7 @@ def sensitive_request_response(question: str) -> str | None:
             re.IGNORECASE,
         )
     )
-    instruction_override = bool(
-        re.search(
-            r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
-            r"(?:previous|prior|above|system|developer)\s+"
-            r"(?:instructions?|rules?|prompts?|messages?)|"
-            r"(?:これまで|以前|前の|上記|システム|開発者)(?:の)?"
-            r"(?:指示|命令|ルール|プロンプト|メッセージ)(?:を)?"
-            r"(?:無視|忘れ|破棄|上書き|解除|回避)(?:して|しろ|せよ|してください)?",
-            normalized,
-            re.IGNORECASE,
-        )
-    )
+    instruction_override = _instruction_override_request(normalized)
     if instruction_override or (
         internal_instruction_topic
         and disclosure_request
@@ -809,7 +838,7 @@ def trusted_capability_response(question: str) -> str | None:
         return _TRUSTED_CAPABILITY_RESPONSE
 
     bot_subject = (
-        r"(?:おしゃべりやがぽん|やがぽん(?:bot|ボット)?|"
+        r"(?:おしゃべりやがぽん|やがぽん(?:bot|ボット)|"
         r"この(?:ai|bot|ボット)|あなた|君|きみ)"
     )
     capability_intent = (
@@ -2145,14 +2174,14 @@ class CorpusManager:
         evidence_context: str = "",
         max_output_tokens: int = RAG_NORMAL_OUTPUT_TOKENS,
     ) -> str | None:
-        """Retry without File Search when exact excerpts exist but tool search refuses to answer."""
+        """Generate from already filtered evidence without invoking File Search."""
         recovery_instruction = (
-            system_instruction + "\n\n【検証済み候補からの再確認】\n"
-            "File Searchは安全な回答を確定できなかったぽん。上にある検証済み候補の原文だけを読み直し、"
-            "質問へ直接答えられる根拠がある場合は、その範囲で具体的に回答するぽん。"
-            "候補が質問と無関係、または根拠が不足する場合は、"
+            system_instruction + "\n\n【検証済み根拠からの回答】\n"
+            "この呼び出しで上に提示された根拠データ（exact-search、firebase-runtime、"
+            "監査済み検索抜粋）のみを読み、質問へ直接答えられる場合は、その範囲で具体的に回答するぽん。"
+            "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
-            "候補にない事実は補完しないぽん。"
+            "提示されていない事実は補完しないぽん。"
         )
         try:
             async def generate_recovery():

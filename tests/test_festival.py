@@ -126,6 +126,34 @@ def test_relative_period_resolves_last_year_current_month():
     ) == CalendarWindow(date(2025, 10, 1), date(2025, 10, 31))
 
 
+@pytest.mark.parametrize("query", ["27thの今頃", "27thのこの時期"])
+def test_relative_period_uses_explicit_festival_operating_year(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now, festival=27) == CalendarWindow(
+        date(2025, 10, 1),
+        date(2025, 10, 31),
+    )
+
+
+def test_relative_previous_month_uses_explicit_festival_operating_year():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("27thの先月", now, festival=27) == CalendarWindow(
+        date(2026, 9, 1),
+        date(2026, 9, 30),
+    )
+
+
+def test_relative_period_maps_january_into_explicit_festival():
+    now = datetime(2026, 1, 15, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("27thの今頃", now, festival=27) == CalendarWindow(
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+
 def test_month_window_uses_festival_operating_year_and_leap_day():
     now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
 
