@@ -174,6 +174,10 @@ class DriveReader:
             _, done = downloader.next_chunk(num_retries=5)
         return output.getvalue().decode("utf-8", errors="replace")
 
+    def is_in_scope(self, document: DriveDocument) -> bool:
+        """Return whether an explicitly resolved file belongs to the configured folder tree."""
+        return self._is_in_scope(document)
+
     def _is_in_scope(self, document: DriveDocument) -> bool:
         if not self.folder_id:
             return True

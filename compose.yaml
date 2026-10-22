@@ -31,7 +31,6 @@ services:
       YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS: ${YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS:-}
       YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS: ${YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS:-}
       YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS: ${YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS:-選考}
-      YAGAPON_KNOWLEDGE_GITHUB_TOKEN_FILE: ${YAGAPON_KNOWLEDGE_GITHUB_TOKEN_FILE:-}
       YAGAPON_KNOWLEDGE_GCS_BUCKET: ${YAGAPON_KNOWLEDGE_GCS_BUCKET:-}
     ports:
       - "${YAGAPON_BIND_ADDRESS:-127.0.0.1}:${YAGAPON_HOST_PORT:-8000}:8000"
@@ -86,6 +85,30 @@ services:
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
     command: ["python", "-m", "source_index", "--watch-interval", "900"]
+    healthcheck:
+      disable: true
+
+  knowledge-curation-watch:
+    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
+    build:
+      context: .
+    depends_on:
+      yagapon:
+        condition: service_healthy
+    restart: unless-stopped
+    env_file:
+      - ${YAGAPON_ENV_FILE:-.env}
+    environment:
+      YAGAPON_CONFIG_PATH: /data/server_config.json
+      YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
+      YAGAPON_KNOWLEDGE_OUTBOX: /data/knowledge-outbox
+      YAGAPON_KNOWLEDGE_GCS_BUCKET: ${YAGAPON_KNOWLEDGE_GCS_BUCKET:-}
+      YAGAPON_KNOWLEDGE_CURATION_ENABLED: ${YAGAPON_KNOWLEDGE_CURATION_ENABLED:-false}
+      YAGAPON_KNOWLEDGE_CURATION_STATE: /data/knowledge-curation-state.json
+      YAGAPON_KNOWLEDGE_CURATION_BATCH: ${YAGAPON_KNOWLEDGE_CURATION_BATCH:-3}
+    volumes:
+      - ${YAGAPON_DATA_PATH:-./data}:/data
+    command: ["python", "-m", "knowledge_curation", "--watch-interval", "21600"]
     healthcheck:
       disable: true
 

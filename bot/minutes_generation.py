@@ -57,6 +57,7 @@ def _minutes_instruction(
     glossary_text: str,
     speaker_roster: str,
     meeting_date: str,
+    reference_text: str,
 ) -> str:
     heading = " ".join(part for part in (meeting_date, title or "会議") if part)
     instruction = (
@@ -88,6 +89,13 @@ def _minutes_instruction(
         "- 聞き取れない箇所や根拠のない日時・担当者・期限は作らない\n"
         "- 決定事項と単なる提案を混同しない\n\n"
     )
+    if reference_text:
+        instruction += (
+            "## 会議資料（会議前の参考情報）\n"
+            "資料に書かれた案・予定・担当を、会議で確定した決定とみなさないでください。"
+            "文字起こしで確認できた合意、変更、保留を優先し、資料との差分があれば明記してください。\n\n"
+            f"{reference_text}\n\n"
+        )
     if glossary_text:
         instruction += f"## 用語辞書（表記修正の参考）\n{glossary_text}\n\n"
     if speaker_roster:
@@ -204,6 +212,7 @@ async def generate_minutes(
     glossary_text: str = "",
     speaker_roster: str = "",
     meeting_date: str = "",
+    reference_text: str = "",
     checkpoint_dir: Path | None = None,
 ) -> str:
     """Use map/reduce generation so long meetings do not collapse into a weak summary."""
@@ -212,7 +221,13 @@ async def generate_minutes(
     if not chunks:
         return ""
 
-    instruction = _minutes_instruction(title, glossary_text, speaker_roster, meeting_date)
+    instruction = _minutes_instruction(
+        title,
+        glossary_text,
+        speaker_roster,
+        meeting_date,
+        reference_text[:120_000],
+    )
     if len(chunks) == 1:
         return await _generate(
             client,

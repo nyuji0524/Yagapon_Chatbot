@@ -22,6 +22,7 @@ async def test_meeting_index_adds_date_festival_and_low_authority_metadata(tmp_p
         guild_id=123,
         session_id="20261009T093251Z-d030a069",
         channel_name="全体会議部屋",
+        category_name="03｜会議",
         started_at="2026-10-09T09:32:51Z",
         transcript="IT局へのフィードバックは準備を早めること。",
         transcript_url="https://docs.example/transcript",
@@ -41,6 +42,8 @@ async def test_meeting_index_adds_date_festival_and_low_authority_metadata(tmp_p
     assert metadata["status"] == "raw"
     assert metadata["authority"] == "conversation"
     assert metadata["source_url"] == "https://docs.example/transcript"
+    assert metadata["category"] == "03｜会議"
+    assert "カテゴリ: 03｜会議" in args[2]
 
 
 @pytest.mark.asyncio
@@ -73,6 +76,32 @@ async def test_meeting_index_replaces_previous_remote_document_after_upload(tmp_
 
     assert result.transcript_document == "documents/new"
     corpus._delete_documents.assert_awaited_once_with(["documents/old"])
+
+
+@pytest.mark.asyncio
+async def test_meeting_index_treats_none_category_as_empty(tmp_path):
+    corpus = SimpleNamespace(
+        rag_store=RagStore(tmp_path / "rag.sqlite3"),
+        _upload_document=AsyncMock(return_value="documents/transcript"),
+        _delete_documents=AsyncMock(return_value=0),
+    )
+
+    await index_meeting_artifacts(
+        corpus,
+        "fileSearchStores/test",
+        guild_id=123,
+        session_id="session-none-category",
+        channel_name="会議用",
+        category_name=None,
+        started_at="2026-10-10T06:14:31Z",
+        transcript="文字起こし",
+    )
+
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in corpus._upload_document.await_args.args[3]
+    }
+    assert metadata["category"] == ""
 
 
 @pytest.mark.asyncio

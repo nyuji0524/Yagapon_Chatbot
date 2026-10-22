@@ -69,6 +69,7 @@ class RagStore:
                     guild_id INTEGER NOT NULL,
                     channel_id INTEGER,
                     channel_name TEXT,
+                    category TEXT,
                     festival INTEGER,
                     source_type TEXT,
                     status TEXT,
@@ -117,6 +118,12 @@ class RagStore:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+            }
+            if "category" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN category TEXT")
 
     def upsert_document(self, remote_name: str, text: str, metadata: list[dict] | None):
         values = _metadata_map(metadata)
@@ -127,14 +134,15 @@ class RagStore:
                 """
                 INSERT INTO documents (
                     document_key, remote_name, guild_id, channel_id, channel_name,
-                    festival, source_type, status, authority, source_url,
+                    category, festival, source_type, status, authority, source_url,
                     start_at, end_at, body, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_key) DO UPDATE SET
                     remote_name=excluded.remote_name,
                     guild_id=excluded.guild_id,
                     channel_id=excluded.channel_id,
                     channel_name=excluded.channel_name,
+                    category=excluded.category,
                     festival=excluded.festival,
                     source_type=excluded.source_type,
                     status=excluded.status,
@@ -151,6 +159,7 @@ class RagStore:
                     int(values.get("guild_id") or 0),
                     int(values["channel_id"]) if values.get("channel_id") else None,
                     str(values.get("channel_name") or ""),
+                    str(values.get("category") or ""),
                     int(values["festival"]) if values.get("festival") is not None else None,
                     str(values.get("source_type") or values.get("source") or "unknown"),
                     str(values.get("status") or "raw"),
@@ -185,6 +194,22 @@ class RagStore:
                 "SELECT * FROM documents WHERE document_key = ?", (document_key,)
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def list_curation_documents(self, *, limit: int = 1000) -> list[dict]:
+        """Return raw, locally mirrored source documents eligible for draft curation."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM documents
+                WHERE source_type IN ('discord_conversation', 'meeting_transcript')
+                  AND authority != 'curated'
+                  AND length(trim(body)) >= 200
+                ORDER BY coalesce(start_at, updated_at), document_key
+                LIMIT ?
+                """,
+                (max(1, min(limit, 10_000)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def query_terms(question: str, glossary: dict | None = None) -> list[str]:

@@ -181,6 +181,8 @@ def _meeting_front_matter(
     session_id: str,
     channel_name: str,
     tags: str,
+    source_kind: str = "discord-voice",
+    source_ref: str | None = None,
 ) -> str:
     return (
         "---\n"
@@ -193,8 +195,8 @@ def _meeting_front_matter(
         "contributors: []\n"
         f"tags: [{tags}]\n"
         "sources:\n"
-        "  - kind: discord-voice\n"
-        f"    ref: {_yaml_string(f'discord-guild:{guild_id}/session:{session_id}')}\n"
+        f"  - kind: {source_kind}\n"
+        f"    ref: {_yaml_string(source_ref or f'discord-guild:{guild_id}/session:{session_id}')}\n"
         f"    locator: {_yaml_string(channel_name)}\n"
         f"    accessed_on: {_yaml_string(date)}\n"
         "---\n"
@@ -220,6 +222,7 @@ def build_meeting_bundle(
     summary: str | None = None,
     minutes: str | None = None,
     include_minutes: bool = False,
+    materials: list[dict[str, str]] | None = None,
 ) -> tuple[str, dict[str, str], dict]:
     """Build review-required Knowledge source files and their repository root."""
     started_at = _session_time(session_id)
@@ -270,6 +273,38 @@ def build_meeting_bundle(
             f"{minutes.strip()}\n"
         )
 
+    material_entries = []
+    for index, material in enumerate(materials or [], start=1):
+        text = str(material.get("text") or "").strip()
+        url = str(material.get("url") or "").strip()
+        if not text or not url:
+            continue
+        name = str(material.get("name") or f"会議資料{index}").strip()
+        material_title = f"会議資料（要確認）: {name}"
+        path = f"material-{index:02d}.md"
+        files[f"{root}/{path}"] = (
+            f"{_meeting_front_matter(title=material_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, tags='meeting, material, google-drive, needs-human-review', source_kind='document', source_ref=url)}\n"
+            f"# {material_title}\n\n"
+            "> `/join`で明示的に紐付けられた会議資料の取得時点スナップショットです。"
+            "会議での最終決定は文字起こし・議事録と照合してください。\n\n"
+            "## 資料情報\n\n"
+            f"- 原本: [{name}]({url})\n"
+            f"- Drive file ID: `{material.get('file_id') or ''}`\n"
+            f"- 原本更新日時: {material.get('modified_time') or '未確認'}\n\n"
+            "## 取得本文\n\n"
+            f"{text}\n"
+        )
+        material_entries.append(
+            {
+                "path": path,
+                "fileId": str(material.get("file_id") or ""),
+                "sourceUrl": url,
+                "modifiedTime": str(material.get("modified_time") or ""),
+                "sha256": _sha256(text),
+                "humanReviewed": False,
+            }
+        )
+
     manifest = {
         "schemaVersion": 1,
         "source": "yagapon-discord-voice",
@@ -292,6 +327,7 @@ def build_meeting_bundle(
             if include_minutes and minutes
             else None
         ),
+        "materials": material_entries,
         "rawAudio": {"published": False, "retention": "deleted-after-durable-transcript"},
     }
     files[f"{root}/manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
@@ -512,7 +548,15 @@ async def publish_knowledge_bundle(
             status="queued",
         )
 
-    token = read_secret("YAGAPON_KNOWLEDGE_GITHUB_TOKEN")
+    direct_github_enabled = (
+        os.environ.get("YAGAPON_KNOWLEDGE_DIRECT_GITHUB_ENABLED", "false").lower()
+        == "true"
+    )
+    token = (
+        read_secret("YAGAPON_KNOWLEDGE_GITHUB_TOKEN")
+        if direct_github_enabled
+        else ""
+    )
     if not token:
         log.warning("Knowledge delivery is not configured; bundle retained at %s", outbox_dir)
         return KnowledgePublishResult(session_id=bundle_id, outbox_dir=outbox_dir)
@@ -634,11 +678,12 @@ async def publish_meeting_knowledge(
     transcript: str,
     summary: str | None = None,
     minutes: str | None = None,
+    materials: list[dict[str, str]] | None = None,
 ) -> KnowledgePublishResult | None:
     """Persist a bundle locally, then publish it to a Draft PR when configured."""
     if not transcript.strip():
         return None
-    include_minutes = os.environ.get("YAGAPON_KNOWLEDGE_INCLUDE_MINUTES", "false").lower() == "true"
+    include_minutes = os.environ.get("YAGAPON_KNOWLEDGE_INCLUDE_MINUTES", "true").lower() == "true"
     repository_root, files, manifest = build_meeting_bundle(
         session_id=session_id,
         guild_id=guild_id,
@@ -648,6 +693,7 @@ async def publish_meeting_knowledge(
         summary=summary,
         minutes=minutes,
         include_minutes=include_minutes,
+        materials=materials,
     )
     branch = f"yagapon/meeting-{session_id.lower()}"
     title = f"source: {manifest['startedAt'][:10]} {manifest['channelName']}の文字起こし"
@@ -657,6 +703,7 @@ async def publish_meeting_knowledge(
         "- 生文字起こし: 必須\n"
         f"- AI要約: {'あり' if summary else 'なし'}\n"
         f"- AI議事録: {'あり' if include_minutes and minutes else 'なし'}\n\n"
+        f"- 会議資料: {len(manifest.get('materials') or [])}件\n\n"
         "話者、固有名詞、決定事項、担当、期限、公開範囲を確認してからReadyにしてください。"
     )
     return await publish_knowledge_bundle(

@@ -86,7 +86,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/status` | 現在の設定状況を表示 |
 | `/backfill [mode] [days] [channel]` | 差分更新（推奨）または指定期間を安全に再構築 |
 | `/ignore` | 現在のチャンネルを学習対象から除外 |
-| `/join <mode>` | VCに参加（listen/meeting/chat） |
+| `/join <mode> [document_url]` | VCに参加。`drive_set`配下のGoogle Docsを会議資料として任意で紐付け |
 | `/leave` | VCから退出（議事録生成） |
 | `/recording list` | 再生可能な保存録音・文字起こしを確認（Bot所有者のみ） |
 | `/recording replay <session_id>` | `/leave` 相当の議事録生成を元データ非破壊で再実行 |
@@ -199,9 +199,10 @@ YAGAPON_REPLAY_DIR=/data/replays
 YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
 YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_BRANCH=main
-YAGAPON_KNOWLEDGE_GITHUB_TOKEN=
-YAGAPON_KNOWLEDGE_GITHUB_TOKEN_FILE=
-YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=false
+YAGAPON_KNOWLEDGE_GCS_BUCKET=yagamiatlas-yagapon-knowledge-intake
+YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true
+YAGAPON_KNOWLEDGE_CURATION_ENABLED=false
+YAGAPON_KNOWLEDGE_CURATION_BATCH=3
 YAGAPON_MAX_RECORDING_BYTES=4294967296
 YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
 YAGAPON_RECORDING_RETENTION_DAYS=7
@@ -217,7 +218,6 @@ YAGAPON_SOURCE_INDEX_STATE=/data/source-index-state.json
 YAGAPON_SOURCE_GITHUB_TOKEN=
 YAGAPON_SOURCE_GITHUB_TOKEN_FILE=
 YAGAPON_SOURCE_REPOSITORIES=YagamiFes-IT/YagamiFes-IT-Knowledge
-YAGAPON_KNOWLEDGE_GCS_BUCKET=
 YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET=
 YAGAPON_FIREBASE_KNOWLEDGE_ENABLED=false
 YAGAPON_FIREBASE_KNOWLEDGE_BACKEND=public
@@ -335,8 +335,8 @@ File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質
 
 承認済みGitHubリポジトリのソース同期は`python -m source_index --dry-run`で対象を確認してから
 `YAGAPON_SOURCE_INDEX_ENABLED=true`にする。privateリポジトリの読み取りには
-`YAGAPON_SOURCE_GITHUB_TOKEN`を使い、未設定時は既存の`YAGAPON_KNOWLEDGE_GITHUB_TOKEN`へ
-フォールバックする。`*_FILE`を使えばSecret Managerから0600でmountした値を環境変数へ
+`YAGAPON_SOURCE_GITHUB_TOKEN`を使う。Knowledgeへの書き込み用tokenとは兼用しない。
+`*_FILE`を使えばSecret Managerから0600でmountした値を環境変数へ
 展開せずに利用できる。Knowledgeリポジトリはfront matterが`active`または
 `historical`の文書だけを`curated`として同期し、`draft`と
 `needs-review`は検索対象へ昇格させない。tokenは必要なリポジトリだけに限定し、本文やログへ出力しない。
