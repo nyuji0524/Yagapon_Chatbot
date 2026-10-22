@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import discord
 
@@ -45,8 +45,14 @@ class BackfillStatus:
             log.exception("Could not publish final backfill status: %s", exc)
 
 
-def _incremental_after(config, guild_id: int, channel_id: int) -> datetime | None:
-    return calculate_resumable_incremental_after(config, guild_id, channel_id)
+def _incremental_after(
+    config,
+    guild_id: int,
+    channel_id: int,
+    *,
+    now: datetime | None = None,
+) -> datetime | None:
+    return calculate_resumable_incremental_after(config, guild_id, channel_id, now=now)
 
 
 def register(bot):
@@ -100,15 +106,23 @@ def register(bot):
         if not corpus:
             await ctx.followup.send("先に `/setup` をしてほしいぽん！", silent=True)
             return
-        if not bot.corpus.start_backfill(ctx.guild_id):
-            await ctx.followup.send("このサーバーでは別の取り込みが実行中だぽん。完了後に試してねぽん。", silent=True)
-            return
-
         channels = [channel] if channel else [
             ch for ch in ctx.guild.text_channels
             if ch.permissions_for(ctx.guild.me).read_message_history
             and not bot.config.is_ignored(ctx.guild_id, ch.id)
         ]
+        if not channels:
+            await ctx.followup.send("取り込み可能なテキストチャンネルがないぽん。", silent=True)
+            return
+        session = await bot.corpus.prepare_backfill(
+            ctx.guild_id,
+            (ch.id for ch in channels),
+            corpus,
+            dry_run=dry_run,
+        )
+        if session is None:
+            await ctx.followup.send("このサーバーでは別の取り込みが実行中だぽん。完了後に試してねぽん。", silent=True)
+            return
         label = "差分" if mode == "incremental" else ("全期間" if days == 0 else f"過去{days}日")
         concurrency = min(len(channels), backfill_channel_concurrency())
         initial_status = (
@@ -120,10 +134,16 @@ def register(bot):
             # Followup messages depend on a short-lived interaction webhook.
             # A normal bot-authored message remains editable throughout a long backfill.
             status_msg = await ctx.channel.send(initial_status, silent=True)
+        except asyncio.CancelledError:
+            await bot.corpus.finish_backfill(session)
+            raise
         except Exception as exc:
             log.warning("Could not create durable backfill status message: %s", exc)
             try:
                 status_msg = await ctx.followup.send(initial_status, wait=True, silent=True)
+            except asyncio.CancelledError:
+                await bot.corpus.finish_backfill(session)
+                raise
             except Exception as fallback_exc:
                 log.warning("Backfill will continue without a status message: %s", fallback_exc)
         status = BackfillStatus(ctx.channel, status_msg)
@@ -137,9 +157,9 @@ def register(bot):
         async def process_channel(ch):
             nonlocal total_messages, total_documents, total_replaced, completed_channels
             after = (
-                _incremental_after(bot.config, ctx.guild_id, ch.id)
+                _incremental_after(bot.config, ctx.guild_id, ch.id, now=session.cutoff)
                 if mode == "incremental"
-                else (datetime.now(timezone.utc) - timedelta(days=days) if days > 0 else None)
+                else (session.cutoff - timedelta(days=days) if days > 0 else None)
             )
             try:
                 async def progress(count):
@@ -155,9 +175,11 @@ def register(bot):
                     ch,
                     corpus,
                     after=after,
+                    before=session.cutoff,
                     progress_callback=progress,
                     replace_existing=True,
                     dry_run=dry_run,
+                    session=session,
                 )
                 if not dry_run and result.latest_message_id and result.latest_message_at:
                     await bot.config.set_backfill_cursor(
@@ -191,7 +213,7 @@ def register(bot):
         try:
             await run_backfill_channels(channels, process_channel, concurrency=concurrency)
         finally:
-            bot.corpus.finish_backfill(ctx.guild_id)
+            await bot.corpus.finish_backfill(session)
 
         failure_text = f"\n⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}" if failures else ""
         await status.finish(

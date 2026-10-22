@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from bot import voice
+from bot.ai_completion import IncompleteModelOutput
 from bot.commands.minutes import _generate_minutes_from_file
 from bot.recording import (
     PersistentPCMSink,
@@ -97,6 +98,22 @@ async def test_voice_reference_collection_truncates_at_character_limit():
     assert len(session._reference_docs) <= MAX_REFERENCE_DOCUMENTS
     assert sum(len(item) for item in session._reference_docs) == MAX_REFERENCE_CHARACTERS
     assert session._reference_docs[-1].endswith("[資料上限により以降を省略]")
+
+
+@pytest.mark.asyncio
+async def test_voice_reference_keeps_material_beyond_old_120k_limit():
+    session = VoiceSession(
+        _realtime_bot(),
+        28,
+        SimpleNamespace(id=999),
+        VoiceMode.MEETING,
+    )
+    content = "長期会議資料" * 30_000
+
+    assert len(content) > 120_000
+    assert await session.add_reference(content)
+    assert content in session._reference_docs[0]
+    assert "[資料上限により以降を省略]" not in session._reference_docs[0]
 
 
 @pytest.mark.asyncio
@@ -953,6 +970,29 @@ async def test_voice_session_passes_registered_voiceprints_to_final_diarization(
 
     assert transcribe.await_args.kwargs["diarization"] is True
     assert transcribe.await_args.kwargs["voiceprint_paths"] == {"中山": "/data/voiceprints/nakayama.wav"}
+
+
+@pytest.mark.asyncio
+async def test_incomplete_stt_becomes_recoverable_failure_before_final_replacement(
+    monkeypatch,
+):
+    async def incomplete(*_args, **_kwargs):
+        raise IncompleteModelOutput("transcription_fallback", "MAX_TOKENS")
+
+    monkeypatch.setattr("bot.voice.transcribe_audio", incomplete)
+    monkeypatch.setattr("bot.voice.new_genai_client", lambda _api_key: SimpleNamespace())
+    voice._transcription_rate_limiter.reset()
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+
+    assert (
+        await session._transcribe_audio(
+            b"x" * 2000,
+            "Discord確定: member-10",
+            diarization=True,
+            prefer_dedicated=True,
+        )
+        is None
+    )
 
 
 def test_listen_mode_separates_multiple_people_using_one_discord_account():

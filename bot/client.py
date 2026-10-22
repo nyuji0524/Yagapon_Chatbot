@@ -1,6 +1,7 @@
 """YagaPon Discord Client - メイン処理 (pycord)"""
 
 import asyncio
+import io
 import logging
 import re
 
@@ -12,6 +13,7 @@ from bot.key_management import KeyManagementManager
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
+from bot.scheduled_backfill import ScheduledBackfillManager
 from bot.support_directory import SupportDirectory
 from knowledge_catalog.store import CatalogStore, normalize_label
 
@@ -26,14 +28,27 @@ def _clean_rag_query(
     bot_user_id: int | None,
     bot_role_ids: tuple[int, ...] = (),
 ) -> str:
-    """Remove Discord addressing helpers that should not become search terms."""
-    query = content
+    """Remove addressing helpers while preserving the user's question structure."""
+    query = content.replace("\r\n", "\n").replace("\r", "\n")
     if bot_user_id:
         query = query.replace(f"<@{bot_user_id}>", "").replace(f"<@!{bot_user_id}>", "")
     for role_id in bot_role_ids:
         query = query.replace(f"<@&{role_id}>", "")
     query = re.sub(r"(?i)(?<!\S)@silent(?!\S)", "", query)
-    return " ".join(query.split())
+    normalized_lines = []
+    previous_blank = True
+    for raw_line in query.split("\n"):
+        line = re.sub(r"[\t\f\v ]+", " ", raw_line).strip()
+        if not line:
+            if not previous_blank:
+                normalized_lines.append("")
+            previous_blank = True
+            continue
+        normalized_lines.append(line)
+        previous_blank = False
+    while normalized_lines and not normalized_lines[-1]:
+        normalized_lines.pop()
+    return "\n".join(normalized_lines)
 
 
 def _mentioned_bot_role_ids(message: discord.Message, bot_user) -> tuple[int, ...]:
@@ -102,6 +117,25 @@ def _is_ignored_with_parent(config, guild_id: int, channel) -> bool:
     return any(config.is_ignored(guild_id, int(channel_id)) for channel_id in identifiers)
 
 
+def _discord_channel_lineage(channel) -> dict[str, object]:
+    """Return stable thread/parent/category identities for RAG access checks."""
+    parent = getattr(channel, "parent", None)
+    parent_id = getattr(channel, "parent_id", None) or getattr(parent, "id", None)
+    parent_name = str(getattr(parent, "name", "") or "")
+    category = getattr(channel, "category", None) or getattr(parent, "category", None)
+    category_id = (
+        getattr(channel, "category_id", None)
+        or getattr(category, "id", None)
+        or getattr(parent, "category_id", None)
+    )
+    return {
+        "parent_id": int(parent_id) if parent_id is not None else None,
+        "parent_name": parent_name,
+        "category_id": int(category_id) if category_id is not None else None,
+        "category_name": str(getattr(category, "name", "") or ""),
+    }
+
+
 def _guild_yagapon_emojis(guild) -> dict[str, str]:
     """Return custom YagaPon emojis which the bot can use in this guild."""
     emojis: dict[str, str] = {}
@@ -132,6 +166,69 @@ def _decorate_rag_answer(answer: str, guild, *, no_answer: bool) -> str:
     return f"{selected[0]} {answer}\n\n{selected[1]}"
 
 
+def _split_discord_text(text: str, *, limit: int = 1900) -> list[str]:
+    """Split arbitrary text without dropping oversized lines or breaking fences.
+
+    Discord accepts at most 2,000 characters.  Reserve a few characters so an
+    open Markdown code block can be closed in one message and reopened in the
+    next.  Unlike the former line-only splitter, this also makes progress when
+    one generated paragraph or code line is larger than the whole message.
+    """
+    if not text:
+        return []
+    if limit < 32:
+        raise ValueError("Discord chunk limit is too small")
+
+    content_limit = limit - 8
+    chunks: list[str] = []
+    current = ""
+    in_code_block = False
+    current_language = ""
+
+    def flush() -> None:
+        nonlocal current
+        if not current:
+            return
+        payload = current
+        if in_code_block and not payload.rstrip().endswith("```"):
+            payload += "\n```"
+        if payload:
+            chunks.append(payload)
+        current = f"```{current_language}\n" if in_code_block else ""
+
+    for logical_line in text.splitlines(keepends=True):
+        stripped = logical_line.strip()
+        is_fence = stripped.startswith("```")
+        # Never split the fence marker itself.  If it does not fit, finish the
+        # current message first (closing/reopening an existing block as needed).
+        if is_fence and current and len(current) + len(logical_line) > content_limit:
+            flush()
+
+        remaining = logical_line
+        while remaining:
+            available = content_limit - len(current)
+            if available <= 0:
+                flush()
+                available = content_limit - len(current)
+            current += remaining[:available]
+            remaining = remaining[available:]
+            if remaining:
+                flush()
+
+        if is_fence:
+            if in_code_block:
+                in_code_block = False
+                current_language = ""
+            else:
+                in_code_block = True
+                current_language = stripped[3:].strip()
+
+    # ``splitlines(keepends=True)`` returns nothing for an empty string only;
+    # a normal final line (with or without newline) is already in ``current``.
+    flush()
+    return chunks
+
+
 class YagaPon(discord.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -146,6 +243,8 @@ class YagaPon(discord.Bot):
         self.key_management = KeyManagementManager(self)
         self.catalog = CatalogStore()
         self.recording_replays = RecordingReplayManager(self)
+        self.scheduled_backfill = ScheduledBackfillManager(self)
+        self.knowledge_refresh_tasks: set[asyncio.Task] = set()
         self.support_directory = SupportDirectory()
         self._recording_recovery_task: asyncio.Task | None = None
         self._close_lock = asyncio.Lock()
@@ -194,6 +293,7 @@ class YagaPon(discord.Bot):
     async def on_ready(self):
         self.corpus.start_flush_loop()
         self.key_management.start()
+        self.scheduled_backfill.start()
         removed = await asyncio.to_thread(cleanup_old_recordings)
         if removed:
             log.info("Removed %s expired delivered recording(s)", removed)
@@ -571,6 +671,7 @@ class YagaPon(discord.Bot):
         if len(learning_content) < 4 and not message.attachments:
             return
 
+        lineage = _discord_channel_lineage(message.channel)
         self.corpus.add_message(
             guild_id=guild_id,
             channel_id=message.channel.id,
@@ -581,6 +682,7 @@ class YagaPon(discord.Bot):
             corpus_store_name=corpus,
             message_id=message.id,
             source_url=getattr(message, "jump_url", ""),
+            **lineage,
         )
 
         # スマートリアクション (別モジュールで処理)
@@ -745,36 +847,34 @@ class YagaPon(discord.Bot):
             # channel-scoped evidence. Voice mode has its own in-session TTS.
 
     async def send_split_message(self, destination, text: str):
-        """コードブロックを考慮して2000文字制限で分割送信"""
+        """Send short answers inline and preserve long answers as one Markdown file."""
+        chunks = _split_discord_text(text)
+        if len(chunks) > 4:
+            attachment_text = text
+            if text.endswith(RAG_FEEDBACK_PROMPT):
+                attachment_text = text[: -len(RAG_FEEDBACK_PROMPT)]
+                if attachment_text.endswith("\n\n"):
+                    attachment_text = attachment_text[:-2]
+            message = await destination.send(
+                "回答が長いため、全文をMarkdownファイルにまとめたぽん。"
+                f"\n\n{RAG_FEEDBACK_PROMPT}",
+                file=discord.File(
+                    io.BytesIO(attachment_text.encode("utf-8")),
+                    filename="yagapon-answer.md",
+                ),
+                silent=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return [message]
         sent_messages = []
-        lines = text.split("\n")
-        current_chunk = ""
-        in_code_block = False
-        current_lang = ""
-
-        for line in lines:
-            if line.strip().startswith("```"):
-                if not in_code_block:
-                    current_lang = line.strip().replace("```", "").strip()
-                in_code_block = not in_code_block
-
-            if len(current_chunk) + len(line) + 10 > 1900:
-                to_send = current_chunk
-                if in_code_block:
-                    to_send += "\n```"
-
-                sent_messages.append(await destination.send(to_send, silent=True))
-
-                if in_code_block:
-                    lang = f" {current_lang}" if current_lang else ""
-                    current_chunk = f"```{lang}\n(続き)...\n{line}"
-                else:
-                    current_chunk = f"(続き)...\n{line}"
-            else:
-                current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
-
-        if current_chunk:
-            sent_messages.append(await destination.send(current_chunk, silent=True))
+        for chunk in chunks:
+            sent_messages.append(
+                await destination.send(
+                    chunk,
+                    silent=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            )
         return sent_messages
 
     async def close(self):
@@ -798,6 +898,19 @@ class YagaPon(discord.Bot):
                 await self.recording_replays.shutdown(timeout=20)
             except Exception:
                 log.exception("Recording replay shutdown failed; continuing cleanup")
+            try:
+                await self.scheduled_backfill.stop()
+            except Exception:
+                log.exception("Scheduled backfill shutdown failed; continuing cleanup")
+            pending_refreshes = [
+                task
+                for task in getattr(self, "knowledge_refresh_tasks", ())
+                if not task.done()
+            ]
+            for task in pending_refreshes:
+                task.cancel()
+            if pending_refreshes:
+                await asyncio.gather(*pending_refreshes, return_exceptions=True)
             if self._recording_recovery_task and not self._recording_recovery_task.done():
                 self._recording_recovery_task.cancel()
                 try:

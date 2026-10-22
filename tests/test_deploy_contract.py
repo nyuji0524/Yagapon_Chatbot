@@ -1,4 +1,8 @@
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,3 +21,73 @@ def test_remote_deploy_wait_exceeds_container_start_period():
     assert "for _ in $(seq 1 48)" in deploy
     assert "sleep 5" in deploy
     assert "timeout --signal=TERM --kill-after=30s 420s docker run --rm" in deploy
+
+
+def test_remote_deploy_preflights_source_index_before_restart():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    preflight = "python -m source_index --preflight"
+    restart = deploy.rindex("systemctl restart yagapon")
+    assert "run --rm --no-deps source-index-watch" in deploy
+    assert preflight in deploy
+    assert deploy.index("github_app_key_installed=true") < deploy.index(preflight)
+    assert deploy.index(preflight) < restart
+
+
+def _direct_source_credential_scanner() -> str:
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+    marker = 'if ! python3 - "$runtime_env" <<\'PY\'\n'
+    return deploy.split(marker, 1)[1].split("\nPY\nthen", 1)[0]
+
+
+@pytest.mark.parametrize(
+    "contents",
+    (
+        "DISCORD_TOKEN=unrelated\n",
+        "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY=\n",
+        'YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY="" # migrated\n',
+        "YAGAPON_SOURCE_GITHUB_TOKEN=   # migrated\n",
+    ),
+)
+def test_remote_deploy_allows_absent_or_empty_direct_source_credentials(
+    tmp_path,
+    contents,
+):
+    runtime_env = tmp_path / "yagapon.env"
+    runtime_env.write_text(contents, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _direct_source_credential_scanner(), str(runtime_env)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY",
+        "YAGAPON_SOURCE_GITHUB_TOKEN",
+    ),
+)
+def test_remote_deploy_rejects_direct_source_credentials_without_printing_values(
+    tmp_path,
+    name,
+):
+    secret = "never-print-this-production-secret"
+    runtime_env = tmp_path / "yagapon.env"
+    runtime_env.write_text(f"{name}={secret}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _direct_source_credential_scanner(), str(runtime_env)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert secret not in result.stdout
+    assert secret not in result.stderr

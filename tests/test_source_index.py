@@ -1,31 +1,46 @@
 import hashlib
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import source_index.__main__ as source_index_module
 from bot.rag_store import RagStore
 from source_index.__main__ import (
     SOURCE_POLICY_VERSION,
+    GitHubRateLimitError,
+    GitHubSourceClient,
     Repository,
+    SourceHistoryChange,
+    SourceHistoryCommit,
+    SourceHistorySettings,
     chunks_for,
+    contains_history_secret,
     contains_secret,
     deployed_refs,
     document_policy,
-    gcs_snapshot,
+    github_token_provider,
+    history_chunks_for,
     inferred_festival,
     load_repositories,
+    load_state,
     metadata_digest_for,
     metadata_for,
+    preflight_once,
     repository_manifest_digest,
     repository_state_is_current,
     safe_source_path,
+    select_history_commits,
+    source_history_settings,
     source_upload_concurrency,
     stale_managed_document_keys,
     state_entry_matches_chunk,
     sync_once,
+    valid_processed_history_commits,
 )
+from source_index.github_auth import GitHubAppTokenProvider
 
 
 def curated_repository() -> Repository:
@@ -51,6 +66,8 @@ def test_source_path_allowlist_excludes_generated_credentials_and_lockfiles():
     assert not safe_source_path("functions/package-lock.json", includes, 100)
     assert not safe_source_path("bot/trusted_knowledge.json", ("bot/",), 100)
     assert not safe_source_path(".env", includes, 100)
+    assert not safe_source_path("lib/../credentials.py", includes, 100)
+    assert not safe_source_path("lib/newline\n.py", includes, 100)
 
 
 def test_source_path_allowlist_respects_file_and_directory_boundaries():
@@ -63,6 +80,143 @@ def test_source_path_allowlist_respects_file_and_directory_boundaries():
 def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert not contains_secret('token = os.environ.get("GITHUB_TOKEN", "")')
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')
+    assert contains_secret('{"client_secret": "1234567890abcdefghijklmnop"}')
+    assert contains_secret('password = "Prod(Real)Secret123!"')
+    assert contains_secret('password = "!ProdRealSecret123"')
+    assert contains_secret("パスワード: 本番用秘密文字列12345678")
+    assert contains_history_secret("+パスワード: 本番用秘密文字列12345678")
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        'const dbPassword = "ProdRealSecret123";',
+        "DB_PASSWORD=ProdRealSecret123",
+        'serviceClientSecret = "ProdRealSecret123"',
+        'password = SecretStr("ProdRealSecret123")',
+        'password = f"ProdRealSecret123"',
+        "password = `ProdRealSecret123`",
+        "password = process.env.DB_PASSWORD || `ProdRealSecret123`",
+        'const dbPassword =\n  "ProdRealSecret123";',
+        'password: SecretStr = SecretStr("ProdRealSecret123")',
+        'password = SecretStr(value="ProdRealSecret123")',
+    ),
+)
+def test_source_secret_scanner_blocks_common_live_secret_forms(assignment):
+    assert contains_secret(assignment)
+    assert contains_history_secret(f"+{assignment}")
+
+
+def test_source_secret_scanner_blocks_yaml_block_scalars():
+    assert contains_secret("password: |\n  ProdRealSecret123")
+    assert contains_secret("password: >- # stored credential\n\n  ProdRealSecret123")
+    assert contains_secret("password: |\n  example-password\n  ProdRealSecret123")
+    assert not contains_secret("password: |\n  example-password")
+    assert contains_history_secret("+password: |\n+  ProdRealSecret123")
+    assert contains_secret("- password: |2-\n    ProdRealSecret123")
+    assert contains_history_secret("+- password: >2+\n+    ProdRealSecret123")
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        'password = process.env.DB_PASSWORD || "ProdRealSecret123"',
+        'password = x ?? "ProdRealSecret123"',
+        'password = x ?: "ProdRealSecret123"',
+        'password = condition ? "ProdRealSecret123" : process.env.PASSWORD',
+        'password = condition ? process.env.PASSWORD : "ProdRealSecret123"',
+        'api_key = os.getenv("API_KEY", "ProdRealSecret123")',
+        'apiKey = os.getenv("API_KEY", default="ProdRealSecret123")',
+        'password = settings.get("PASSWORD", "ProdRealSecret123")',
+        (
+            'dbPassword = String.fromEnvironment("DB_PASSWORD", '
+            'defaultValue: "ProdRealSecret123")'
+        ),
+        (
+            "const dbPassword =\n"
+            "  process.env.DB_PASSWORD ||\n"
+            '  "ProdRealSecret123";'
+        ),
+        'password = os.getenv("DB_PASSWORD", SecretStr("ProdRealSecret123"))',
+        'password = os.getenv("DB_PASSWORD") or SecretStr("ProdRealSecret123")',
+        "token = read_secret('TOKEN') or production-token-value",
+    ),
+)
+def test_source_secret_scanner_blocks_concrete_fallbacks(assignment):
+    assert contains_secret(assignment)
+
+
+def test_source_secret_scanner_allows_placeholder_fallback():
+    assert not contains_secret(
+        'password = process.env.DB_PASSWORD || "example-password"'
+    )
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        "password: " + "production-value-" * 2,
+        "api_key=" + "0123456789abcdef" * 2,
+        "client_secret: " + "runtime-credential-" * 2,
+        "export ACCESS_TOKEN=" + "service-token-value-" * 2,
+    ),
+)
+def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
+    assert contains_secret(assignment)
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        "token: SecretStr",
+        "token: str",
+        "token = os.environ['GITHUB_TOKEN']",
+        "api_key: ${API_KEY}",
+        'api_key: "${API_KEY}"',
+        'password: "%PASSWORD%"',
+        'password: "{{ vault_password }}"',
+        'password: "<PASSWORD>"',
+        'client_secret: read_secret("CLIENT_SECRET")',
+        'serviceClientSecret = read_secret("CLIENT_SECRET")',
+        "const dbPassword = process.env.DB_PASSWORD",
+        "DB_PASSWORD=${DB_PASSWORD}",
+        "dbPassword: string",
+        "password: replace-with-your-password",
+        'api_key = "example-api-key-for-docs"',
+        'password = SecretStr("example-password")',
+        'password = SecretStr(value="example-password")',
+        (
+            'password: SecretStr = SecretStr(os.getenv("DB_PASSWORD", ""))'
+        ),
+        'password = os.getenv(\n  "DB_PASSWORD",\n  ""\n)',
+        "const dbPassword =\n  process.env.DB_PASSWORD;",
+        "password = process.env.DB_PASSWORD || `example-password`",
+        "token = access_token",
+    ),
+)
+def test_source_secret_scanner_allows_types_references_and_placeholders(assignment):
+    assert not contains_secret(assignment)
+
+
+def test_source_secret_scanner_fails_closed_when_assignment_rhs_exceeds_bound():
+    assignment = "password = choose_secret(\n" + "  runtime_value,\n" * 20 + ")"
+
+    assert contains_secret(assignment)
+
+
+def test_history_secret_scanner_fails_closed_for_removed_credentials():
+    # Assemble unmistakably synthetic values at runtime so the repository does
+    # not itself contain a contiguous token/private-key fixture.
+    unquoted = "+client_secret: " + "runtime-value-" * 2
+    jwt = "+authorization: Bearer " + ".".join(
+        ("eyJfixtureHeader", "fixturePayload", "fixtureSignature")
+    )
+    pem = "+-----BEGIN " + "PRIVATE KEY-----\nfixture-only"
+
+    assert contains_secret(unquoted)
+    assert contains_history_secret(unquoted)
+    assert contains_history_secret(jwt)
+    assert contains_history_secret(pem)
 
 
 def test_curated_document_policy_allows_only_approved_front_matter():
@@ -235,28 +389,6 @@ def test_curated_timeless_document_is_not_mislabelled_as_current_year(monkeypatc
     assert "SOURCE CODE DATA" not in chunk.text
 
 
-def test_gcs_snapshot_validates_repository_and_commit(monkeypatch):
-    class FakeGCS:
-        def __init__(self, bucket):
-            assert bucket == "approved-bucket"
-
-        def download_json(self, name):
-            assert name == "snapshots/main.json"
-            return {
-                "repository": "YagamiFes-IT/YagamiFes-IT-Knowledge",
-                "commit": "a" * 40,
-                "files": {"knowledge/example.md": "本文"},
-            }
-
-    monkeypatch.setenv("YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET", "approved-bucket")
-    monkeypatch.setattr("source_index.__main__.GCSClient", FakeGCS)
-
-    commit, files = gcs_snapshot(curated_repository())
-
-    assert commit == "a" * 40
-    assert files == [("knowledge/example.md", "本文".encode())]
-
-
 def test_source_chunk_has_commit_pinned_url_and_authority_metadata():
     chunk = chunks_for(
         "YagamiFes-IT/yagamifes-firebase",
@@ -338,6 +470,627 @@ def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
         if repository.name == "YagamiFes-IT/YagamiFes-IT-Knowledge"
     )
     assert knowledge.source_type == "knowledge_repository"
+    assert knowledge.private
+    assert knowledge.fetch == "archive"
+    support = next(
+        repository
+        for repository in repositories
+        if repository.name == "YagamiFes-IT/Yaga_Support"
+    )
+    assert support.private
+    assert support.history
+    assert support.fetch == "archive"
+    web = next(
+        repository
+        for repository in repositories
+        if repository.name == "YagamiFes-IT/Yagamifes_Web_2025"
+    )
+    assert web.private
+    assert web.history
+    assert web.fetch == "tree"
+
+
+def test_checked_in_manifest_indexes_history_only_for_three_code_repositories():
+    manifest = source_index_module.Path(source_index_module.__file__).with_name(
+        "repositories.yaml"
+    )
+    repositories = load_repositories(manifest)
+
+    assert {repository.name for repository in repositories if repository.history} == {
+        "YagamiFes-IT/Yaga_Support",
+        "YagamiFes-IT/yagamifes-firebase",
+        "YagamiFes-IT/Yagamifes_Web_2025",
+    }
+    fetches = {repository.name: repository.fetch for repository in repositories}
+    assert fetches["YagamiFes-IT/Yagamifes_Web_2025"] == "tree"
+    assert fetches["YagamiFes-IT/Yaga_Support"] == "archive"
+    assert fetches["YagamiFes-IT/yagamifes-firebase"] == "archive"
+    assert fetches["YagamiFes-IT/YagamiFes-IT-Knowledge"] == "archive"
+
+
+def test_repository_env_can_only_narrow_reviewed_manifest(monkeypatch, tmp_path):
+    manifest = tmp_path / "repositories.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "repositories": [
+                    {
+                        "name": "example/approved",
+                        "ref": "main",
+                        "include": ["src/"],
+                    },
+                    {
+                        "name": "example/also-approved",
+                        "ref": "main",
+                        "include": ["app/"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "YAGAPON_SOURCE_REPOSITORIES",
+        "example/approved",
+    )
+
+    repositories = load_repositories(manifest)
+
+    assert [repository.name for repository in repositories] == ["example/approved"]
+
+    monkeypatch.setenv(
+        "YAGAPON_SOURCE_REPOSITORIES",
+        "example/approved,example/not-in-manifest",
+    )
+    with pytest.raises(RuntimeError, match="outside the reviewed manifest"):
+        load_repositories(manifest)
+
+
+def test_repository_manifest_cannot_select_zero_sources(tmp_path):
+    manifest = tmp_path / "repositories.yaml"
+    manifest.write_text("repositories: []\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="selection is empty"):
+        load_repositories(manifest)
+
+
+def _history_settings(**overrides) -> SourceHistorySettings:
+    values = {
+        "since": "2024-09-30T15:00:00Z",
+        "until": None,
+        "max_commits": 2_000,
+        "max_pages": 20,
+        "max_files_per_commit": 300,
+        "max_bytes_per_repository": 20_000_000,
+        "commits_per_cycle": 100,
+        "min_rate_remaining": 200,
+        "max_snapshot_fallbacks_per_repository": 10,
+    }
+    values.update(overrides)
+    return SourceHistorySettings(**values)
+
+
+def _history_commit(value: str, day: int = 1) -> SourceHistoryCommit:
+    return SourceHistoryCommit(
+        sha=value * 40,
+        committed_at=datetime(2025, 10, day, tzinfo=timezone.utc),
+        message=f"commit {value}",
+        source_url=f"https://github.com/example/repo/commit/{value * 40}",
+    )
+
+
+def test_source_history_settings_default_supports_measured_repository_size(monkeypatch):
+    for name in (
+        "YAGAPON_SOURCE_HISTORY_SINCE",
+        "YAGAPON_SOURCE_HISTORY_UNTIL",
+        "YAGAPON_SOURCE_HISTORY_MAX_COMMITS",
+        "YAGAPON_SOURCE_HISTORY_MAX_PAGES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = source_history_settings()
+
+    assert settings.since == "2024-09-30T15:00:00Z"
+    assert settings.max_commits == 2_000
+    assert settings.max_pages * 100 >= settings.max_commits
+    assert settings.commits_per_cycle == 100
+
+
+def test_source_history_digest_tracks_snapshot_fallback_coverage():
+    assert _history_settings(
+        max_snapshot_fallbacks_per_repository=10
+    ).digest != _history_settings(
+        max_snapshot_fallbacks_per_repository=11
+    ).digest
+
+
+def test_private_tree_fetch_reads_only_allowlisted_blobs_and_preserves_rate_reserve(
+    monkeypatch,
+):
+    client = GitHubSourceClient(lambda _repository: "installation-token")
+    allowed = b"export const current = true;\n"
+    responses = [
+        (
+            {
+                "truncated": False,
+                "tree": [
+                    {
+                        "path": "src/current.ts",
+                        "type": "blob",
+                        "size": len(allowed),
+                        "sha": "a" * 40,
+                    },
+                    {
+                        "path": "large/private.bin",
+                        "type": "blob",
+                        "size": 200_000_000,
+                        "sha": "b" * 40,
+                    },
+                ],
+            },
+            {"X-RateLimit-Remaining": "900"},
+        ),
+        (
+            {
+                "encoding": "base64",
+                "content": source_index_module.base64.b64encode(allowed).decode(),
+            },
+            {"X-RateLimit-Remaining": "899"},
+        ),
+    ]
+    monkeypatch.setattr(
+        client,
+        "_request_with_headers",
+        lambda *_args: responses.pop(0),
+    )
+
+    assert client.selected_files(
+        "example/private",
+        "c" * 40,
+        ("src/",),
+        _history_settings(),
+    ) == [("src/current.ts", allowed)]
+    assert responses == []
+
+    monkeypatch.setattr(
+        client,
+        "_request_with_headers",
+        lambda *_args: (
+            {"truncated": False, "tree": []},
+            {"X-RateLimit-Remaining": "200"},
+        ),
+    )
+    with pytest.raises(GitHubRateLimitError, match="existing indexed generation"):
+        client.selected_files(
+            "example/private",
+            "c" * 40,
+            ("src/",),
+            _history_settings(),
+        )
+
+
+def test_github_app_token_is_cached_and_restricted(monkeypatch):
+    now = [1_700_000_000.0]
+    requests = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(self.payload).encode()
+
+    def opener(request, timeout):
+        assert timeout == 30
+        requests.append(request)
+        body = json.loads(request.data)
+        assert body == {
+            "repositories": ["Yaga_Support", "yagamifes-firebase"],
+            "permissions": {"contents": "read"},
+        }
+        assert request.headers["Authorization"] == "Bearer app.jwt"
+        return Response(
+            {
+                "token": f"installation-{len(requests)}",
+                "expires_at": datetime.fromtimestamp(
+                    now[0] + 3_600,
+                    timezone.utc,
+                ).isoformat(),
+                "permissions": {"contents": "read", "metadata": "read"},
+                "repositories": [
+                    {"name": "Yaga_Support"},
+                    {"name": "yagamifes-firebase"},
+                ],
+            }
+        )
+
+    monkeypatch.setattr("source_index.github_auth.jwt.encode", lambda *_a, **_kw: "app.jwt")
+    provider = GitHubAppTokenProvider(
+        app_id="Iv1abc",
+        installation_id="123",
+        private_key="-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----",
+        repositories=("Yaga_Support", "yagamifes-firebase"),
+        clock=lambda: now[0],
+        opener=opener,
+    )
+
+    assert provider() == "installation-1"
+    assert provider() == "installation-1"
+    assert len(requests) == 1
+    now[0] += 3_301
+    assert provider() == "installation-2"
+    assert len(requests) == 2
+
+
+def test_github_app_rejects_unnecessary_read_permission(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(
+                {
+                    "token": "installation-token",
+                    "expires_at": "2030-01-01T00:00:00Z",
+                    "permissions": {
+                        "contents": "read",
+                        "metadata": "read",
+                        "members": "read",
+                    },
+                    "repositories": [{"name": "Yaga_Support"}],
+                }
+            ).encode()
+
+    monkeypatch.setattr("source_index.github_auth.jwt.encode", lambda *_a, **_kw: "app.jwt")
+    provider = GitHubAppTokenProvider(
+        app_id="123",
+        installation_id="456",
+        private_key="-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----",
+        repositories=("Yaga_Support",),
+        clock=lambda: 1_700_000_000,
+        opener=lambda *_args, **_kwargs: Response(),
+    )
+
+    with pytest.raises(RuntimeError, match="beyond contents:read"):
+        provider()
+
+
+def test_github_app_rejects_repository_outside_requested_scope(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(
+                {
+                    "token": "installation-token",
+                    "expires_at": "2030-01-01T00:00:00Z",
+                    "permissions": {"contents": "read", "metadata": "read"},
+                    "repositories": [
+                        {"name": "yaga_support"},
+                        {"name": "Unrequested_Private_Repository"},
+                    ],
+                }
+            ).encode()
+
+    monkeypatch.setattr("source_index.github_auth.jwt.encode", lambda *_a, **_kw: "app.jwt")
+    provider = GitHubAppTokenProvider(
+        app_id="123",
+        installation_id="456",
+        private_key="-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----",
+        repositories=("Yaga_Support",),
+        clock=lambda: 1_700_000_000,
+        opener=lambda *_args, **_kwargs: Response(),
+    )
+
+    with pytest.raises(RuntimeError, match="outside the configured restriction") as exc_info:
+        provider()
+    assert "Unrequested_Private_Repository" not in str(exc_info.value)
+
+
+def test_github_app_router_is_anonymous_for_public_repository(monkeypatch):
+    repositories = [
+        Repository("public/repo", "main", ("src/",)),
+        Repository("org/private", "main", ("src/",), private=True),
+    ]
+    secrets = {
+        "YAGAPON_SOURCE_GITHUB_APP_ID": "123",
+        "YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID": "456",
+        "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY": (
+            "-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----"
+        ),
+    }
+    monkeypatch.setattr(
+        source_index_module,
+        "read_secret",
+        lambda name: secrets.get(name, ""),
+    )
+    provider_kwargs = {}
+
+    def provider(**kwargs):
+        provider_kwargs.update(kwargs)
+        return lambda: "installation-token"
+
+    monkeypatch.setattr(source_index_module, "GitHubAppTokenProvider", provider)
+
+    router = github_token_provider(repositories)
+
+    assert provider_kwargs["repositories"] == ("private",)
+    assert router("public/repo") == ""
+    assert router("org/private") == "installation-token"
+    assert router("org/not-allowlisted") == ""
+
+
+def test_private_repository_without_credentials_fails_clearly(monkeypatch):
+    monkeypatch.setattr(source_index_module, "read_secret", lambda _name: "")
+    repository = Repository(
+        "org/private",
+        "main",
+        ("src/",),
+        private=True,
+    )
+
+    with pytest.raises(RuntimeError, match="require a read-only GitHub App"):
+        github_token_provider([repository])
+
+
+def test_history_listing_pages_and_stops_at_rate_reserve(monkeypatch):
+    client = GitHubSourceClient(lambda _repository: "token")
+    pages = [
+        (
+            [
+                {
+                    "sha": "a" * 40,
+                    "commit": {
+                        "message": "new feature",
+                        "committer": {"date": "2025-10-02T00:00:00Z"},
+                    },
+                }
+            ],
+            {"Link": '<next>; rel="next"', "X-RateLimit-Remaining": "999"},
+        ),
+        (
+            [
+                {
+                    "sha": "b" * 40,
+                    "commit": {
+                        "message": "older change",
+                        "committer": {"date": "2025-10-01T00:00:00Z"},
+                    },
+                }
+            ],
+            {"X-RateLimit-Remaining": "998"},
+        ),
+    ]
+    monkeypatch.setattr(client, "_request_with_headers", lambda *_args: pages.pop(0))
+
+    commits = client.list_history_commits(
+        "example/repo",
+        "c" * 40,
+        _history_settings(max_pages=2),
+    )
+
+    assert [commit.sha for commit in commits] == ["a" * 40, "b" * 40]
+
+    monkeypatch.setattr(
+        client,
+        "_request_with_headers",
+        lambda *_args: ([], {"X-RateLimit-Remaining": "200"}),
+    )
+    with pytest.raises(GitHubRateLimitError, match="existing indexed generation"):
+        client.list_history_commits(
+            "example/repo",
+            "c" * 40,
+            _history_settings(),
+        )
+
+
+def test_history_details_records_omitted_patch_and_exact_sha_source(monkeypatch):
+    client = GitHubSourceClient("")
+    content = "def current():\n    return True\n"
+    unquoted_patch = "+client_secret: " + "fixture-value-" * 2
+    jwt_patch = "+authorization: Bearer " + ".".join(
+        ("eyJfixtureHeader", "fixturePayload", "fixtureSignature")
+    )
+    pem_patch = "+-----BEGIN " + "PRIVATE KEY-----\n+fixture-only"
+
+    def request(_repository, path):
+        if path.startswith("/commits/"):
+            return (
+                {
+                    "files": [
+                        {
+                            "filename": "src/current.py",
+                            "status": "modified",
+                            "additions": 2,
+                            "deletions": 1,
+                        },
+                        {
+                            "filename": "src/config.py",
+                            "status": "modified",
+                            "patch": '+api_key = "1234567890abcdefghijklmnop"',
+                            "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": ".env",
+                            "status": "modified",
+                            "patch": "+SECRET=value",
+                            "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": "src/config.yaml",
+                            "status": "modified",
+                            "patch": unquoted_patch,
+                            "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": "src/auth.py",
+                            "status": "modified",
+                            "patch": jwt_patch,
+                            "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": "src/key.py",
+                            "status": "modified",
+                            "patch": pem_patch,
+                            "additions": 2,
+                            "deletions": 0,
+                        },
+                    ]
+                },
+                {"X-RateLimit-Remaining": "900"},
+            )
+        if path.startswith("/contents/src/current.py"):
+            return (
+                {
+                    "type": "file",
+                    "size": len(content.encode()),
+                    "encoding": "base64",
+                    "content": source_index_module.base64.b64encode(
+                        content.encode()
+                    ).decode(),
+                },
+                {"X-RateLimit-Remaining": "899"},
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(client, "_request_with_headers", request)
+    details = client.history_details(
+        "example/repo",
+        [_history_commit("a")],
+        ("src/",),
+        _history_settings(),
+    )
+
+    assert len(details[0].changes) == 5
+    current, secret, unquoted, jwt, pem = details[0].changes
+    assert current.patch_state == "omitted"
+    assert "patch omitted" in current.patch
+    assert current.source_excerpt == content
+    assert secret.patch_state == "redacted_secret"
+    assert "credential-like" in secret.patch
+    for redacted in (unquoted, jwt, pem):
+        assert redacted.patch_state == "redacted_secret"
+        assert redacted.patch == "[patch redacted by credential-like content policy]"
+
+
+def test_history_chunk_has_exact_sha_citation_and_mandatory_fields():
+    commit = SourceHistoryCommit(
+        sha="a" * 40,
+        committed_at=datetime(2025, 10, 9, 12, 0, tzinfo=timezone.utc),
+        message="Implement queue operation",
+        source_url=f"https://github.com/example/repo/commit/{'a' * 40}",
+        changes=(
+            SourceHistoryChange(
+                path="src/queue.py",
+                status="modified",
+                patch="@@ -1 +1 @@\n-old\n+new",
+                patch_state="available",
+            ),
+        ),
+    )
+    repository = Repository("example/repo", "main", ("src/",), history=True)
+
+    chunk = history_chunks_for(repository, commit)[0]
+    values = _metadata_map(metadata_for(chunk, 1, "b" * 64))
+
+    assert chunk.source_type == "source_code_history"
+    assert chunk.authority == "repository_history"
+    assert chunk.status == "historical"
+    assert chunk.access_scope == "guild"
+    assert chunk.festival == 27
+    assert chunk.source_url.endswith("/commit/" + "a" * 40)
+    assert 'commit_message: "Implement queue operation"' in chunk.text
+    assert "changed_path: src/queue.py" in chunk.text
+    assert "change_status: modified" in chunk.text
+    assert "patch_state: available" in chunk.text
+    assert values["change_status"] == "modified"
+    assert values["start_at"] == "2025-10-09T12:00:00Z"
+
+
+def test_history_selection_is_bounded_round_robin_and_resumes():
+    repositories = [
+        Repository("example/one", "main", ("src/",), history=True),
+        Repository("example/two", "main", ("src/",), history=True),
+    ]
+    catalogs = {
+        "example/one": [_history_commit("a"), _history_commit("b")],
+        "example/two": [_history_commit("c"), _history_commit("d")],
+    }
+    processed = {"example/one": {"a" * 40}, "example/two": set()}
+
+    selected = select_history_commits(repositories, catalogs, processed, 3)
+
+    assert [item.sha for item in selected["example/one"]] == ["b" * 40]
+    assert [item.sha for item in selected["example/two"]] == [
+        "c" * 40,
+        "d" * 40,
+    ]
+
+
+def test_processed_history_cursor_requires_complete_remote_checkpoint():
+    repository = Repository(
+        "example/repo",
+        "main",
+        ("src/",),
+        history=True,
+    )
+    commit = SourceHistoryCommit(
+        **{
+            **_history_commit("a").__dict__,
+            "changes": (
+                SourceHistoryChange(
+                    path="src/app.py",
+                    status="modified",
+                    patch="+new",
+                ),
+            ),
+        }
+    )
+    chunk = history_chunks_for(repository, commit)[0]
+    entry = _source_state_entry(chunk, "documents/history")
+    previous = {
+        "policy_version": SOURCE_POLICY_VERSION,
+        "manifest_digest": repository_manifest_digest(repository),
+        "history_settings_digest": _history_settings().digest,
+        "history_processed_commits": [commit.sha],
+        "history_commit_document_counts": {commit.sha: 1},
+    }
+
+    assert valid_processed_history_commits(
+        repository,
+        previous,
+        {chunk.key: entry},
+        [commit],
+        _history_settings(),
+        remote_names={"documents/history"},
+        local_remote_names={chunk.key: "documents/history"},
+    ) == {commit.sha}
+    assert not valid_processed_history_commits(
+        repository,
+        previous,
+        {chunk.key: entry},
+        [commit],
+        _history_settings(),
+        remote_names=set(),
+        local_remote_names={chunk.key: "documents/history"},
+    )
 
 
 def test_unreadable_release_metadata_is_non_fatal(tmp_path, monkeypatch):
@@ -382,6 +1135,7 @@ def test_source_state_reindexes_when_policy_commit_or_festival_changes():
         "authority": chunk.authority,
         "status": chunk.status,
         "source_type": chunk.source_type,
+        "change_status": chunk.change_status,
         "festival": chunk.festival,
         "policy_version": SOURCE_POLICY_VERSION,
         "schema": f"source-v{SOURCE_POLICY_VERSION}",
@@ -529,6 +1283,7 @@ def _source_state_entry(chunk, remote_name: str, guild_id: int = 1) -> dict:
         "authority": chunk.authority,
         "status": chunk.status,
         "source_type": chunk.source_type,
+        "change_status": chunk.change_status,
         "policy_version": SOURCE_POLICY_VERSION,
         "schema": f"source-v{SOURCE_POLICY_VERSION}",
         "metadata_sha256": metadata_digest_for(chunk, guild_id, digest),
@@ -540,6 +1295,397 @@ def _metadata_map(metadata: list[dict]) -> dict:
         item["key"]: item.get("string_value", item.get("numeric_value"))
         for item in metadata
     }
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_is_a_safe_noop_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "false")
+    monkeypatch.setattr(
+        source_index_module,
+        "source_history_settings",
+        lambda: pytest.fail("disabled preflight must not parse source settings"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=None,
+    )
+
+    assert await preflight_once(args) == {"disabled": True, "preflight": True}
+    assert not args.state.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_resolves_every_repo_and_samples_one_document(
+    tmp_path,
+    monkeypatch,
+):
+    repositories = [
+        Repository("example/one", "main", ("src/",)),
+        Repository("example/two", "release", ("app/",)),
+    ]
+    provider = object()
+    resolved = []
+    history_checks = []
+    list_calls = []
+
+    class FakeGitHubClient:
+        def resolve(self, repository, ref):
+            resolved.append((repository, ref))
+            return f"resolved-{repository}"
+
+    def documents():
+        yield SimpleNamespace(name="documents/one")
+        raise AssertionError("preflight must not enumerate the File Search store")
+
+    def list_documents(**kwargs):
+        list_calls.append(kwargs)
+        return documents()
+
+    fake_genai_client = SimpleNamespace(
+        file_search_stores=SimpleNamespace(
+            documents=SimpleNamespace(list=list_documents),
+        ),
+    )
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_API_KEY", "fixture-google-key")
+    monkeypatch.delenv("YAGAPON_CORPUS_STORE_NAME", raising=False)
+    monkeypatch.setattr(
+        source_index_module,
+        "source_history_settings",
+        lambda: history_checks.append(True),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: repositories,
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "github_token_provider",
+        lambda loaded: provider if loaded == repositories else pytest.fail(),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "GitHubSourceClient",
+        lambda loaded_provider: (
+            FakeGitHubClient()
+            if loaded_provider is provider
+            else pytest.fail("unexpected token provider")
+        ),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "ConfigManager",
+        lambda: SimpleNamespace(get_corpus=lambda guild_id: f"stores/{guild_id}"),
+    )
+    monkeypatch.setattr(
+        source_index_module.genai,
+        "Client",
+        lambda *, api_key: (
+            fake_genai_client
+            if api_key == "fixture-google-key"
+            else pytest.fail("unexpected Google API key")
+        ),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=123,
+    )
+
+    result = await preflight_once(args)
+
+    assert history_checks == [True]
+    assert resolved == [("example/one", "main"), ("example/two", "release")]
+    assert list_calls == [
+        {"parent": "stores/123", "config": {"page_size": 20}},
+    ]
+    assert result == {
+        "preflight": True,
+        "repositories_checked": 2,
+        "file_search_store": "stores/123",
+        "remote_documents_sampled": 1,
+        "state_documents": 0,
+    }
+    assert not args.state.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_rejects_invalid_history_settings_before_network(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_HISTORY_MAX_COMMITS", "not-an-integer")
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: pytest.fail("invalid settings must fail before network setup"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=123,
+    )
+
+    with pytest.raises(RuntimeError, match="MAX_COMMITS must be an integer"):
+        await preflight_once(args)
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_rejects_invalid_state_before_network(
+    tmp_path,
+    monkeypatch,
+):
+    state = tmp_path / "state.json"
+    state.write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: pytest.fail("invalid state must fail before network setup"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=state,
+        guild_id=123,
+    )
+
+    with pytest.raises(RuntimeError, match="state must be a JSON object"):
+        await preflight_once(args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (
+            {"documents": {"source:one": "broken"}},
+            "document entry must be a JSON object",
+        ),
+        (
+            {"documents": {}, "repositories": {"example/repo": []}},
+            "repository entry must be a JSON object",
+        ),
+        (
+            {
+                "documents": {"source:one": {"repository": ["example/repo"]}},
+            },
+            "document field must be a string: repository",
+        ),
+        (
+            {
+                "documents": {},
+                "repositories": {
+                    "example/repo": {"history_commit_document_counts": {"abc": "1"}}
+                },
+            },
+            "history counts must be non-negative integers",
+        ),
+    ),
+)
+async def test_source_preflight_rejects_nested_corrupt_state_before_network(
+    tmp_path,
+    monkeypatch,
+    payload,
+    message,
+):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: pytest.fail("invalid state must fail before network setup"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=state,
+        guild_id=123,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        await preflight_once(args)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        ('{"documents": []}', "documents must be a JSON object"),
+        (
+            '{"documents": {}, "repositories": []}',
+            "repositories must be a JSON object",
+        ),
+        ("{not-json", "state is unreadable"),
+    ),
+)
+def test_load_state_rejects_corrupt_shapes(tmp_path, payload, message):
+    state = tmp_path / "state.json"
+    state.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=message):
+        load_state(state)
+
+
+@pytest.mark.asyncio
+async def test_history_sync_selects_bounded_details_and_reports_cursor(
+    tmp_path,
+    monkeypatch,
+):
+    repository = Repository(
+        "example/repo",
+        "main",
+        ("src/",),
+        history=True,
+    )
+    catalog = [_history_commit("a"), _history_commit("b"), _history_commit("c")]
+
+    class FakeClient:
+        selected = []
+
+        def resolve(self, _repository, _ref):
+            return "f" * 40
+
+        def list_history_commits(self, _repository, _commit, _settings):
+            return catalog
+
+        def archive(self, _repository, _commit, _include):
+            return [("src/app.py", b"print('current')")]
+
+        def history_details(self, _repository, commits, _include, _settings):
+            self.selected = [commit.sha for commit in commits]
+            return [
+                SourceHistoryCommit(
+                    sha=commit.sha,
+                    committed_at=commit.committed_at,
+                    message=commit.message,
+                    source_url=commit.source_url,
+                    changes=(
+                        SourceHistoryChange(
+                            path="src/app.py",
+                            status="modified",
+                            patch=f"+{commit.sha}",
+                        ),
+                    ),
+                )
+                for commit in commits
+            ]
+
+    client = FakeClient()
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_HISTORY_COMMITS_PER_CYCLE", "2")
+    monkeypatch.setattr(source_index_module, "read_secret", lambda _key: "")
+    monkeypatch.setattr(source_index_module, "GitHubSourceClient", lambda _token: client)
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: [repository],
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "ConfigManager",
+        lambda: SimpleNamespace(get_corpus=lambda _guild_id: "stores/test"),
+    )
+    monkeypatch.setattr(source_index_module, "deployed_refs", lambda _path: {})
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        guild_id=1,
+        dry_run=True,
+        state=tmp_path / "state.json",
+        release=tmp_path / "release.json",
+    )
+
+    result = await sync_once(args)
+
+    assert client.selected == ["a" * 40, "b" * 40]
+    assert result["history_commits_selected"] == 2
+    assert result["history_commits_remaining"] == 1
+    assert result["indexed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_history_rate_failure_preserves_existing_generation(
+    tmp_path,
+    monkeypatch,
+):
+    repository = Repository(
+        "example/repo",
+        "main",
+        ("src/",),
+        history=True,
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "documents": {
+                    "existing": {
+                        "repository": repository.name,
+                        "remote_name": "documents/existing",
+                    }
+                },
+                "repositories": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = state_path.read_text(encoding="utf-8")
+
+    class FakeClient:
+        def resolve(self, _repository, _ref):
+            return "f" * 40
+
+        def list_history_commits(self, *_args):
+            raise GitHubRateLimitError("rate reserve reached")
+
+    class FakeCorpus:
+        def __init__(self):
+            self.rag_store = SimpleNamespace(document_references=lambda _guild: [])
+
+        async def list_remote_documents(self, _store):
+            return []
+
+        async def _upload_document(self, *_args):
+            raise AssertionError("rate failure must happen before upload")
+
+        async def _delete_documents(self, *_args):
+            raise AssertionError("rate failure must not delete")
+
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setattr(source_index_module, "read_secret", lambda _key: "")
+    monkeypatch.setattr(
+        source_index_module,
+        "GitHubSourceClient",
+        lambda _token: FakeClient(),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: [repository],
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "ConfigManager",
+        lambda: SimpleNamespace(get_corpus=lambda _guild_id: "stores/test"),
+    )
+    monkeypatch.setattr(source_index_module, "CorpusManager", FakeCorpus)
+    monkeypatch.setattr(source_index_module, "deployed_refs", lambda _path: {})
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        guild_id=1,
+        dry_run=False,
+        state=state_path,
+        release=tmp_path / "release.json",
+    )
+
+    with pytest.raises(GitHubRateLimitError, match="rate reserve"):
+        await sync_once(args)
+
+    assert state_path.read_text(encoding="utf-8") == original
 
 
 @pytest.mark.asyncio

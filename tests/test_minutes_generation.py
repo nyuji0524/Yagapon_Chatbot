@@ -3,7 +3,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bot.minutes_generation import generate_minutes, normalize_speaker_labels, split_transcript
+from bot.ai_completion import IncompleteModelOutput
+from bot.minutes_generation import (
+    NOTIFICATION_SUMMARY_HEADER,
+    format_notification_summary,
+    generate_minutes,
+    normalize_speaker_labels,
+    notification_summary_failure,
+    split_transcript,
+)
 
 
 def test_normalize_speaker_labels():
@@ -37,7 +45,10 @@ async def test_long_minutes_uses_segment_notes_and_combines(monkeypatch):
         "[spk_1]: 最初の議題について詳しく話します\n[spk_2]: 次の議題について詳しく話します",
     )
 
-    assert result == "# 統合議事録"
+    assert result.startswith("# 統合議事録")
+    assert "## 区間別詳細（自動抽出・未統合）" in result
+    assert "### 区間 1/2\n区間1" in result
+    assert "### 区間 2/2\n区間2" in result
     assert generated.await_count == 3
     final_prompt = generated.await_args.kwargs["contents"]
     assert "区間1" in final_prompt
@@ -159,15 +170,86 @@ async def test_long_minutes_reuses_completed_segment_checkpoints(tmp_path, monke
     monkeypatch.setattr("bot.minutes_generation.TRANSCRIPT_CHUNK_CHARS", 40)
     transcript = "[Speaker 1]: 最初の議題について詳しく話します\n[Speaker 2]: 次の議題について詳しく話します"
 
-    with pytest.raises(RuntimeError, match="combine failed"):
-        await generate_minutes(first_client, transcript, checkpoint_dir=tmp_path)
+    fallback = await generate_minutes(first_client, transcript, checkpoint_dir=tmp_path)
 
     assert len(list(tmp_path.glob("segment-*.json"))) == 2
+    assert "統合版議事録の自動生成が完了しません" in fallback
+    assert "### 区間 1/2\n区間1" in fallback
+    assert "### 区間 2/2\n区間2" in fallback
     resumed_generate = AsyncMock(return_value=SimpleNamespace(text="# 復旧した議事録"))
     resumed_client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=resumed_generate)))
 
     result = await generate_minutes(resumed_client, transcript, checkpoint_dir=tmp_path)
 
-    assert result == "# 復旧した議事録"
+    assert result.startswith("# 復旧した議事録")
+    assert "### 区間 1/2\n区間1" in result
+    assert "### 区間 2/2\n区間2" in result
     assert resumed_generate.await_count == 1
     assert "区間1" in resumed_generate.await_args.kwargs["contents"]
+
+
+@pytest.mark.asyncio
+async def test_minutes_rejects_explicitly_truncated_model_output():
+    generated = AsyncMock(
+        return_value=SimpleNamespace(
+            text="# 途中までの議事録",
+            candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+        )
+    )
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    with pytest.raises(IncompleteModelOutput, match="minutes_format.*MAX_TOKENS"):
+        await generate_minutes(client, "Speaker 1: 長い会議の内容")
+
+
+@pytest.mark.asyncio
+async def test_minutes_rejects_empty_success_response():
+    generated = AsyncMock(
+        return_value=SimpleNamespace(
+            text="",
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+    )
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    with pytest.raises(IncompleteModelOutput, match="minutes_format.*EMPTY_OUTPUT"):
+        await generate_minutes(client, "Speaker 1: 長い会議の内容")
+
+
+@pytest.mark.asyncio
+async def test_reference_material_is_chunked_without_losing_tail(monkeypatch):
+    generated = AsyncMock(
+        side_effect=[
+            SimpleNamespace(text="資料メモ1"),
+            SimpleNamespace(text="資料メモ2"),
+            SimpleNamespace(text="資料メモ3"),
+            SimpleNamespace(text="# 議事録"),
+        ]
+    )
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+    monkeypatch.setattr("bot.minutes_generation.REFERENCE_CHUNK_CHARS", 30)
+    reference = "A" * 29 + "\n" + "B" * 29 + "\nTAIL-SENTINEL"
+
+    result = await generate_minutes(
+        client,
+        "Speaker 1: 開始します",
+        reference_text=reference,
+    )
+
+    reference_prompts = [
+        call.kwargs["contents"] for call in generated.await_args_list[:-1]
+    ]
+    assert any("TAIL-SENTINEL" in prompt for prompt in reference_prompts)
+    assert "### 資料区間 1/3\n資料メモ1" in result
+    assert "### 資料区間 2/3\n資料メモ2" in result
+    assert "### 資料区間 3/3\n資料メモ3" in result
+
+
+def test_notification_summary_is_never_labelled_as_full_minutes():
+    assert format_notification_summary("主な決定はAです").startswith(
+        f"{NOTIFICATION_SUMMARY_HEADER}\n"
+    )
+    failure = notification_summary_failure()
+    assert failure.startswith(f"{NOTIFICATION_SUMMARY_HEADER}\n")
+    assert "全文の議事録を確認" in failure
+    assert "..." not in failure

@@ -1,13 +1,19 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from bot.client import (
+    YagaPon,
     _clean_rag_query,
     _decorate_rag_answer,
+    _discord_channel_lineage,
     _guild_yagapon_emojis,
     _is_ignored_with_parent,
     _is_rag_invocation,
     _is_voice_reference_channel,
     _mentioned_bot_role_ids,
+    _split_discord_text,
 )
 
 
@@ -32,6 +38,14 @@ def test_clean_rag_query_removes_mention_variants_and_literal_silent_marker():
 
 def test_clean_rag_query_removes_bot_role_mention():
     assert _clean_rag_query("@silent <@&456> Driveの保存先は？", 123, (456,)) == "Driveの保存先は？"
+
+
+def test_clean_rag_query_preserves_numbered_multiline_structure():
+    content = "<@123> 次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題\n@silent"
+
+    assert _clean_rag_query(content, 123) == (
+        "次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題"
+    )
 
 
 def test_same_name_role_assigned_to_bot_is_an_invocation():
@@ -111,6 +125,26 @@ def test_ignore_is_inherited_by_threads():
     )
 
 
+def test_discord_channel_lineage_resolves_thread_parent_and_category():
+    category = SimpleNamespace(id=30, name="03会議")
+    parent = SimpleNamespace(id=20, name="タスク・議題", category=category, category_id=30)
+    thread = SimpleNamespace(
+        id=10,
+        name="新歓Web",
+        parent=parent,
+        parent_id=20,
+        category=None,
+        category_id=None,
+    )
+
+    assert _discord_channel_lineage(thread) == {
+        "parent_id": 20,
+        "parent_name": "タスク・議題",
+        "category_id": 30,
+        "category_name": "03会議",
+    }
+
+
 def test_guild_yagapon_emojis_only_returns_available_usable_custom_emojis():
     guild = SimpleNamespace(
         emojis=[
@@ -139,3 +173,57 @@ def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
     decorated = _decorate_rag_answer("見つからなかったぽん。", guild, no_answer=True)
 
     assert decorated.startswith("<:yagapon_cry:2> 見つからなかったぽん。")
+
+
+def test_split_discord_text_hard_splits_a_single_oversized_line_without_loss():
+    text = "x" * 5000
+
+    chunks = _split_discord_text(text)
+
+    assert len(chunks) >= 3
+    assert all(chunks)
+    assert all(len(chunk) <= 1900 for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_discord_text_reopens_code_blocks_without_losing_code():
+    text = "```python\n" + "x" * 5000 + "\n```"
+
+    chunks = _split_discord_text(text)
+
+    assert len(chunks) >= 3
+    assert all(chunks)
+    assert all(len(chunk) <= 1900 for chunk in chunks)
+    assert chunks[0].startswith("```python\n")
+    assert all(chunk.rstrip().endswith("```") for chunk in chunks)
+    assert sum(chunk.count("x") for chunk in chunks) == 5000
+
+
+@pytest.mark.asyncio
+async def test_send_split_message_never_sends_empty_payload_for_long_line():
+    destination = SimpleNamespace(send=AsyncMock(side_effect=lambda value, **_: value))
+
+    sent = await YagaPon.send_split_message(None, destination, "z" * 5000)
+
+    assert sent
+    assert all(call.args[0] for call in destination.send.await_args_list)
+    assert sum(call.args[0].count("z") for call in destination.send.await_args_list) == 5000
+
+
+@pytest.mark.asyncio
+async def test_send_split_message_uses_one_complete_markdown_attachment_for_very_long_answer():
+    destination = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1)))
+    answer = "長い回答だぽん。\n" + "根拠の詳細\n" * 2500
+    text = f"{answer}\n\n回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
+
+    sent = await YagaPon.send_split_message(None, destination, text)
+
+    assert len(sent) == 1
+    destination.send.assert_awaited_once()
+    call = destination.send.await_args
+    assert "Markdownファイル" in call.args[0]
+    attachment = call.kwargs["file"]
+    attachment.fp.seek(0)
+    uploaded = attachment.fp.read().decode("utf-8")
+    assert uploaded == answer
+    assert attachment.filename == "yagapon-answer.md"

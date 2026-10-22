@@ -33,6 +33,7 @@ flowchart LR
       IndexState[source-index-state.json]
       OAuthFile[google-drive-oauth.json\n0600 authorized-user JSON]
     end
+    GitHubKey[/etc/yagapon/secrets/github-app-private-key.pem\n0600・source-indexだけへread-only mount]
   end
 
   subgraph Gemini[Google AI]
@@ -44,8 +45,7 @@ flowchart LR
     Firestore[Yaga Support Firestore\n公開現在値・委員照合]
     Drive[Google Drive / Docs\n資料・議事録・文字起こし]
     IntakeGCS[GCS Knowledge intake\npending / processed / failed]
-    SnapshotGCS[GCS approved snapshot]
-    SecretManager[Secret Manager\nGoogle authorized-user JSON]
+    SecretManager[Secret Manager\nGoogle OAuth / GitHub App PEM]
     Registry[Artifact Registry]
   end
 
@@ -55,8 +55,8 @@ flowchart LR
     FirebaseRepo[YagamiFes-IT/yagamifes-firebase]
     WebRepo[YagamiFes-IT/Yagamifes_Web_2025]
     KnowledgeRepo[YagamiFes-IT/YagamiFes-IT-Knowledge]
+    ReadApp[Read-only GitHub App\nContents + Metadata read]
     IntakeAction[Knowledge Intake Action]
-    SnapshotAction[Approved Snapshot Action]
     CIAction[CI: ruff / pytest / image build]
     DeployAction[Deploy Action: WIF / IAP SSH]
   end
@@ -84,20 +84,21 @@ flowchart LR
   Bot -->|回答・通知| Message
 
   SecretManager -->|deploy時に展開| OAuthFile
+  SecretManager -->|deploy時に展開| GitHubKey
   OAuthFile --> Drive
+  GitHubKey --> ReadApp
 
   Outbox --> IntakeGCS
   IntakeGCS --> IntakeAction
   IntakeAction -->|Draft PR| KnowledgeRepo
   Reviewer -->|Draft PRをreview・merge| KnowledgeRepo
-  KnowledgeRepo --> SnapshotAction
-  SnapshotAction --> SnapshotGCS
 
-  BotRepo -->|GitHub API / manifest| SourceWorker
-  SupportRepo -->|GitHub API / privateはtoken必須| SourceWorker
-  FirebaseRepo -->|GitHub API / privateはtoken必須| SourceWorker
-  WebRepo -->|GitHub API / privateはtoken必須| SourceWorker
-  SnapshotGCS -->|Knowledge main snapshot| SourceWorker
+  ReadApp -->|1時間のinstallation token| SourceWorker
+  BotRepo -->|GitHub API / public| SourceWorker
+  SupportRepo -->|main + commit history| ReadApp
+  FirebaseRepo -->|main + commit history| ReadApp
+  WebRepo -->|main + commit history| ReadApp
+  KnowledgeRepo -->|承認済みmain + commit history| ReadApp
   SourceWorker --> FileSearch
   SourceWorker --> RAGDB
   SourceWorker --> IndexState
@@ -113,9 +114,12 @@ flowchart LR
   Registry --> Docker
 ```
 
-`source-index-watch` の候補はmanifestで管理する。ソースリポジトリはGitHub APIから取得し、
-private repositoryには読み取りtokenが必要である。Knowledgeだけは承認済みGCS snapshotを読む。
-実際に取り込むリポジトリは `YAGAPON_SOURCE_REPOSITORIES` で絞られ、
+`source-index-watch` の候補はmanifestで管理する。GitHubを正本として、現在のmainとcommit履歴を
+GitHub APIから直接取得する。private repositoryは組織の`All repositories`へインストールした
+read-only GitHub Appで読み、短命なinstallation tokenを期限前に更新する。Appが組織の全repositoryを
+読めても、自動列挙はしない。実際に取り込むrepositoryとtokenに指定するrepositoryは
+`source_index/repositories.yaml`のentryを`YAGAPON_SOURCE_REPOSITORIES`で絞った明示allowlistだけである。
+環境変数が空ならmanifest内の全entryを選び、組織の全repositoryを意味しない。
 `YAGAPON_SOURCE_INDEX_ENABLED=false` の間はworkerが起動していても索引を更新しない。
 
 ## 根拠の優先順位
@@ -149,6 +153,7 @@ flowchart TD
 - `canonical` / `curated` / `reviewed_record`: 規程、決定、確認済み記録。
 - `live_data`: Firestoreの公開状態など、質問時点の現在値だけに使用する。
 - `deployed_implementation` / `repository_context`: 実装、認可、データ契約の確認に使用する。
+- `repository_history`: 過去のcommit・diff・当時のファイル。経緯の根拠であり、現行・本番とはみなさない。
 - `conversation`: Discord原文や未確認文字起こし。人物・権限・規程の単独根拠にはしない。
 
 ## RAGの閲覧範囲と機能ゲート
@@ -175,7 +180,7 @@ flowchart TD
 6. 許可済み会議は資料と文字起こしから議事録を作り、Driveに `session_id + artifact_type`
    の安定キーでupsertし、Knowledge outboxへ送る。
 7. Knowledge候補はGCS intakeからDraft PRになる。リポジトリのmainへmergeされ、
-   `status=active|historical` としてsnapshotに入った文書だけが本番検索の対象になる。
+   `status=active|historical` になった文書だけをGitHubから読み、本番検索の対象にする。
 
 Draft PR自体はレビュー待ちを示すが、「必ず人が承認した」ことをBotコードは検証しない。
 必要な承認人数とActionsだけでのmerge禁止は、Knowledgeリポジトリのbranch protectionで強制する。
@@ -187,6 +192,18 @@ Draft PR自体はレビュー待ちを示すが、「必ず人が承認した」
 - コンテナはそのファイルパスを `GOOGLE_OAUTH_AUTHORIZED_USER_JSON` として読み、refresh tokenで
   メモリ上のaccess tokenを更新する。更新後のaccess tokenを別のキャッシュへ永続化する実装ではない。
 - service account / ADCはfallbackであり、個人の「マイドライブ」を当然に閲覧できるわけではない。
+
+## GitHubソース認証
+
+- GitHub Appは組織の`All repositories`へインストールするが、権限は`Contents: Read-only`と
+  `Metadata: Read-only`だけにする。source workerはmanifest/envの明示allowlistだけに制限した
+  installation tokenを発行し、未知のrepositoryを列挙・索引しない。
+- private keyはSecret Managerから共有data path外の
+  `/etc/yagapon/secrets/github-app-private-key.pem`へUID 10001、mode `0600`で展開する。
+  `source-index-watch`だけへ`/run/secrets/github-app-private-key.pem:ro`としてbind mountし、
+  他のComposeサービス、環境変数、ログ、索引へPEM本文を載せない。
+- App IDとinstallation IDは通常設定として保持し、installation tokenはメモリ上で発行・更新する。
+- App設定、rate limit、GitHub取得、索引uploadのどこかが失敗した周期は、直前の完全な世代を保持する。
 
 ## 管理APIとデプロイ
 
@@ -206,4 +223,5 @@ Draft PR自体はレビュー待ちを示すが、「必ず人が承認した」
 - Firebaseのクライアント更新可能フィールドをDiscord権限やサーバー認可の根拠にしない。
 - AI生成議事録・整理済みKnowledgeはDraftであり、merge前は正式決定として扱わない。
 - 秘密はSecret ManagerとVM環境ファイルに置き、File Search、SQLite本文、Knowledgeへ送らない。
+- 過去commitは`repository_history/historical`として扱い、現在のmainやデプロイ済み実装を上書きしない。
 - PCMは文字起こしの永続化が確認できるまで保持し、正常完了後だけ削除する。

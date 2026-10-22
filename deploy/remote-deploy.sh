@@ -6,6 +6,7 @@ staging_dir="${2:-/tmp}"
 staging_dir="${staging_dir%/}"
 app_dir=/opt/yagapon
 deploy_env=/etc/yagapon/deploy.env
+runtime_env=/etc/yagapon/yagapon.env
 compose_source="$staging_dir/compose.yaml"
 compose_target="$app_dir/compose.yaml"
 unit_source="$staging_dir/yagapon.service"
@@ -15,6 +16,12 @@ rag_eval_target="$app_dir/deploy/rag-eval-control.sh"
 rag_eval_cases_source="$staging_dir/rag-eval-cases.yaml"
 rag_eval_cases_target="$app_dir/deploy/rag-eval-cases.yaml"
 backup_dir=/var/backups/yagapon/"$(date -u +%Y%m%dT%H%M%SZ)"
+github_app_key_path=/etc/yagapon/secrets/github-app-private-key.pem
+github_app_key_existed=false
+github_app_key_installed=false
+github_app_key_backup=
+github_app_key_tmp=
+oauth_tmp=
 
 if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]; then
   echo "Refusing invalid Artifact Registry image reference" >&2
@@ -34,8 +41,53 @@ fi
   echo "RAG evaluation cases were not copied to the staging directory" >&2
   exit 2
 }
-if [[ ! -f /etc/yagapon/yagapon.env ]]; then
-  echo "Missing /etc/yagapon/yagapon.env" >&2
+if [[ ! -f "$runtime_env" ]]; then
+  echo "Missing $runtime_env" >&2
+  exit 2
+fi
+
+# Production uses a Secret Manager PEM mounted only into source-index-watch.
+# Reject legacy direct values before changing any deployment state: env_file
+# would otherwise inject them into every service and direct values take
+# precedence over *_FILE readers. The scanner deliberately emits no values.
+if ! python3 - "$runtime_env" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+forbidden = {
+    "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY",
+    "YAGAPON_SOURCE_GITHUB_TOKEN",
+}
+
+
+def has_forbidden_value(raw_line: str) -> bool:
+    line = raw_line.lstrip("\ufeff").strip()
+    if not line or line.startswith("#"):
+        return False
+    export_prefix = re.match(r"export[ \t]+", line)
+    if export_prefix:
+        line = line[export_prefix.end():]
+    key, separator, raw_value = line.partition("=")
+    if not separator or key.strip() not in forbidden:
+        return False
+    value = raw_value.strip()
+    if not value:
+        return False
+    # Docker Compose treats quoted whitespace and an unquoted value followed
+    # by a whitespace-separated comment as empty after read_secret().strip().
+    if re.fullmatch(r'''(?:"[ \t]*"|'[ \t]*')(?:[ \t]+#.*)?''', value):
+        return False
+    effective = re.split(r"[ \t]+#", raw_value, maxsplit=1)[0].strip()
+    return bool(effective)
+
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+raise SystemExit(1 if any(has_forbidden_value(line) for line in lines) else 0)
+PY
+then
+  echo "Direct GitHub source credentials are forbidden in $runtime_env" >&2
+  echo "Remove the direct private-key/token entries; configure the GitHub App IDs and Secret Manager PEM mount in deploy.env" >&2
   exit 2
 fi
 
@@ -61,6 +113,13 @@ rollback() {
     && install -o root -g root -m 0755 "$backup_dir/rag-eval-control.sh" "$rag_eval_target"
   [[ -f "$backup_dir/rag-eval-cases.yaml" ]] \
     && install -o root -g root -m 0644 "$backup_dir/rag-eval-cases.yaml" "$rag_eval_cases_target"
+  if [[ -n "$github_app_key_backup" && -f "$github_app_key_backup" ]]; then
+    install -d -o root -g root -m 0700 "$(dirname "$github_app_key_path")"
+    install -o 10001 -g 10001 -m 0600 \
+      "$github_app_key_backup" "$github_app_key_path"
+  elif [[ "$github_app_key_installed" == true && "$github_app_key_existed" == false ]]; then
+    rm -f -- "$github_app_key_path"
+  fi
   systemctl daemon-reload
   systemctl restart yagapon || true
 }
@@ -71,6 +130,11 @@ cleanup_staging() {
     fi
   fi
 }
+cleanup_secret_temps() {
+  [[ -z "$oauth_tmp" ]] || rm -f -- "$oauth_tmp"
+  [[ -z "$github_app_key_tmp" ]] || rm -f -- "$github_app_key_tmp"
+  [[ -z "$github_app_key_backup" ]] || rm -f -- "$github_app_key_backup"
+}
 handle_error() {
   status=$?
   trap - ERR
@@ -79,6 +143,7 @@ handle_error() {
   exit "$status"
 }
 trap handle_error ERR
+trap cleanup_secret_temps EXIT
 
 deploy_tmp=$(mktemp /etc/yagapon/deploy.env.XXXXXX)
 if [[ -f "$deploy_env" ]]; then
@@ -118,7 +183,6 @@ if [[ -n "$oauth_secret" ]]; then
     false
   fi
   oauth_tmp=$(mktemp /var/lib/yagapon/google-drive-oauth.json.XXXXXX)
-  trap '[[ -z "${oauth_tmp:-}" ]] || rm -f "$oauth_tmp"' EXIT
   gcloud secrets versions access latest \
     --project "$oauth_project" \
     --secret "$oauth_secret" > "$oauth_tmp"
@@ -147,6 +211,46 @@ if not required_scopes.issubset(scopes):
   oauth_tmp=
 fi
 
+# The GitHub App private key stays in Secret Manager and is materialized only
+# as a root-managed, container-readable file.  App/installation IDs are not
+# secrets and remain ordinary deploy configuration; the PEM must never be put
+# in an environment variable or copied through GitHub Actions.
+github_app_key_secret=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=//p' "$deploy_env" | tail -1)
+github_app_id=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_ID=//p' "$deploy_env" | tail -1)
+github_app_installation_id=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=//p' "$deploy_env" | tail -1)
+github_app_key_host_file=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=//p' "$deploy_env" | tail -1)
+if [[ -n "$github_app_key_secret$github_app_id$github_app_installation_id$github_app_key_host_file" ]]; then
+  if [[ -z "$oauth_project" \
+    || ! "$github_app_key_secret" =~ ^[a-zA-Z0-9_-]+$ \
+    || ! "$github_app_id" =~ ^[a-zA-Z0-9]+$ \
+    || ! "$github_app_installation_id" =~ ^[0-9]+$ \
+    || "$github_app_installation_id" == 0 \
+    || "$github_app_key_host_file" != "$github_app_key_path" ]]; then
+    echo "Invalid GitHub App Secret Manager configuration" >&2
+    false
+  fi
+  install -d -o root -g root -m 0700 /etc/yagapon/secrets
+  if [[ -f "$github_app_key_path" ]]; then
+    github_app_key_backup=$(mktemp /etc/yagapon/secrets/github-app-private-key.pem.rollback.XXXXXX)
+    install -o root -g root -m 0600 \
+      "$github_app_key_path" "$github_app_key_backup"
+    github_app_key_existed=true
+  fi
+  github_app_key_tmp=$(mktemp /etc/yagapon/secrets/github-app-private-key.pem.XXXXXX)
+  gcloud secrets versions access latest \
+    --project "$oauth_project" \
+    --secret "$github_app_key_secret" > "$github_app_key_tmp"
+  if ! openssl rsa -in "$github_app_key_tmp" -check -noout >/dev/null 2>&1; then
+    echo "GitHub App secret must contain a valid RSA private key" >&2
+    false
+  fi
+  install -o 10001 -g 10001 -m 0600 \
+    "$github_app_key_tmp" "$github_app_key_host_file"
+  github_app_key_installed=true
+  rm -f "$github_app_key_tmp"
+  github_app_key_tmp=
+fi
+
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" config --quiet
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon
 data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
@@ -156,6 +260,11 @@ timeout --signal=TERM --kill-after=30s 420s docker run --rm \
   --env-file /etc/yagapon/yagapon.env \
   --volume "$data_path:/data" \
   "$image" python -m bot.preflight
+timeout --signal=TERM --kill-after=30s 420s docker compose \
+  --project-directory "$app_dir" \
+  --env-file "$deploy_env" \
+  run --rm --no-deps source-index-watch \
+  python -m source_index --preflight
 systemctl restart yagapon
 
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
@@ -189,6 +298,12 @@ for _ in $(seq 1 48); do
     chmod 0640 "$data_path/releases/current.json"
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     docker image prune --force --filter 'until=168h' >/dev/null
+    if [[ "$github_app_key_installed" == true ]]; then
+      # The former location was part of the shared /data bind and therefore
+      # visible to every Compose service running as UID 10001. Keep it until
+      # the new generation is healthy so a failed migration can still roll back.
+      rm -f -- /var/lib/yagapon/github-app-private-key.pem
+    fi
     cleanup_staging
     echo "Deployment healthy: $image (container: $container_id)"
     exit 0

@@ -48,7 +48,9 @@ async def shutdown_backfill_tasks(app: FastAPI) -> None:
             log.exception("Could not persist cancelled API backfill job %s", job_id)
         finally:
             if corpus is not None and hasattr(corpus, "finish_backfill"):
-                corpus.finish_backfill(job["guild_id"])
+                session = getattr(app.state, "backfill_sessions", {}).pop(job_id, None)
+                if session is not None:
+                    await corpus.finish_backfill(session)
 
 
 @asynccontextmanager
@@ -116,6 +118,7 @@ def create_app(bot) -> FastAPI:
     app = FastAPI(title="おしゃべりやがぽん API", lifespan=_lifespan)
     app.state.bot = bot
     app.state.backfill_jobs = {}
+    app.state.backfill_sessions = {}
     app.state.backfill_tasks = set()
     app.state.accepting_backfills = True
     app.state.catalog = getattr(bot, "catalog", None) or CatalogStore()

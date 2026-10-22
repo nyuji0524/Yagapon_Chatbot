@@ -373,29 +373,34 @@ class Step7View(View):
 
 
 async def _run_backfill(wizard: SetupWizard, days: int | None):
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
 
     corpus = wizard.bot.config.get_corpus(wizard.guild.id)
     if not corpus:
         return
 
     label = "全期間" if days is None else f"過去{days}日"
-    after = None
-    if days:
-        after = datetime.now(timezone.utc) - timedelta(days=days)
-
     channels = [
         ch for ch in wizard.guild.text_channels
         if ch.permissions_for(wizard.guild.me).read_message_history
         and not wizard.bot.config.is_ignored(wizard.guild.id, ch.id)
     ]
+    if not channels:
+        await wizard.update("取り込み可能なテキストチャンネルがないぽん。`/ignore` 設定と権限を確認してねぽん。", View())
+        return
 
     total = 0
     documents = 0
     failures = []
-    if not wizard.bot.corpus.start_backfill(wizard.guild.id):
+    session = await wizard.bot.corpus.prepare_backfill(
+        wizard.guild.id,
+        (channel.id for channel in channels),
+        corpus,
+    )
+    if session is None:
         await wizard.update("別の履歴取り込みが実行中だぽん。完了後に `/backfill` を実行してねぽん。", View())
         return
+    after = session.cutoff - timedelta(days=days) if days else None
     try:
         for i, ch in enumerate(channels, 1):
             try:
@@ -409,8 +414,10 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
                     ch,
                     corpus,
                     after=after,
+                    before=session.cutoff,
                     progress_callback=progress,
                     replace_existing=True,
+                    session=session,
                 )
                 total += result.messages_indexed
                 documents += result.documents_uploaded
@@ -430,7 +437,7 @@ async def _run_backfill(wizard: SetupWizard, days: int | None):
                 failures.append(ch.name)
                 log.exception("Backfill error #%s: %s", ch.name, e)
     finally:
-        wizard.bot.corpus.finish_backfill(wizard.guild.id)
+        await wizard.bot.corpus.finish_backfill(session)
 
     wizard.step = 6
     failure_text = f"⚠️ 失敗: {', '.join(f'#{name}' for name in failures)}\n" if failures else ""

@@ -10,6 +10,7 @@ import os
 
 import discord
 
+from bot.ai_completion import require_complete_model_output
 from bot.ai_models import fast_model, generation_config
 from bot.authorization import require_registered_member
 from bot.discord_visibility import (
@@ -18,6 +19,7 @@ from bot.discord_visibility import (
 )
 from bot.gdrive import load_meeting_material
 from bot.knowledge_intake import parse_drive_file_url
+from bot.minutes_generation import format_notification_summary, notification_summary_failure
 from bot.recording import RecordingLimitExceeded
 from bot.voice import VoiceMode, get_session, join_voice, leave_voice
 
@@ -348,7 +350,7 @@ def register(bot):
 
 
 async def _summarize_minutes(minutes: str) -> str:
-    """議事録を要約"""
+    """Create a labelled notification overview separate from full minutes."""
     from google import genai
 
     try:
@@ -358,16 +360,18 @@ async def _summarize_minutes(minutes: str) -> str:
             client.aio.models.generate_content(
                 model=model,
                 contents=(
-                    "以下の議事録を3〜5行で簡潔に要約してください。\n"
-                    "要約には: 参加者、主な議題、決定事項を含めてください。\n"
+                    "以下の議事録からDiscord通知用の概要を作成してください。\n"
+                    "これは議事録全文の代替ではありません。参加者、主な議題、決定事項、未決事項を含め、"
+                    "内容が多い場合は無理に3〜5行へ押し込まず、必要な箇条書きを増やしてください。\n"
                     "語尾は「ぽん」をつけてください。\n\n"
                     f"{minutes}"
                 ),
-                config=generation_config(model, thinking_level="low", max_output_tokens=512),
+                config=generation_config(model, thinking_level="low", max_output_tokens=2048),
             ),
             timeout=90,
         )
-        return response.text or "要約を生成できなかったぽん..."
+        require_complete_model_output(response, operation="minutes_notification_summary")
+        return format_notification_summary(response.text or "")
     except Exception:
-        # 要約失敗時は冒頭を切り出し
-        return minutes[:500] + ("\n\n..." if len(minutes) > 500 else "")
+        log.exception("Minutes notification summary generation failed")
+        return notification_summary_failure()

@@ -11,3 +11,4 @@ aiohttp>=3.9.0
 google-api-python-client>=2.100.0
 google-auth>=2.20.0
 PyYAML>=6.0
+PyJWT[crypto]>=2.10.0,<3.0.0

@@ -74,16 +74,36 @@ SHAが一致したものだけ`deployed_implementation/deployed`、それ以外�
 `repository_context/current`とする。Functions、Rules、サーバー実装、主要クライアント実装、
 スキーマ、migration、テスト、CI/CDを対象にする。
 
+過去の実装経緯はGitHubのcommit履歴から直接取得する。各履歴文書はcommit日時、完全なSHA、message、
+変更pathとstatus、allowlist内のpatch、commit URLを持ち、`source_code_history`、
+`repository_history/historical`として登録する。GitHubがpatchを省略または切断した場合だけ、
+対象SHAの小さい変更ファイルを補助取得する。履歴は「その時点で何を変更したか」の根拠であり、
+現在のmainや本番デプロイ済み状態の根拠としては使わない。
+
+private repositoryは組織の`All repositories`へインストールしたread-only GitHub Appで読む。
+Appは`Contents: Read-only`と`Metadata: Read-only`以外の権限を持たせない。source workerは
+`source_index/repositories.yaml`と`YAGAPON_SOURCE_REPOSITORIES`の明示allowlistだけをinstallation tokenへ
+指定し、Appから未知のrepositoryを列挙・自動索引しない。環境変数が空でもmanifest内の全entryに限る。
+private keyはSecret Managerから
+共有data path外の0600ファイルへ展開し、source workerだけへread-only mountする。1時間の
+installation tokenはメモリ上で更新する。個人PATは本番の標準経路にしない。
+
 Knowledgeリポジトリも同じ常駐同期へ含めるが、front matterのstatus allowlistを必須とし、
 承認済み文書だけを文書自身のstatusと`curated`/`reviewed_record` authorityで登録する。
 
 `.env`、認証情報、秘密鍵、生成物、依存物、lockfile、バイナリ、録音、ログは除外する。
-credentialらしい本文を検出したファイルもファイル単位で除外する。初回同期は次で確認する。
+credentialらしい本文を検出したファイルもファイル単位で除外する。履歴diffとexact-SHA補助取得には
+未引用assignment、JWT、PEMを含むより厳しいfail-closed検査を適用し、該当内容を索引へ送らない。
+初回同期は次で確認する。
 
 ```bash
 python -m source_index --dry-run
 python -m source_index
 ```
+
+履歴backfillは2024-10-01を既定の開始点とし、全repository合計で1周期あたり最大100 commitを処理する。
+新着commitを先に取り込み、残りは永続cursorから徐々に遡る。rate limitの安全余力を下回った場合や、
+一つでも世代生成・uploadに失敗した場合は、その周期で古い完全な索引を置き換えない。
 
 ## Firebase現在値
 
@@ -100,6 +120,16 @@ File SearchやSQLite本文へ保存しない。`users`、`staffInfos`、整理�
 3. 完全一致候補は一致語数、curated、レビュー済みstatusの順に加点して並べる。
 4. 両方の候補を回答モデルへ渡し、根拠が取れない場合は推測せず「記録を見つけられない」と返す。
 5. 回答末尾へ参照元を表示する。
+
+`YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS=true`を既定とし、File Searchが回答区間と
+根拠chunkの対応情報を返さない場合、その意味検索回答は採用しない。安全性を検証済みの
+完全一致候補があればその原文だけで再生成し、なければ情報なしを返す。旧API挙動の調査時だけ
+`false`を明示して互換fallbackを有効化できるが、本番では使用しない。
+
+`YAGAPON_RAG_REQUIRE_ANSWER_STATUS=true`も既定とし、モデルが末尾の回答状態を返さない
+応答を採用しない。完全一致・Firebase候補を使う回答では、直前のevidence key行に実際に
+使った候補を列挙できない場合も参照なしとして棄却する。旧応答形式を調査する場合だけ
+`false`を明示できるが、本番では使用しない。
 
 年度指定がある質問では、移行中にFile Searchのmetadata filterを無効にしていても、
 回答へ採用する参照をアプリ側でも検証する。`festival`が一致しない、または年度情報を
@@ -160,8 +190,9 @@ GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のとき�
 - Google Drive: change tokenとSHA-256で変更文書だけdraftへ変換する。
 - Knowledge: Git上のMarkdownのSHA-256とremote document名を状態ファイルへ保存し、
   承認済み文書の変更・削除だけをFile Searchへ反映する。
+- ソース履歴: GitHub commit SHAを処理済み集合として保存し、新着優先のcursorで差分追加する。
 
-常駐同期を使う場合は、対象Guild ID、署名済みKnowledge snapshot bucketの読み取り権限、
+常駐同期を使う場合は、対象Guild ID、read-only GitHub Appの権限とsource manifest/env allowlist、
 Driveの読み取り権限を確認してから有効にする。承認済みKnowledgeをFile Searchへ登録する
 経路はACL・日付・年度をfail-closedで付与する`source-index-watch`だけとし、ローカルcloneを
 直接読む旧Knowledge indexerは使用しない。

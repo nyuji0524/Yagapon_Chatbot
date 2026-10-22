@@ -217,6 +217,30 @@ async def test_sensitive_transcript_is_kept_local_and_blocked_from_github(tmp_pa
     assert result.status == "blocked-sensitive-content"
 
 
+@pytest.mark.parametrize(
+    ("secret", "label"),
+    [
+        ("AKIAABCDEFGHIJKLMNOP", "cloud-access-key"),
+        ("ya29.ABCDEFGHIJKLMNOPQRSTUVWXYZ", "oauth-token"),
+        ("https://discord.com/api/webhooks/123456/abcdefghijklmnopqrstuvwxyz", "webhook-url"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_extended_secret_patterns_block_publication(tmp_path, monkeypatch, secret, label):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+    result = await publish_meeting_knowledge(
+        session_id=f"20261010T075451Z-{label}",
+        guild_id=123,
+        channel_name="全体会議部屋",
+        mode="listen",
+        transcript=f"[Speaker 1]: {secret}",
+    )
+
+    delivery = json.loads((result.outbox_dir / "delivery.json").read_text(encoding="utf-8"))
+    assert delivery["status"] == "blocked-sensitive-content"
+    assert label in delivery["detectedPatterns"]
+
+
 @pytest.mark.asyncio
 async def test_generic_bundle_can_be_listed_and_retried(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
