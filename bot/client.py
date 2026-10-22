@@ -500,7 +500,10 @@ class YagaPon(discord.Bot):
                         filename=f"議事録_{session.channel.name}.md",
                     )
                 )
-                embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
+                if export_decision.allowed:
+                    embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
+                else:
+                    embed.set_footer(text="🔒 限定チャンネルのため、外部Driveへの保存を行わず添付します")
             if session.transcript_text and not transcript_url:
                 files.append(
                     discord.File(

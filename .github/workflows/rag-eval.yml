@@ -48,7 +48,7 @@ jobs:
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            --command "sudo /opt/yagapon/deploy/rag-eval-control.sh $quoted_guild 0.8"
+            --command "sudo /bin/bash /opt/yagapon/deploy/rag-eval-control.sh $quoted_guild 0.8"
       - name: Download evaluation report
         if: always()
         run: |

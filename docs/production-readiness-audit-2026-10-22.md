@@ -106,6 +106,6 @@
 - 年度: 26th 683、27th 1,101、28th 155、年度共通6。
 - Knowledge repository: 149文書中、draft 113、needs-review 26、active 6、historical 4。本番検索対象は承認済み10文書で、28thの承認済み文書と正式用語集はまだない。
 - RAG telemetry: 約178質問、回答不能43件（24.2%）、平均8.77秒、p95 18.69秒、最大31.73秒。引用付き142件に対し利用者評価は1件のみで、評価母数は不足している。
-- ローカル検証: pytest 492件成功・1件skip、Firestore Emulator統合テスト1件は別実行、Ruff・compileall・Compose・workflow YAML・shell・差分検査はいずれも成功。Docker imageも再構築し、`pip check` と主要モジュールimportに成功した。
+- ローカル検証: pytest 493件成功・1件skip、Firestore Emulator統合テスト1件は別実行、Ruff・compileall・Compose・workflow YAML・shell・差分検査はいずれも成功。Docker imageも再構築し、`pip check` と主要モジュールimportに成功した。
 
 数値は2026-10-22の監査時点であり、デプロイ後の実測は `docs/bot-path-validation-2026-10-22.md` に追記する。

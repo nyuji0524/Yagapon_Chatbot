@@ -82,6 +82,42 @@ async def test_automatic_leave_delivers_minutes_without_notification_channel(mon
 
 
 @pytest.mark.asyncio
+async def test_restricted_meeting_notification_distinguishes_policy_skip_from_drive_failure(monkeypatch):
+    bot, member, before, after, session = _automatic_leave_context()
+    channel = session.channel
+    channel.send = AsyncMock()
+    channel.permissions_for = Mock(
+        return_value=SimpleNamespace(
+            view_channel=True,
+            send_messages=True,
+            send_messages_in_threads=False,
+        )
+    )
+    member.guild.get_channel = lambda channel_id: channel if channel_id == channel.id else None
+    session.external_export_decision = Mock(return_value=SimpleNamespace(allowed=False, reason="restricted-channel"))
+    session.publish_knowledge = AsyncMock(return_value=None)
+    upload_transcript = AsyncMock()
+    upload_minutes = AsyncMock()
+    monkeypatch.setattr("bot.voice.get_session", lambda _guild_id: session)
+    monkeypatch.setattr("bot.voice.leave_voice", AsyncMock(return_value="# 議事録"))
+    monkeypatch.setattr("bot.gdrive.upload_transcript", upload_transcript)
+    monkeypatch.setattr("bot.gdrive.upload_minutes", upload_minutes)
+    monkeypatch.setattr(
+        "bot.commands.voice_cmd._summarize_minutes",
+        AsyncMock(return_value="要約だぽん"),
+    )
+    monkeypatch.setattr("bot.meeting_index.index_bot_meeting", AsyncMock())
+
+    await YagaPon.on_voice_state_update(bot, member, before, after)
+
+    upload_transcript.assert_not_awaited()
+    upload_minutes.assert_not_awaited()
+    sent = channel.send.await_args.kwargs
+    assert sent["embed"].footer.text == "🔒 限定チャンネルのため、外部Driveへの保存を行わず添付します"
+    assert len(sent["files"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_automatic_leave_retains_recording_when_delivery_fails(monkeypatch):
     bot, member, before, after, session = _automatic_leave_context()
     monkeypatch.setattr("bot.voice.get_session", lambda _guild_id: session)
