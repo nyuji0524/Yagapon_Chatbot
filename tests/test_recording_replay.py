@@ -9,8 +9,10 @@ import pytest
 from bot.recording_replay import (
     ReadOnlyReplaySink,
     RecordingReplayManager,
+    ReplayJob,
     find_recording_artifact,
     list_recording_artifacts,
+    reconcile_completed_replay_checkpoints,
 )
 
 
@@ -95,6 +97,110 @@ def test_recording_inventory_excludes_previous_replay_transcripts(tmp_path, monk
     assert list_recording_artifacts() == []
 
 
+def _completed_replay_checkpoint(tmp_path: Path, monkeypatch):
+    replay_dir = tmp_path / "replays" / "replay-completed"
+    replay_dir.mkdir(parents=True)
+    transcript_archive = tmp_path / "transcripts" / "999" / "replay-completed.md"
+    transcript_archive.parent.mkdir(parents=True)
+    transcript_archive.write_text("# archived transcript", encoding="utf-8")
+    work_transcript = replay_dir / "transcript.md"
+    work_transcript.write_text("# replay transcript", encoding="utf-8")
+    minutes = replay_dir / "minutes.md"
+    minutes.write_text("# minutes", encoding="utf-8")
+    job = ReplayJob(
+        id="replay-completed",
+        source_session_id="source-session",
+        source_guild_id=123,
+        target_guild_id=999,
+        target_channel_id=50,
+        retranscribe=True,
+        status="completed",
+        stage="completed",
+        transcript_path=str(transcript_archive),
+        minutes_path=str(minutes),
+    )
+    (replay_dir / "job.json").write_text(
+        json.dumps(job.storage_dict()),
+        encoding="utf-8",
+    )
+    (replay_dir / "metadata.json").write_text(
+        json.dumps({
+            "status": "processing",
+            "source_session_id": "source-session",
+            "source_guild_id": 123,
+            "target_guild_id": 999,
+            "offsets": {"10": 200},
+            "speaker_labels": {"10": "Speaker 1"},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    return replay_dir
+
+
+def test_reconcile_completed_replay_checkpoint_is_atomic_and_preserves_state(
+    tmp_path,
+    monkeypatch,
+):
+    replay_dir = _completed_replay_checkpoint(tmp_path, monkeypatch)
+
+    result = reconcile_completed_replay_checkpoints(tmp_path / "replays")
+
+    metadata = json.loads(
+        (replay_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert result["reconciled"] == 1
+    assert metadata["status"] == "replay_completed"
+    assert metadata["job_status"] == "completed"
+    assert metadata["job_stage"] == "completed"
+    assert metadata["reconciled_from_status"] == "processing"
+    assert metadata["offsets"] == {"10": 200}
+    assert metadata["speaker_labels"] == {"10": "Speaker 1"}
+    assert not list(replay_dir.glob(".metadata.json.*.tmp"))
+
+    repeated = reconcile_completed_replay_checkpoints(tmp_path / "replays")
+    assert repeated["reconciled"] == 0
+    assert repeated["skipped_non_processing"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "skip_key"),
+    [
+        ("failed_job", "skipped_non_completed"),
+        ("missing_minutes", "skipped_missing_artifacts"),
+        ("mismatched_identity", "skipped_invalid"),
+    ],
+)
+def test_reconcile_completed_replay_checkpoint_fails_closed(
+    tmp_path,
+    monkeypatch,
+    mutation,
+    skip_key,
+):
+    replay_dir = _completed_replay_checkpoint(tmp_path, monkeypatch)
+    if mutation == "failed_job":
+        job_path = replay_dir / "job.json"
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        job.update({"status": "failed", "stage": "failed"})
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+    elif mutation == "missing_minutes":
+        (replay_dir / "minutes.md").unlink()
+    else:
+        metadata_path = replay_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["target_guild_id"] = 1000
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = reconcile_completed_replay_checkpoints(tmp_path / "replays")
+
+    metadata = json.loads(
+        (replay_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert result["reconciled"] == 0
+    assert result[skip_key] == 1
+    assert metadata["status"] == "processing"
+
+
 @pytest.mark.asyncio
 async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
@@ -141,6 +247,146 @@ async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, m
     restored = RecordingReplayManager(bot).get(job.id)
     assert restored is not None
     assert restored.status == "completed"
+
+
+def _patch_fake_retranscription(monkeypatch, *, started=None, blocker=None):
+    class FakeVoiceSession:
+        def __init__(self, *_args, **_kwargs):
+            self.recording_sink = None
+            self.started_at = None
+            self._transcription_failed = False
+            self.transcript_text = ""
+            self.transcript_path = None
+
+        async def _drain_recording(self):
+            self.recording_sink.checkpoint(
+                offsets={10: 100},
+                speaker_labels={10: "Speaker 1"},
+            )
+            if started is not None:
+                started.set()
+            if blocker is not None:
+                await blocker.wait()
+            self.transcript_text = "[Speaker 1]: 提案します"
+
+        async def _persist_transcript(self):
+            self.transcript_path = self.recording_sink.save_transcript(
+                self.transcript_text
+            )
+
+    monkeypatch.setattr("bot.voice.VoiceSession", FakeVoiceSession)
+
+
+def _replay_bot():
+    return SimpleNamespace(
+        config=SimpleNamespace(get_glossary_text=lambda _guild_id: "用語"),
+        _build_members_info=lambda _guild_id: "中山 | IT局長",
+        operations=SimpleNamespace(record_event=Mock()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_retranscribed_replay_marks_completed_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setenv("YAGAPON_REPLAY_DIR", str(tmp_path / "replays"))
+    _recording(tmp_path, raw=True, transcript=True)
+    _patch_fake_retranscription(monkeypatch)
+    monkeypatch.setattr(
+        "bot.recording_replay.generate_minutes",
+        AsyncMock(return_value="# 議事録"),
+    )
+    monkeypatch.setattr("bot.recording_replay.new_genai_client", lambda _key: object())
+    monkeypatch.setattr(
+        "bot.gdrive.upload_minutes",
+        AsyncMock(return_value="https://docs/minutes"),
+    )
+    monkeypatch.setattr(
+        "bot.gdrive.upload_transcript",
+        AsyncMock(return_value="https://docs/transcript"),
+    )
+    monkeypatch.setattr(
+        "bot.commands.voice_cmd._summarize_minutes",
+        AsyncMock(return_value="要約"),
+    )
+    monkeypatch.setattr("bot.meeting_index.index_bot_meeting", AsyncMock())
+    channel = SimpleNamespace(id=50, guild=SimpleNamespace(id=999), send=AsyncMock())
+    manager = RecordingReplayManager(_replay_bot())
+
+    job = manager.start(
+        artifact=find_recording_artifact("session-long"),
+        target_channel=channel,
+        retranscribe=True,
+    )
+    await asyncio.gather(*list(manager._tasks))
+
+    metadata = json.loads(
+        (tmp_path / "replays" / job.id / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert job.status == "completed"
+    assert metadata["status"] == "replay_completed"
+    assert metadata["job_status"] == "completed"
+    assert metadata["job_stage"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_retranscribed_replay_marks_failed_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setenv("YAGAPON_REPLAY_DIR", str(tmp_path / "replays"))
+    _recording(tmp_path, raw=True, transcript=True)
+    _patch_fake_retranscription(monkeypatch)
+    monkeypatch.setattr(
+        "bot.recording_replay.generate_minutes",
+        AsyncMock(side_effect=RuntimeError("generation failed")),
+    )
+    monkeypatch.setattr("bot.recording_replay.new_genai_client", lambda _key: object())
+    channel = SimpleNamespace(id=50, guild=SimpleNamespace(id=999), send=AsyncMock())
+    manager = RecordingReplayManager(_replay_bot())
+
+    job = manager.start(
+        artifact=find_recording_artifact("session-long"),
+        target_channel=channel,
+        retranscribe=True,
+    )
+    await asyncio.gather(*list(manager._tasks))
+
+    metadata = json.loads(
+        (tmp_path / "replays" / job.id / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert job.status == "failed"
+    assert metadata["status"] == "replay_failed"
+    assert metadata["failed_stage"] == "generating_minutes"
+    assert metadata["error"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_retranscribed_replay_marks_interrupted_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setenv("YAGAPON_REPLAY_DIR", str(tmp_path / "replays"))
+    _recording(tmp_path, raw=True, transcript=True)
+    started = asyncio.Event()
+    blocker = asyncio.Event()
+    _patch_fake_retranscription(monkeypatch, started=started, blocker=blocker)
+    channel = SimpleNamespace(id=50, guild=SimpleNamespace(id=999), send=AsyncMock())
+    manager = RecordingReplayManager(_replay_bot())
+
+    job = manager.start(
+        artifact=find_recording_artifact("session-long"),
+        target_channel=channel,
+        retranscribe=True,
+    )
+    await started.wait()
+    await manager.shutdown(timeout=0)
+
+    metadata = json.loads(
+        (tmp_path / "replays" / job.id / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert job.status == "interrupted"
+    assert metadata["status"] == "replay_interrupted"
+    assert metadata["interrupted_stage"] == "transcribing"
+    assert metadata["error"] == "CancelledError"
 
 
 @pytest.mark.asyncio
