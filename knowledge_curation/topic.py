@@ -318,6 +318,16 @@ class TopicStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS source_observations_topic
                     ON source_observations(topic_id, status);
+                CREATE TABLE IF NOT EXISTS bundle_sources (
+                    bundle_id TEXT NOT NULL,
+                    topic_id TEXT NOT NULL,
+                    document_key TEXT NOT NULL,
+                    source_sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(bundle_id, document_key)
+                );
+                CREATE INDEX IF NOT EXISTS bundle_sources_topic
+                    ON bundle_sources(topic_id, bundle_id);
                 """
             )
 
@@ -548,6 +558,40 @@ class TopicStateStore:
                 (status, _utc_now().isoformat(), topic_id),
             )
 
+    def mark_bundle_sources(self, bundle_id: str, status: str) -> int:
+        """Complete only the exact source versions captured by one bundle.
+
+        A topic can receive more evidence while its outbox delivery is waiting.
+        Matching both document key and digest prevents a later version of the
+        same source, or a newly attached source, from being marked delivered by
+        an older bundle retry.
+        """
+        if not bundle_id:
+            return 0
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE source_observations AS source SET status=?, updated_at=?
+                   WHERE EXISTS (
+                       SELECT 1 FROM bundle_sources AS bundled
+                       WHERE bundled.bundle_id=?
+                         AND bundled.topic_id=source.topic_id
+                         AND bundled.document_key=source.document_key
+                         AND bundled.source_sha256=source.source_sha256
+                   )""",
+                (status, _utc_now().isoformat(), bundle_id),
+            )
+        return cursor.rowcount
+
+    def bundle_source_versions(self, bundle_id: str) -> list[tuple[str, str]]:
+        """Expose immutable bundle lineage for diagnostics and tests."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT document_key, source_sha256 FROM bundle_sources
+                   WHERE bundle_id=? ORDER BY document_key""",
+                (bundle_id,),
+            ).fetchall()
+        return [(str(row["document_key"]), str(row["source_sha256"])) for row in rows]
+
     @staticmethod
     def _retry_at(topic_id: str, attempts: int, now: datetime) -> datetime:
         base = max(60, int(os.environ.get("YAGAPON_KNOWLEDGE_CURATION_RETRY_BASE_SECONDS", "900")))
@@ -567,6 +611,7 @@ class TopicStateStore:
         status: str,
         error: str = "",
         now: datetime | None = None,
+        source_versions: Iterable[tuple[str, str]] | None = None,
     ) -> TopicRecord:
         current = _as_utc(now)
         topic = self.get_topic(topic_id)
@@ -580,7 +625,22 @@ class TopicStateStore:
         )
         delivered = fingerprint if status in {"queued", "published"} else topic.delivered_fingerprint
         blocked = int(status == "blocked-sensitive-content")
+        captured_sources = tuple(
+            dict.fromkeys(
+                (str(document_key), str(source_sha256))
+                for document_key, source_sha256 in (source_versions or ())
+                if str(document_key) and str(source_sha256)
+            )
+        )
         with self._connect() as connection:
+            if topic.bundle_id and topic.bundle_id != bundle_id and source_versions is None:
+                connection.execute(
+                    """INSERT OR IGNORE INTO bundle_sources
+                       (bundle_id, topic_id, document_key, source_sha256, created_at)
+                       SELECT ?, topic_id, document_key, source_sha256, ?
+                       FROM bundle_sources WHERE bundle_id=?""",
+                    (bundle_id, current.isoformat(), topic.bundle_id),
+                )
             connection.execute(
                 """UPDATE topics SET delivered_fingerprint=?, delivery_status=?, bundle_id=?,
                    bundle_fingerprint=?, attempts=?, next_attempt_at=?, last_error=?,
@@ -599,6 +659,15 @@ class TopicStateStore:
                     blocked,
                     current.isoformat(),
                     topic_id,
+                ),
+            )
+            connection.executemany(
+                """INSERT OR IGNORE INTO bundle_sources
+                   (bundle_id, topic_id, document_key, source_sha256, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    (bundle_id, topic_id, document_key, source_sha256, current.isoformat())
+                    for document_key, source_sha256 in captured_sources
                 ),
             )
         result = self.get_topic(topic_id)

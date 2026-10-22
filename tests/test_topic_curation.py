@@ -253,6 +253,68 @@ def test_pending_delivery_remains_dirty_and_retries_with_backoff(tmp_path, monke
     assert [item.topic_id for item in due] == [identity.topic_id]
 
 
+def test_bundle_completion_marks_only_captured_unchanged_source_versions(tmp_path):
+    store = TopicStateStore(tmp_path / "topics.sqlite3")
+    identity = store.resolve_identity(festival=28, bureau="it", topic="新歓Web")
+    store.observe_topic(
+        identity,
+        title="新歓Web",
+        aliases=[],
+        fingerprint="evidence-one",
+        access=AccessDecision("guild", None, "guild-evidence-only"),
+    )
+    store.record_source("source-one", "hash-one", status="waiting-topic", topic_id=identity.topic_id)
+    store.record_delivery(
+        identity.topic_id,
+        fingerprint="evidence-one",
+        bundle_id="bundle-old",
+        status="failed",
+        source_versions=[("source-one", "hash-one")],
+    )
+    # Both a new source and a new version of the captured source arrive while
+    # the old bundle is waiting for retry.
+    store.record_source("source-two", "hash-two", status="waiting-topic", topic_id=identity.topic_id)
+    store.record_source("source-one", "hash-new", status="waiting-topic", topic_id=identity.topic_id)
+
+    store.record_delivery(
+        identity.topic_id,
+        fingerprint="evidence-one",
+        bundle_id="bundle-old",
+        status="queued",
+    )
+    assert store.mark_bundle_sources("bundle-old", "delivered") == 0
+
+    assert store.bundle_source_versions("bundle-old") == [("source-one", "hash-one")]
+    assert store.source_observation("source-one")["status"] == "waiting-topic"
+    assert store.source_observation("source-two")["status"] == "waiting-topic"
+    assert store.source_actionable("source-one", "hash-new") is True
+    assert store.source_actionable("source-two", "hash-two") is True
+
+
+def test_bundle_completion_marks_captured_source_when_digest_is_unchanged(tmp_path):
+    store = TopicStateStore(tmp_path / "topics.sqlite3")
+    identity = store.resolve_identity(festival=28, bureau="it", topic="新歓Web")
+    store.observe_topic(
+        identity,
+        title="新歓Web",
+        aliases=[],
+        fingerprint="evidence-one",
+        access=AccessDecision("guild", None, "guild-evidence-only"),
+    )
+    store.record_source("source-one", "hash-one", status="pending-delivery", topic_id=identity.topic_id)
+    store.record_delivery(
+        identity.topic_id,
+        fingerprint="evidence-one",
+        bundle_id="bundle-one",
+        status="pending",
+        source_versions=[("source-one", "hash-one")],
+    )
+
+    assert store.mark_bundle_sources("bundle-one", "delivered") == 1
+    assert store.source_observation("source-one")["status"] == "delivered"
+    assert store.source_actionable("source-one", "hash-one") is False
+
+
 def test_legacy_json_state_is_backed_up_and_imported(tmp_path):
     path = tmp_path / "knowledge-curation-state.json"
     path.write_text(
@@ -530,6 +592,30 @@ def test_backfill_checkpoint_gate_allows_unset_or_fresh_complete_state(tmp_path,
     assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
 
 
+def test_backfill_checkpoint_requires_curation_and_candidate_channels(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(checkpoint_payload(now)), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10,99")
+
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-missing-curation-channel:99",
+    )
+
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
+    assert backfill_checkpoint_status(now=now, required_channel_ids={20}) == (
+        True,
+        "fresh-success",
+    )
+    assert backfill_checkpoint_status(now=now, required_channel_ids={99}) == (
+        False,
+        "checkpoint-missing-curation-channel:99",
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
@@ -591,6 +677,44 @@ async def test_curate_once_stops_before_rag_when_checkpoint_is_not_ready(tmp_pat
     assert result["checkpoint_ready"] is False
     assert result["checkpoint_reason"] == "checkpoint-unreadable"
     assert not (tmp_path / "curation.sqlite3").exists()
+
+
+@pytest.mark.asyncio
+async def test_curate_once_requires_every_candidate_channel_in_successful_cycle(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    checkpoint = tmp_path / "scheduled-backfill-state.json"
+    checkpoint.write_text(json.dumps(checkpoint_payload(now)), encoding="utf-8")
+    database = tmp_path / "rag.sqlite3"
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(checkpoint))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    document = source_document() | {"channel_id": 99, "access_scope": "guild"}
+    RagStore(database).upsert_document(
+        "documents/candidate-99",
+        document["body"],
+        [
+            {"key": "document_key", "string_value": "candidate-99"},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 99},
+            {"key": "channel_name", "string_value": "全体公開"},
+            {"key": "category", "string_value": "28th IT局"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+
+    result = await curation.curate_once(state_path=state, limit=3)
+
+    assert result["checkpoint_ready"] is False
+    assert result["checkpoint_reason"] == "checkpoint-missing-curation-channel:99"
+    assert result["processed"] == 0
+    assert not state.exists()
 
 
 @pytest.mark.asyncio

@@ -404,7 +404,11 @@ def _positive_int_env(name: str, default: int, *, maximum: int) -> int:
     return max(1, min(parsed, maximum))
 
 
-def backfill_checkpoint_status(*, now: datetime | None = None) -> tuple[bool, str]:
+def backfill_checkpoint_status(
+    *,
+    now: datetime | None = None,
+    required_channel_ids: set[int] | None = None,
+) -> tuple[bool, str]:
     """Validate the optional scheduled-backfill handoff before curation.
 
     An unset path preserves the existing independent curation behavior.  Once
@@ -520,6 +524,12 @@ def backfill_checkpoint_status(*, now: datetime | None = None) -> tuple[bool, st
         return False, "checkpoint-invalid-channel-inventory"
     if set(str(value) for value in eligible_ids) != all_eligible:
         return False, "checkpoint-invalid-channel-inventory"
+    required_channels = configured_curation_channel_ids() | set(required_channel_ids or ())
+    missing_curation_channels = {
+        str(value) for value in required_channels if str(value) not in all_eligible
+    }
+    if missing_curation_channels:
+        return False, f"checkpoint-missing-curation-channel:{sorted(missing_curation_channels, key=int)[0]}"
     return True, "fresh-success"
 
 
@@ -1091,8 +1101,44 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             "skipped": 0,
             "failed": 0,
         }
-    ledger = TopicStateStore(state_path)
     store = RagStore()
+    all_candidates = expand_curation_documents(store.list_curation_documents(limit=10_000))
+    # The central private repository cannot reproduce Discord's live ACLs.
+    # Guild-wide material is safe for an allowlisted guild; channel-scoped
+    # material requires a second positive allowlist of immutable channel IDs.
+    candidates = [item for item in all_candidates if curation_document_allowed(item)]
+    candidate_channel_ids: set[int] = set()
+    candidate_without_channel = False
+    for item in candidates:
+        try:
+            channel_id = int(item.get("channel_id") or 0)
+        except (TypeError, ValueError):
+            channel_id = 0
+        if channel_id > 0:
+            candidate_channel_ids.add(channel_id)
+        else:
+            candidate_without_channel = True
+    if os.environ.get("YAGAPON_KNOWLEDGE_BACKFILL_STATE", "").strip() and candidate_without_channel:
+        checkpoint_ready, checkpoint_reason = False, "checkpoint-candidate-channel-missing"
+    else:
+        checkpoint_ready, checkpoint_reason = backfill_checkpoint_status(
+            required_channel_ids=candidate_channel_ids
+        )
+    if not checkpoint_ready:
+        log.warning("Knowledge curation held by candidate channel checkpoint: %s", checkpoint_reason)
+        return {
+            "enabled": True,
+            "checkpoint_ready": False,
+            "checkpoint_reason": checkpoint_reason,
+            "eligible": len(candidates),
+            "policy_excluded": len(all_candidates) - len(candidates),
+            "processed": 0,
+            "queued": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+
+    ledger = TopicStateStore(state_path)
     reconciled = 0
     for open_topic in ledger.open_topics():
         if store.find_approved_topic(open_topic.topic_id, festival=open_topic.festival):
@@ -1111,7 +1157,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
                 status=result.status,
             )
             if updated.delivery_status in {"queued", "published"}:
-                ledger.mark_topic_sources(topic.topic_id, "delivered")
+                ledger.mark_bundle_sources(topic.bundle_id or "", "delivered")
                 retry_succeeded += 1
         except Exception as exc:
             ledger.record_delivery(
@@ -1123,11 +1169,6 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             )
             log.exception("Knowledge curation retry failed topic_id=%s", topic.topic_id)
 
-    all_candidates = expand_curation_documents(store.list_curation_documents(limit=10_000))
-    # The central private repository cannot reproduce Discord's live ACLs.
-    # Guild-wide material is safe for an allowlisted guild; channel-scoped
-    # material requires a second positive allowlist of immutable channel IDs.
-    candidates = [item for item in all_candidates if curation_document_allowed(item)]
     pending = [
         item
         for item in candidates
@@ -1335,15 +1376,30 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
                 fingerprint=fingerprint,
                 bundle_id=result.session_id,
                 status=result.status,
+                source_versions=[(key, digest)],
             )
             if result.status in {"queued", "published"}:
-                ledger.mark_topic_sources(identity.topic_id, "delivered")
+                ledger.mark_bundle_sources(result.session_id, "delivered")
                 queued += int(result.status == "queued")
             elif result.status == "blocked-sensitive-content":
-                ledger.mark_topic_sources(identity.topic_id, "blocked-sensitive-content")
+                ledger.record_source(
+                    key,
+                    digest,
+                    status="blocked-sensitive-content",
+                    topic_id=identity.topic_id,
+                    plan=plan.model_dump(),
+                    reason="bundle failed sensitive-content scan",
+                )
                 skipped += 1
             elif updated.delivery_status in {"pending", "failed"}:
-                ledger.mark_topic_sources(identity.topic_id, "pending-delivery")
+                ledger.record_source(
+                    key,
+                    digest,
+                    status="pending-delivery",
+                    topic_id=identity.topic_id,
+                    plan=plan.model_dump(),
+                    reason=f"bundle delivery is {updated.delivery_status}",
+                )
                 failed += int(result.status == "failed")
             else:
                 failed += 1

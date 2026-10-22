@@ -96,6 +96,30 @@ class ScheduledBackfillManager:
     def start(self) -> bool:
         if not scheduler_enabled() or self.running:
             return False
+        now = datetime.now(timezone.utc).isoformat()
+        waiting = {
+            "schema_version": 1,
+            "started_at": now,
+            "completed_at": None,
+            "status": "waiting",
+            "reason": "initial-delay",
+            "configured_guild_ids": [str(value) for value in configured_guild_ids()],
+            "configured_channel_ids": [str(value) for value in sorted(configured_channel_ids())],
+            "discovered_channel_ids": [],
+            "eligible_channel_ids": [],
+            "missing_channel_ids": [],
+            "guilds": {},
+        }
+        try:
+            _write_state(self.state_path, waiting)
+        except Exception:
+            # If replacement itself fails, remove the exact checkpoint rather
+            # than leaving a previous successful cycle available during boot.
+            try:
+                self.state_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         self._task = asyncio.create_task(
             self._run_loop(),
             name="scheduled-discord-backfill",

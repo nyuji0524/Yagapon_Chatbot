@@ -206,6 +206,11 @@ async def transcribe_audio(
                 model = transcribe_model()
                 log_usage(log, "transcription", model, response)
                 require_complete_model_output(response, operation="transcription_create")
+                if not (response.output_text or "").strip():
+                    # Even digital silence gets one fallback interpretation.
+                    # The fallback signal check still permits a genuinely
+                    # silent recording to complete with an empty transcript.
+                    raise IncompleteModelOutput("transcription_create", "EMPTY_OUTPUT")
                 return _require_transcription_text(
                     response.output_text or "",
                     audio_bytes=audio_bytes,
@@ -222,6 +227,16 @@ async def transcribe_audio(
                     cooldown,
                     _dedicated_transcription_rate_limiter.failure_count,
                     exc.diagnostic,
+                )
+            except IncompleteModelOutput as exc:
+                # The dedicated endpoint occasionally reports a completed but
+                # empty result, or an explicit incomplete status. Discard its
+                # partial output and make one independent fallback attempt
+                # before declaring the durable PCM unrecoverable.
+                log.warning(
+                    "Dedicated transcription was incomplete; using fallback operation=%s reason=%s",
+                    exc.operation,
+                    exc.finish_reason,
                 )
         elif prefer_dedicated and not use_voiceprints:
             log.info(

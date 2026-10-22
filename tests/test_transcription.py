@@ -21,6 +21,16 @@ def _wav_with_signal() -> bytes:
     return output.getvalue()
 
 
+def _silent_wav() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16_000)
+        stream.writeframes(b"\x00\x00" * 2_000)
+    return output.getvalue()
+
+
 class RateLimitError(RuntimeError):
     code = 429
 
@@ -60,7 +70,7 @@ async def test_transcription_uses_dedicated_model_and_deletes_upload(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_dedicated_transcription_rejects_incomplete_interaction_status():
+async def test_dedicated_transcription_falls_back_on_incomplete_interaction_status():
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     create = AsyncMock(
         return_value=SimpleNamespace(
@@ -70,44 +80,76 @@ async def test_dedicated_transcription_rejects_incomplete_interaction_status():
     )
     client = SimpleNamespace(
         files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
-        aio=SimpleNamespace(interactions=SimpleNamespace(create=create)),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=create),
+            models=SimpleNamespace(
+                generate_content=AsyncMock(return_value=SimpleNamespace(text="Speaker 1: 復旧結果"))
+            ),
+        ),
     )
 
-    with pytest.raises(
-        IncompleteModelOutput,
-        match="transcription_create.*STATUS_INCOMPLETE",
-    ):
-        await transcribe_audio(
-            client,
-            b"RIFFtest",
-            mime_type="audio/wav",
-            display_name="meeting.wav",
-        )
+    result = await transcribe_audio(
+        client,
+        b"RIFFtest",
+        mime_type="audio/wav",
+        display_name="meeting.wav",
+    )
 
+    assert result == "Speaker 1: 復旧結果"
+    client.aio.models.generate_content.assert_awaited_once()
     client.files.delete.assert_called_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
-async def test_dedicated_transcription_rejects_empty_stop_for_non_silent_audio():
+async def test_dedicated_transcription_falls_back_on_empty_stop_for_non_silent_audio():
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     client = SimpleNamespace(
         files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
             interactions=SimpleNamespace(
                 create=AsyncMock(return_value=SimpleNamespace(output_text="", status="completed"))
-            )
+            ),
+            models=SimpleNamespace(
+                generate_content=AsyncMock(return_value=SimpleNamespace(text="Speaker 1: 復旧しました"))
+            ),
         ),
     )
 
-    with pytest.raises(IncompleteModelOutput, match="EMPTY_OUTPUT_WITH_AUDIO"):
-        await transcribe_audio(
-            client,
-            _wav_with_signal(),
-            mime_type="audio/wav",
-            display_name="meeting.wav",
-        )
+    result = await transcribe_audio(
+        client,
+        _wav_with_signal(),
+        mime_type="audio/wav",
+        display_name="meeting.wav",
+    )
 
+    assert result == "Speaker 1: 復旧しました"
+    client.aio.models.generate_content.assert_awaited_once()
     client.files.delete.assert_called_once_with(name="files/test")
+
+
+@pytest.mark.asyncio
+async def test_dedicated_empty_silent_audio_still_gets_one_fallback_attempt():
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    fallback = AsyncMock(return_value=SimpleNamespace(text=""))
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(
+                create=AsyncMock(return_value=SimpleNamespace(output_text="", status="completed"))
+            ),
+            models=SimpleNamespace(generate_content=fallback),
+        ),
+    )
+
+    result = await transcribe_audio(
+        client,
+        _silent_wav(),
+        mime_type="audio/wav",
+        display_name="silence.wav",
+    )
+
+    assert result == ""
+    fallback.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -145,9 +145,20 @@ async def test_scheduler_stop_cancels_sleeping_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS", "600")
-    manager = ScheduledBackfillManager(_bot(), state_path=tmp_path / "state.json")
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps({"schema_version": 1, "status": "completed", "completed_at": "old"}),
+        encoding="utf-8",
+    )
+    manager = ScheduledBackfillManager(_bot(), state_path=state_path)
 
     assert manager.start() is True
+    # start() invalidates yesterday's success synchronously, before the task can
+    # enter its configured initial sleep.
+    waiting = json.loads(state_path.read_text(encoding="utf-8"))
+    assert waiting["status"] == "waiting"
+    assert waiting["reason"] == "initial-delay"
+    assert waiting["completed_at"] is None
     await asyncio.sleep(0)
     await manager.stop()
 
