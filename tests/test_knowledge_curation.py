@@ -169,14 +169,49 @@ async def test_curation_is_disabled_by_default(tmp_path, monkeypatch):
     assert result == {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}
 
 
+@pytest.mark.parametrize("value", [True, 1, 1.0, "true", " TRUE ", "yes", "on", "1"])
+def test_autonomous_curation_accepts_trusted_auto_promote_metadata(monkeypatch, value):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    document = {
+        "guild_id": 123,
+        "channel_id": 456,
+        "access_scope": "channel",
+        "auto_promote": value,
+    }
+
+    assert curation_document_allowed(document) is True
+    assert curation_document_allowed({**document, "channel_id": 0}) is False
+    assert curation_document_allowed({**document, "guild_id": 999}) is False
+    assert curation_document_allowed({**document, "access_scope": "restricted"}) is False
+
+
+@pytest.mark.parametrize("value", [None, False, 0, 2, -1, 0.5, "", "false", "0", "anything"])
+def test_autonomous_curation_rejects_unapproved_dynamic_channel_scope(
+    monkeypatch,
+    value,
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+
+    assert curation_document_allowed(
+        {
+            "guild_id": 123,
+            "channel_id": 456,
+            "access_scope": "channel",
+            "auto_promote": value,
+        }
+    ) is False
+
+
 @pytest.mark.asyncio
-async def test_autonomous_curation_never_exports_channel_scoped_discord_content(tmp_path, monkeypatch):
+async def test_curate_once_excludes_unapproved_channel_source(tmp_path, monkeypatch):
     database = tmp_path / "rag.sqlite3"
     monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
-    store = RagStore(database)
-    store.upsert_document(
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    RagStore(database).upsert_document(
         "documents/private",
         "チャンネル限定の会議記録" * 100,
         [
@@ -190,7 +225,7 @@ async def test_autonomous_curation_never_exports_channel_scoped_discord_content(
         ],
     )
 
-    result = await curate_once(state_path=tmp_path / "state.json", limit=3)
+    result = await curate_once(state_path=tmp_path / "state.sqlite3", limit=3)
 
     assert result["eligible"] == 0
     assert result["policy_excluded"] == 1
@@ -210,3 +245,17 @@ def test_autonomous_curation_accepts_only_explicit_channel_ids(monkeypatch):
     assert curation_document_allowed({**document, "channel_id": 457}) is False
     assert curation_document_allowed({**document, "guild_id": 999}) is False
     assert curation_document_allowed({**document, "access_scope": "restricted"}) is False
+
+
+def test_explicit_channel_subset_does_not_expand_from_auto_promote(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "456")
+    document = {
+        "guild_id": 123,
+        "channel_id": 457,
+        "access_scope": "channel",
+        "auto_promote": True,
+    }
+
+    assert curation_document_allowed(document) is False
+    assert curation_document_allowed({**document, "channel_id": 456}) is True

@@ -13,6 +13,7 @@ def metadata(festival: int = 27):
         {"key": "channel_id", "string_value": "2"},
         {"key": "channel_name", "string_value": "開発"},
         {"key": "access_scope", "string_value": "guild"},
+        {"key": "auto_promote", "numeric_value": 1},
         {"key": "festival", "numeric_value": festival},
         {"key": "document_key", "string_value": f"doc-{festival}"},
         {"key": "source_url", "string_value": "https://discord.example/message"},
@@ -40,6 +41,7 @@ def test_discord_lineage_survives_upsert_and_get_document(tmp_path):
     assert document["category_name"] == "選考"
     # The original name-only field remains populated for existing consumers.
     assert document["category"] == "選考"
+    assert document["auto_promote"] == 1
     curated_source = store.list_curation_documents()
     assert curated_source[0]["parent_id"] == 101
     assert curated_source[0]["category_id"] == 202
@@ -99,6 +101,7 @@ def test_legacy_database_migrates_category_to_explicit_lineage(tmp_path):
     assert document["parent_id"] is None
     assert document["parent_name"] is None
     assert document["category_id"] is None
+    assert document["auto_promote"] == 0
 
 
 def test_connection_sets_busy_timeout(tmp_path):
@@ -461,6 +464,104 @@ def test_query_terms_split_common_operational_compounds():
     assert "整理券運用" in terms
     assert "整理券" in terms
     assert "運用" in terms
+
+
+def test_query_terms_keep_cross_team_and_data_contract_cues():
+    shinkan = RagStore.query_terms("新歓webで外部や他局から要求された内容をまとめて")
+    ranking = RagStore.query_terms("27thのrankingの構造と票数を教えて")
+
+    assert {"新歓web", "外部", "他局", "要求"}.issubset(
+        {term.casefold() for term in shinkan}
+    )
+    assert {"ranking", "構造", "票数"}.issubset(
+        {term.casefold() for term in ranking}
+    )
+
+
+def test_date_window_can_retrieve_activity_without_a_topic_term(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    for key, starts_at, body in (
+        ("before", "2025-09-30T23:00:00+09:00", "前月の作業"),
+        ("inside", "2025-10-12T18:00:00+09:00", "新歓Webの準備を始めた"),
+        ("after", "2025-11-01T00:00:00+09:00", "翌月の作業"),
+    ):
+        store.upsert_document(
+            f"documents/{key}",
+            body,
+            [
+                {"key": "document_key", "string_value": key},
+                {"key": "guild_id", "numeric_value": 1},
+                {"key": "channel_id", "numeric_value": 10},
+                {"key": "access_scope", "string_value": "channel"},
+                {"key": "festival", "numeric_value": 27},
+                {"key": "start_at", "string_value": starts_at},
+                {"key": "end_at", "string_value": starts_at},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "status", "string_value": "raw"},
+            ],
+        )
+
+    hits = store.search_exact(
+        1,
+        [],
+        festival=27,
+        date_from="2025-10-01",
+        date_to="2025-10-31",
+        allowed_channel_ids=(10,),
+    )
+
+    assert [hit.document_key for hit in hits] == ["inside"]
+
+
+def test_date_window_includes_document_spanning_both_bounds(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "documents/spanning",
+        "長期間にわたる会議記録",
+        [
+            {"key": "document_key", "string_value": "spanning"},
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "channel_id", "numeric_value": 10},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "start_at", "string_value": "2025-09-20T00:00:00+09:00"},
+            {"key": "end_at", "string_value": "2025-11-10T00:00:00+09:00"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        [],
+        festival=27,
+        date_from="2025-10-01",
+        date_to="2025-10-31",
+        allowed_channel_ids=(10,),
+    )
+
+    assert [hit.document_key for hit in hits] == ["spanning"]
+
+
+def test_date_window_rejects_invalid_or_conflicting_bounds(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        store.search_exact(
+            1,
+            ["会議"],
+            target_date="2025-10-09",
+            date_from="2025-10-01",
+        )
+    with pytest.raises(ValueError, match="date_from must be YYYY-MM-DD"):
+        store.search_exact(1, ["会議"], date_from="last-month")
+    with pytest.raises(ValueError, match="must not be after"):
+        store.search_exact(
+            1,
+            ["会議"],
+            date_from="2025-11-01",
+            date_to="2025-10-01",
+        )
 
 
 def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path):

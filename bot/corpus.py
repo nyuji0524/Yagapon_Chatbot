@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -21,14 +22,23 @@ from google.genai import types
 
 from bot.ai_completion import require_complete_model_output
 from bot.ai_models import generation_config, log_usage, rag_model
+from bot.ai_retry import retry_rate_limit
 from bot.discord_visibility import normalized_channel_ids
 from bot.festival import (
     calendar_date_from_query,
+    calendar_window_from_query,
     festival_from_query,
     festival_metadata_filter,
     festival_number,
 )
-from bot.firebase_knowledge import FirebaseEvidence, FirebaseKnowledgeReader
+from bot.firebase_knowledge import (
+    COLLECTIONS,
+    FirebaseEvidence,
+    FirebaseKnowledgeReader,
+    firebase_document_path_is_safe,
+    firebase_projected_fields_are_safe,
+    is_explicit_firebase_list_query,
+)
 from bot.knowledge_authority import (
     AUTHORITY_LABELS,
     QuestionKind,
@@ -44,6 +54,7 @@ from bot.knowledge_pipeline import (
     acquire_knowledge_pipeline_lock,
     release_knowledge_pipeline_lock,
 )
+from bot.knowledge_policy import automatic_knowledge_promotion_allowed
 from bot.rag_judge import QualityJudgment, judge_answer_quality
 from bot.rag_store import LexicalHit, RagStore
 
@@ -187,7 +198,8 @@ def requires_comprehensive_answer(question: str) -> bool:
     if re.search(
         r"(?:すべて|全て|全部|全体|総括|網羅|詳しく|詳細|洗い出|"
         r"それぞれ|比較|違い|経緯|問題点|課題|改善点|修正点|全貌|一通り|"
-        r"フィードバック|指摘|反省|まとめ|一覧|何が出た|どんな(?:意見|内容))",
+        r"フィードバック|指摘|反省|まとめ|一覧|何が出た|どんな(?:意見|内容)|"
+        r"去年の今頃|昨年の今頃|この時期|何してた|何をしていた)",
         normalized,
         re.IGNORECASE,
     ):
@@ -300,7 +312,9 @@ def calculate_incremental_after(cursor: dict | None, now: datetime | None = None
     local = base.astimezone(JST).replace(hour=0, minute=0, second=0, microsecond=0)
     if cursor_at is not None:
         local -= timedelta(days=1)
-    return local.astimezone(timezone.utc)
+    # Discord history's ``after`` is exclusive. Move just before midnight so
+    # a message timestamped exactly at 00:00 is included in the rebuilt day.
+    return (local - timedelta(microseconds=1)).astimezone(timezone.utc)
 
 
 def calculate_resumable_incremental_after(
@@ -482,9 +496,29 @@ class _SensitiveRequestPolicy:
     individual_contact: bool
 
 
+def _security_text_variants(value: str) -> tuple[str, ...]:
+    """Normalize text for policy checks without trusting invisible separators.
+
+    Replacing format/control/combining characters catches separators such as a
+    zero-width space between English words.  Removing the same characters also
+    catches them when they are inserted inside one keyword.  Running both
+    variants avoids having to guess which role an invisible character plays.
+    """
+    normalized = unicodedata.normalize("NFKC", value.casefold())
+
+    def suspicious(character: str) -> bool:
+        return unicodedata.category(character)[0] in {"C", "M"}
+
+    variants = (
+        "".join(" " if suspicious(character) else character for character in normalized),
+        "".join(character for character in normalized if not suspicious(character)),
+    )
+    return tuple(dict.fromkeys(" ".join(variant.split()) for variant in variants))
+
+
 def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
     """Classify the whole request so a safe clause cannot mask a sensitive one."""
-    normalized = " ".join(question.casefold().split())
+    normalized = "\n".join(_security_text_variants(question))
     disclosure_pattern = (
         r"(?:教えて|教えろ|答えて|回答|知りたい|くれ|ください|ちょうだい|出力|表示|"
         r"見せて|開示|共有して|送って|一覧|すべて|全部|実値|実際の|現在の|生の|"
@@ -496,7 +530,9 @@ def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
     )
     credential_pattern = (
         r"(?:(?:discord\s*bot|bot|api)[ _-]?(?:token|key)|トークン|api\s*キー|apiキー|"
-        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|secret|秘密情報)"
+        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|secret|秘密情報|"
+        r"\.env(?:ファイル)?|process\.env|os\.environ|"
+        r"[a-z][a-z0-9_]{2,}(?:token|secret|password|api_key))"
     )
     disclosure_request = bool(re.search(disclosure_pattern, normalized))
     safe_howto = bool(re.search(safe_howto_pattern, normalized))
@@ -561,6 +597,7 @@ def _looks_like_non_placeholder_secret(value: str) -> bool:
 
 def generated_answer_is_sensitive(question: str, answer: str) -> bool:
     """Fail closed if generation appears to disclose credentials or private PII."""
+    answer_variants = _security_text_variants(answer)
     opaque_secret_patterns = (
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
@@ -571,19 +608,31 @@ def generated_answer_is_sensitive(question: str, answer: str) -> bool:
         r"\bAIza[0-9A-Za-z_-]{20,}\b",
         r"\bAKIA[0-9A-Z]{16}\b",
     )
-    if any(re.search(pattern, answer) for pattern in opaque_secret_patterns):
+    if any(
+        re.search(pattern, candidate)
+        for candidate in answer_variants
+        for pattern in opaque_secret_patterns
+    ):
         return True
-    assignments = re.finditer(
-        r"(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)\b|"
+    assignment_pattern = re.compile(
+        r"(?:\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)\b|"
         r"\b[A-Z][A-Z0-9_]{1,63}(?:TOKEN|SECRET|PASSWORD|KEY)\b)"
         r"\s*[:=]\s*[`\"']?([^\s`\"']{8,})",
-        answer,
+        re.IGNORECASE,
     )
-    if any(_looks_like_non_placeholder_secret(match.group(1)) for match in assignments):
+    if any(
+        _looks_like_non_placeholder_secret(match.group(1))
+        for candidate in answer_variants
+        for match in assignment_pattern.finditer(candidate)
+    ):
         return True
 
-    contacts = [match.group(0).casefold() for match in _CONTACT_EMAIL.finditer(answer)]
-    contacts.extend(match.group(0).casefold() for match in _CONTACT_PHONE.finditer(answer))
+    contacts = {
+        match.group(0).casefold()
+        for candidate in answer_variants
+        for pattern in (_CONTACT_EMAIL, _CONTACT_PHONE)
+        for match in pattern.finditer(candidate)
+    }
     if contacts:
         policy = _sensitive_request_policy(question)
         allowed = _public_contact_allowlist()
@@ -645,19 +694,53 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     source_url = str(source_url or "")
     if any(character in label or character in source_url for character in ("\x00", "\r", "\n")):
         return False
-    material = unquote(f"{label}\n{source_url}")
-    if material.count("\n") != 1 or "\r" in material or "\x00" in material:
+    normalized_url = unicodedata.normalize("NFKC", source_url)
+    if any(unicodedata.category(character)[0] in {"C", "M"} for character in normalized_url):
         return False
-    if re.search(r"(?<!\\)\]\s*\(\s*<?https?://", label, re.IGNORECASE):
+    decoded_url = unicodedata.normalize("NFKC", unquote(normalized_url))
+    if any(unicodedata.category(character)[0] in {"C", "M"} for character in decoded_url):
         return False
-    if any(re.search(pattern, material) for pattern in _CITATION_OPAQUE_SECRET_PATTERNS):
+    decoded_labels = [
+        unicodedata.normalize("NFKC", unquote(candidate))
+        for candidate in _security_text_variants(label)
+    ]
+    if any(
+        unicodedata.category(character)[0] == "C"
+        for candidate in decoded_labels
+        for character in candidate
+    ):
         return False
-    if _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material):
+    label_variants = tuple(
+        dict.fromkeys(
+            variant
+            for candidate in decoded_labels
+            for variant in _security_text_variants(candidate)
+        )
+    )
+    materials = [f"{candidate}\n{decoded_url}" for candidate in label_variants]
+    if any(
+        re.search(r"(?<!\\)\]\s*\(\s*<?https?://", candidate, re.IGNORECASE)
+        for candidate in label_variants
+    ):
         return False
-    if re.search(
-        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
-        r"\s*[:=]\s*[^\s]{8,}",
-        material,
+    if any(
+        re.search(pattern, material)
+        for material in materials
+        for pattern in _CITATION_OPAQUE_SECRET_PATTERNS
+    ):
+        return False
+    if any(
+        _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material)
+        for material in materials
+    ):
+        return False
+    if any(
+        re.search(
+            r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
+            r"\s*[:=]\s*[^\s]{8,}",
+            material,
+        )
+        for material in materials
     ):
         return False
     if not source_url:
@@ -665,7 +748,7 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     if re.search(r"[\s\x00-\x1f\x7f<>\[\]()\\`\"']", source_url):
         return False
     try:
-        parsed = urlsplit(source_url)
+        parsed = urlsplit(normalized_url)
     except ValueError:
         return False
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -690,8 +773,97 @@ def rendered_citation_is_safe(citation: str) -> bool:
     return citation_reference_is_safe(value)
 
 
+_INSTRUCTION_OVERRIDE_PATTERN = re.compile(
+    r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
+    r"(?:previous|prior|above|system|developer)\s+"
+    r"(?:instructions?|rules?|prompts?|messages?)|"
+    r"(?:これまで|以前|前\s*の|上記|システム|開発者)\s*(?:の)?\s*"
+    r"(?:指示|命令|ルール|プロンプト|メッセージ)\s*(?:を)?\s*"
+    r"(?:無視|忘れ|破棄|上書き|解除|回避)",
+    re.IGNORECASE,
+)
+
+
+def _instruction_override_request(normalized: str) -> bool:
+    """Distinguish an override command from a question about past overrides."""
+    for match in _INSTRUCTION_OVERRIDE_PATTERN.finditer(normalized):
+        prefix = normalized[max(0, match.start() - 80):match.start()]
+        suffix = normalized[match.end():match.end() + 40]
+        japanese_retrospective = bool(
+            re.match(
+                r"\s*(?:(?:した|された|していた|されていた|している|されている)"
+                r"\s*(?:理由|経緯|背景|仕組み|意味)|"
+                r"(?:の)?\s*(?:理由|経緯|背景|仕組み|意味)|(?:について|とは))",
+                suffix,
+            )
+        ) or bool(
+            re.search(r"(?:なぜ|どうして).{0,40}$", prefix)
+            and re.match(r"\s*(?:した|された|していた|されていた)", suffix)
+        )
+        english_retrospective = bool(
+            re.search(
+                r"\b(?:why|how|when)\s+(?:did|was|were)(?:\s+[a-z]+){0,6}\s*$",
+                prefix,
+                re.IGNORECASE,
+            )
+        )
+        if japanese_retrospective or english_retrospective:
+            continue
+        return True
+    return False
+
+
 def sensitive_request_response(question: str) -> str | None:
-    """Block direct requests for private contact details and credentials before retrieval."""
+    """Block unsafe requests before any user-controlled retrieval is attempted."""
+    unsafe_internal_request = False
+    for normalized in _security_text_variants(question):
+        internal_instruction_topic = bool(
+            re.search(
+                r"(?:system\s*prompt|developer\s*(?:message|prompt|instruction)|"
+                r"システム\s*プロンプト|開発者(?:メッセージ|プロンプト|指示)|"
+                r"内部(?:指示|命令|ルール|プロンプト)|隠し(?:指示|命令|プロンプト)|"
+                r"最初の(?:指示|命令|プロンプト))",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+        disclosure_request = bool(
+            re.search(
+                r"(?:show|reveal|print|output|display|dump|tell\s+me|"
+                r"教えて|答えて|回答|見せて|表示|出力|開示|公開|全文|そのまま|"
+                r"中身|内容|一覧|すべて|全て|全部|何|なに|[?？]$)",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+        internal_instruction_howto = bool(
+            re.search(
+                r"(?:とは何|とは|意味|概念|一般的|仕組み|設計|対策|防止|検出|守り方)",
+                normalized,
+            )
+        )
+        specific_internal_material = bool(
+            re.search(
+                r"(?:あなた|おしゃべりやがぽん|この(?:ai|bot|ボット)|現在|実際|"
+                r"中身|全文|原文|そのまま|内部|隠し|最初の)",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+        if _instruction_override_request(normalized) or (
+            internal_instruction_topic
+            and disclosure_request
+            and (specific_internal_material or not internal_instruction_howto)
+        ):
+            unsafe_internal_request = True
+            break
+    if unsafe_internal_request:
+        return (
+            "システムプロンプトや内部指示の開示、既存の安全ルールを無視・上書きする依頼には"
+            "対応できず、回答できないぽん。こうした依頼はナレッジ検索にも送らないぽん。"
+            "公開済みの仕様や安全な使い方なら説明できるぽん。"
+        )
+
     policy = _sensitive_request_policy(question)
     if not policy.disclosure_request:
         return None
@@ -708,6 +880,60 @@ def sensitive_request_response(question: str) -> str | None:
             "個人のメールアドレスや電話番号など、非公開の連絡先は回答できないぽん。"
             "本人に直接確認するか、委員会の公式窓口を利用してほしいぽん。"
         )
+    return None
+
+
+_TRUSTED_CAPABILITY_RESPONSE = (
+    "ボクは、矢上祭実行委員会の専属AI『おしゃべりやがぽん』だぽん。\n\n"
+    "**できること**\n"
+    "- 登録済みの正式文書、議事録、閲覧を許可されたDiscord会話を横断して質問に答えるぽん。\n"
+    "- 接続済みリポジトリのソースコードや変更履歴を調べ、実装・経緯を説明するぽん。\n"
+    "- 公開対象として許可されたFirebaseの企画、整理券、通知、集計、マップ、設定の現在値を確認するぽん。\n"
+    "- 会議の文字起こし・議事録作成や、管理者向けのナレッジ更新を支援するぽん。\n\n"
+    "**安全上の制約**\n"
+    "- 閲覧権限のない会話や未登録資料は参照できないぽん。\n"
+    "- 個人の非公開連絡先、トークン、APIキー、環境変数、内部指示は開示しないぽん。\n"
+    "- 根拠が確認できない内容は推測せず、記録不足として伝えるぽん。\n\n"
+    "年度、企画名、日付、知りたい対象を具体的に書くと探しやすいぽん。"
+)
+
+
+def trusted_capability_response(question: str) -> str | None:
+    """Return a stable self-description without consulting untrusted knowledge."""
+    normalized = re.sub(r"\s+", "", question.casefold()).strip()
+    normalized_without_punctuation = re.sub(r"[。！？!?、,.]", "", normalized)
+    if re.fullmatch(
+        r"(?:(?:あなた|君|きみ)(?:は)?)?(?:何|なに)ができる(?:の|ん)?|"
+        r"(?:あなた|君|きみ)(?:自身)?について(?:教えて|説明して)?|"
+        r"(?:できること|機能)(?:の)?(?:一覧)?|自己紹介(?:して)?",
+        normalized_without_punctuation,
+    ):
+        return _TRUSTED_CAPABILITY_RESPONSE
+
+    bot_subject = (
+        r"(?:おしゃべりやがぽん|やがぽん(?:bot|ボット)|"
+        r"この(?:ai|bot|ボット)|あなた|君|きみ)"
+    )
+    capability_intent = (
+        r"(?:(?:は|が|の)?(?:何|なに)ができる(?:の|ん)?|(?:の)?できること|"
+        r"(?:の)?機能(?:一覧)?|(?:の)?使い方|(?:は)?どんな(?:ai|bot|ボット))"
+    )
+    request_suffix = r"(?:(?:を|について)?(?:教えて|説明して)(?:ください|下さい)?)?"
+    identity_intent = (
+        r"(?:(?:自身)?について(?:教えて|説明して)?|"
+        r"とは(?:(?:何|なに)(?:ですか)?|どんな(?:ai|bot|ボット)(?:ですか)?)?)"
+    )
+    if re.fullmatch(
+        bot_subject
+        + r"(?:自身)?"
+        + capability_intent
+        + request_suffix
+        + r"[。！？!?、,.]*",
+        normalized,
+    ):
+        return _TRUSTED_CAPABILITY_RESPONSE
+    if re.fullmatch(bot_subject + identity_intent + r"[。！？!?、,.]*", normalized):
+        return _TRUSTED_CAPABILITY_RESPONSE
     return None
 
 
@@ -728,6 +954,7 @@ class MessageBuffer:
     parent_name: str = ""
     category_id: int | None = None
     category_name: str = ""
+    auto_promote: bool = False
 
 
 @dataclass
@@ -797,6 +1024,28 @@ class RagAnswer:
     no_answer: bool = False
     metadata_filter: str | None = None
     lexical_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _FirebaseListItem:
+    position: int
+    document_path: str
+    fields: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _FirebaseListGroup:
+    festival: int
+    source_type: str
+    title: str
+    source_url: str
+    returned: int
+    matched: int
+    firestore_fetched: int
+    reader_limit: int
+    completeness: str
+    order: str
+    items: tuple[_FirebaseListItem, ...]
 
 
 @dataclass(frozen=True)
@@ -1076,6 +1325,7 @@ class CorpusManager:
         parent_name: str = "",
         category_id: int | None = None,
         category_name: str = "",
+        auto_promote: bool = False,
     ):
         """メッセージをバッファに追加。閾値超えたらflushをスケジュール。"""
         key = (guild_id, channel_id)
@@ -1109,6 +1359,7 @@ class CorpusManager:
                 parent_name=parent_name,
                 category_id=category_id,
                 category_name=category_name,
+                auto_promote=bool(auto_promote),
             )
 
         buf = buffers[key]
@@ -1126,6 +1377,8 @@ class CorpusManager:
         buf.parent_name = buf.parent_name or parent_name
         buf.category_id = buf.category_id or category_id
         buf.category_name = buf.category_name or category_name
+        # Never widen a partially buffered document after permissions change.
+        buf.auto_promote = buf.auto_promote and bool(auto_promote)
 
         # メッセージ数閾値
         if buffers is self._buffers and len(buf.messages) >= FLUSH_MESSAGE_THRESHOLD:
@@ -1189,6 +1442,7 @@ class CorpusManager:
             {"key": "status", "string_value": "raw"},
             {"key": "authority", "string_value": "conversation"},
             {"key": "access_scope", "string_value": "channel"},
+            {"key": "auto_promote", "string_value": str(buf.auto_promote).lower()},
             {"key": "festival", "numeric_value": float(festival_number(start_at))},
             {"key": "schema", "string_value": DOCUMENT_SCHEMA_VERSION},
             {"key": "guild_id", "string_value": str(buf.guild_id)},
@@ -1248,6 +1502,10 @@ class CorpusManager:
         current.parent_name = current.parent_name or failed.parent_name
         current.category_id = current.category_id or failed.category_id
         current.category_name = current.category_name or failed.category_name
+        # A failed upload can race with a channel visibility change.  Preserve
+        # the most restrictive decision across both batches so retrying never
+        # turns previously private history into an auto-promotion candidate.
+        current.auto_promote = current.auto_promote and failed.auto_promote
 
     async def flush_all(self, corpus_store_name_lookup=None):
         """全バッファをflush。corpus_store_name_lookup: guild_id -> store_name"""
@@ -1279,23 +1537,32 @@ class CorpusManager:
                 file_bytes = text.encode("utf-8")
                 remote_metadata = _file_search_metadata(metadata)
 
-                operation = await loop.run_in_executor(
-                    None,
-                    lambda: self._client.file_search_stores.upload_to_file_search_store(
-                        file=io.BytesIO(file_bytes),
-                        file_search_store_name=store_name,
-                        config={
-                            "display_name": display_name,
-                            "mime_type": "text/plain",
-                            "custom_metadata": remote_metadata,
-                            "chunking_config": {
-                                "white_space_config": {
-                                    "max_tokens_per_chunk": 500,
-                                    "max_overlap_tokens": 50,
-                                }
+                async def start_upload():
+                    return await loop.run_in_executor(
+                        None,
+                        lambda: self._client.file_search_stores.upload_to_file_search_store(
+                            file=io.BytesIO(file_bytes),
+                            file_search_store_name=store_name,
+                            config={
+                                "display_name": display_name,
+                                "mime_type": "text/plain",
+                                "custom_metadata": remote_metadata,
+                                "chunking_config": {
+                                    "white_space_config": {
+                                        "max_tokens_per_chunk": 500,
+                                        "max_overlap_tokens": 50,
+                                    }
+                                },
                             },
-                        },
-                    ),
+                        ),
+                    )
+
+                operation = await retry_rate_limit(
+                    start_upload,
+                    operation_name="file_search_upload",
+                    attempts=5,
+                    initial_delay=2,
+                    max_delay=30,
                 )
 
                 waited = 0
@@ -1304,9 +1571,18 @@ class CorpusManager:
                         raise TimeoutError(f"Indexing timed out after {UPLOAD_TIMEOUT_SECONDS}s")
                     await asyncio.sleep(UPLOAD_POLL_SECONDS)
                     waited += UPLOAD_POLL_SECONDS
-                    operation = await loop.run_in_executor(
-                        None,
-                        lambda op=operation: self._client.operations.get(op),
+                    async def poll_operation():
+                        return await loop.run_in_executor(
+                            None,
+                            lambda op=operation: self._client.operations.get(op),
+                        )
+
+                    operation = await retry_rate_limit(
+                        poll_operation,
+                        operation_name="file_search_upload_poll",
+                        attempts=5,
+                        initial_delay=2,
+                        max_delay=30,
                     )
 
                 if getattr(operation, "error", None):
@@ -1480,6 +1756,13 @@ class CorpusManager:
                 festival=festival,
                 no_answer=True,
             )
+        capability_response = trusted_capability_response(question)
+        if capability_response:
+            return RagAnswer(
+                text=capability_response,
+                festival=festival,
+                no_answer=False,
+            )
         if guild_id and not self._check_rate_limit(guild_id):
             return RagAnswer(
                 text=(
@@ -1614,6 +1897,17 @@ class CorpusManager:
     ) -> RagAnswer:
         festival = festival_from_query(question)
         target_date = calendar_date_from_query(question, festival=festival)
+        target_window = (
+            None
+            if target_date is not None
+            else calendar_window_from_query(question, festival=festival)
+        )
+        target_date_from = (
+            target_window.starts_on.isoformat() if target_window is not None else None
+        )
+        target_date_to = (
+            target_window.ends_on.isoformat() if target_window is not None else None
+        )
         lexical_candidate_limit = (
             RAG_COMPREHENSIVE_LEXICAL_CANDIDATES if comprehensive else RAG_LEXICAL_CANDIDATES
         )
@@ -1636,6 +1930,8 @@ class CorpusManager:
                 terms,
                 festival=festival,
                 target_date=target_date.isoformat() if target_date else None,
+                date_from=target_date_from,
+                date_to=target_date_to,
                 allowed_channel_ids=allowed_channel_ids,
                 allow_unrestricted_conversations=allow_unrestricted_conversations,
                 limit=lexical_candidate_limit,
@@ -1671,6 +1967,11 @@ class CorpusManager:
                     f"\n【対象日】{target_date.isoformat()}の記録だけを根拠に回答するぽん。"
                     "同じ月日の別年度や、前後日の記録を混ぜてはいけないぽん。"
                 )
+            elif target_window is not None:
+                system += (
+                    f"\n【対象期間】{target_date_from}から{target_date_to}までと重なる記録だけを"
+                    "根拠に回答するぽん。期間外の活動や別年度の同じ月を混ぜてはいけないぽん。"
+                )
             evidence_context = ""
             if members_info:
                 evidence_context += self._untrusted_evidence("member-info", members_info)
@@ -1682,6 +1983,17 @@ class CorpusManager:
                 question_kind,
                 festival=festival,
             )
+            if comprehensive and self._is_firebase_only_exhaustive_request(question):
+                firebase_groups = self._parse_firebase_list_groups(firebase_evidence)
+                firebase_sources = self._firebase_sources(firebase_evidence, [])
+                if firebase_groups and firebase_sources:
+                    return RagAnswer(
+                        text=self._render_firebase_list_groups(firebase_groups),
+                        citations=tuple(firebase_sources),
+                        festival=festival,
+                        no_answer=False,
+                        metadata_filter=metadata_filter,
+                    )
             if firebase_evidence:
                 evidence_context += self._untrusted_evidence(
                     "firebase-runtime",
@@ -1760,8 +2072,18 @@ class CorpusManager:
             # cheaper and more authoritative for a single-fact question.  A
             # broad request must still search the corpus: one exact hit may
             # answer only the first of several requested sections.
-            if not comprehensive and (authoritative_hits or firebase_evidence):
-                direct_budget = max(512, max_output_tokens // 2)
+            direct_runtime_evidence = bool(firebase_evidence) and question_kind in {
+                QuestionKind.RUNTIME,
+                QuestionKind.GENERAL,
+            }
+            if not comprehensive and (authoritative_hits or direct_runtime_evidence):
+                # Each attempt is an independent model call. Reserving most of
+                # the output allowance for a later retry made the first valid
+                # evidence path truncate, while subtracting a failed call's
+                # allowance made the recovery truncate again. Keep the full
+                # per-facet allowance for every attempt; only a failed or
+                # rejected answer reaches the next one.
+                direct_budget = max_output_tokens
                 authoritative_answer = await self._recover_from_lexical_hits(
                     question=question,
                     system_instruction=system,
@@ -1769,7 +2091,7 @@ class CorpusManager:
                     model=model,
                     max_output_tokens=direct_budget,
                 )
-                remaining_output_tokens = max(512, max_output_tokens - direct_budget)
+                remaining_output_tokens = max_output_tokens
                 parsed = parse_model_answer(authoritative_answer or "")
                 observe_answer_contract(parsed, stage="direct")
                 if usable(parsed):
@@ -1799,18 +2121,26 @@ class CorpusManager:
                     top_k=search_top_k,
                     metadata_filter=metadata_filter,
                 )
-                recovery_budget = max(256, remaining_output_tokens // 4) if search_hits else 0
-                primary_budget = remaining_output_tokens - recovery_budget
-                response = await self._client.aio.models.generate_content(
-                    model=model,
-                    contents=self._question_with_evidence(question, search_context),
-                    config=generation_config(
-                        model,
-                        thinking_level="medium" if comprehensive else "low",
-                        max_output_tokens=primary_budget,
-                        system_instruction=system,
-                        tools=[types.Tool(file_search=search)],
-                    ),
+                primary_budget = remaining_output_tokens
+                async def generate_with_file_search():
+                    return await self._client.aio.models.generate_content(
+                        model=model,
+                        contents=self._question_with_evidence(question, search_context),
+                        config=generation_config(
+                            model,
+                            thinking_level="medium" if comprehensive else "low",
+                            max_output_tokens=primary_budget,
+                            system_instruction=system,
+                            tools=[types.Tool(file_search=search)],
+                        ),
+                    )
+
+                response = await retry_rate_limit(
+                    generate_with_file_search,
+                    operation_name="rag_file_search",
+                    attempts=4,
+                    initial_delay=2,
+                    max_delay=30,
                 )
                 log_usage(log, "rag_query", model, response)
                 require_complete_model_output(response, operation="rag_query")
@@ -1827,6 +2157,8 @@ class CorpusManager:
                     answer_text=parsed.text,
                     expected_festival=festival,
                     expected_date=target_date.isoformat() if target_date else None,
+                    expected_date_from=target_date_from,
+                    expected_date_to=target_date_to,
                     question_kind=question_kind,
                     allowed_channel_ids=allowed_channel_ids,
                     allow_unrestricted_conversations=allow_unrestricted_conversations,
@@ -1867,7 +2199,7 @@ class CorpusManager:
                         evidence_context=recovery_context,
                         model=model,
                         max_output_tokens=(
-                            recovery_budget or max(256, remaining_output_tokens // 4)
+                            remaining_output_tokens
                         ),
                     )
                     recovered = parse_model_answer(recovered_answer or "")
@@ -1926,25 +2258,34 @@ class CorpusManager:
         evidence_context: str = "",
         max_output_tokens: int = RAG_NORMAL_OUTPUT_TOKENS,
     ) -> str | None:
-        """Retry without File Search when exact excerpts exist but tool search refuses to answer."""
+        """Generate from already filtered evidence without invoking File Search."""
         recovery_instruction = (
-            system_instruction + "\n\n【検証済み候補からの再確認】\n"
-            "File Searchは安全な回答を確定できなかったぽん。上にある検証済み候補の原文だけを読み直し、"
-            "質問へ直接答えられる根拠がある場合は、その範囲で具体的に回答するぽん。"
-            "候補が質問と無関係、または根拠が不足する場合は、"
+            system_instruction + "\n\n【検証済み根拠からの回答】\n"
+            "この呼び出しで上に提示された根拠データ（exact-search、firebase-runtime、"
+            "監査済み検索抜粋）のみを読み、質問へ直接答えられる場合は、その範囲で具体的に回答するぽん。"
+            "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
-            "候補にない事実は補完しないぽん。"
+            "提示されていない事実は補完しないぽん。"
         )
         try:
-            response = await self._client.aio.models.generate_content(
-                model=model,
-                contents=self._question_with_evidence(question, evidence_context),
-                config=generation_config(
-                    model,
-                    thinking_level="low",
-                    max_output_tokens=max_output_tokens,
-                    system_instruction=recovery_instruction,
-                ),
+            async def generate_recovery():
+                return await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=self._question_with_evidence(question, evidence_context),
+                    config=generation_config(
+                        model,
+                        thinking_level="low",
+                        max_output_tokens=max_output_tokens,
+                        system_instruction=recovery_instruction,
+                    ),
+                )
+
+            response = await retry_rate_limit(
+                generate_recovery,
+                operation_name="rag_lexical_recovery",
+                attempts=4,
+                initial_delay=2,
+                max_delay=30,
             )
             log_usage(log, "rag_lexical_recovery", model, response)
             require_complete_model_output(response, operation="rag_lexical_recovery")
@@ -1985,6 +2326,226 @@ class CorpusManager:
         return "\n\n".join(
             f"[runtime:{item.document_key} {item.authority}/{item.status}]\n{item.body}" for item in evidence
         )
+
+    @staticmethod
+    def _is_firebase_only_exhaustive_request(question: str) -> bool:
+        """Keep the deterministic list path limited to current-value list requests."""
+        return is_explicit_firebase_list_query(question)
+
+    @classmethod
+    def _parse_firebase_list_groups(
+        cls,
+        evidence: list[FirebaseEvidence],
+    ) -> tuple[_FirebaseListGroup, ...]:
+        """Validate the exhaustive-list contract emitted by the Firebase reader.
+
+        Retrieved bodies remain untrusted.  The deterministic renderer is used
+        only when every evidence item is accounted for, belongs to one complete
+        reader group, and carries projected JSON fields.  Anything malformed
+        falls back to the ordinary grounded RAG path.
+        """
+        if not evidence:
+            return ()
+
+        header_pattern = re.compile(
+            r"\AFirestore現在値（(?P<festival>\d+)th / "
+            r"(?P<source_type>[A-Za-z][A-Za-z0-9]*)）(?:\n|\Z)"
+        )
+        list_pattern = re.compile(
+            r"^list_result:\s*returned=(?P<returned>\d+);\s*"
+            r"matched=(?P<matched>\d+);\s*"
+            r"firestore_fetched=(?P<fetched>\d+);\s*"
+            r"reader_limit=(?P<limit>\d+);\s*"
+            r"completeness=(?P<completeness>[a-z-]+);\s*"
+            r"order=(?P<order>[^\r\n]+)$",
+            re.MULTILINE,
+        )
+        item_pattern = re.compile(
+            r"^item:\s*(?P<position>\d+)/(?P<total>\d+)\s*$",
+            re.MULTILINE,
+        )
+        document_pattern = re.compile(
+            r"^document:\s*(?P<path>[^\r\n]+)\s*$",
+            re.MULTILINE,
+        )
+        fields_pattern = re.compile(r"^fields:\s*(?P<fields>\{.*\})\s*$", re.MULTILINE)
+
+        groups: list[_FirebaseListGroup] = []
+        cursor = 0
+        while cursor < len(evidence):
+            first = evidence[cursor]
+            if not first.source_url or not citation_reference_is_safe(first.title, first.source_url):
+                return ()
+            header = header_pattern.search(first.body)
+            list_result = list_pattern.search(first.body)
+            if not header or not list_result:
+                return ()
+            try:
+                festival = int(header.group("festival"))
+                returned = int(list_result.group("returned"))
+                matched = int(list_result.group("matched"))
+                fetched = int(list_result.group("fetched"))
+                reader_limit = int(list_result.group("limit"))
+            except ValueError:
+                return ()
+            completeness = list_result.group("completeness")
+            if (
+                returned < 1
+                or matched < returned
+                or fetched < matched
+                or reader_limit < returned
+                or completeness not in {"complete", "unknown-limit-reached"}
+                or (completeness == "complete" and returned != matched)
+                or (completeness == "unknown-limit-reached" and fetched < reader_limit)
+                or cursor + returned > len(evidence)
+            ):
+                return ()
+
+            source_type = header.group("source_type")
+            if source_type not in COLLECTIONS:
+                return ()
+            collection_parent: str | None = None
+            items: list[_FirebaseListItem] = []
+            for offset in range(returned):
+                current = evidence[cursor + offset]
+                current_header = header_pattern.search(current.body)
+                item_match = item_pattern.search(current.body)
+                document_match = document_pattern.search(current.body)
+                fields_match = fields_pattern.search(current.body)
+                if not current_header or not item_match or not document_match or not fields_match:
+                    return ()
+                if (
+                    int(current_header.group("festival")) != festival
+                    or current_header.group("source_type") != source_type
+                    or int(item_match.group("position")) != offset + 1
+                    or int(item_match.group("total")) != returned
+                    or current.title != first.title
+                    or current.source_url != first.source_url
+                    or current.authority != "live_data"
+                    or current.status != "current"
+                ):
+                    return ()
+
+                document_path = document_match.group("path").strip()
+                path_parts = document_path.split("/")
+                if (
+                    len(path_parts) < 4
+                    or path_parts[0] not in {"festival", "yagamy"}
+                    or path_parts[1] != str(festival)
+                    or current.document_key != f"firebase:{document_path}"
+                    or not firebase_document_path_is_safe(
+                        source_type,
+                        festival,
+                        document_path,
+                    )
+                ):
+                    return ()
+                current_parent = document_path.rsplit("/", 1)[0]
+                if collection_parent is None:
+                    collection_parent = current_parent
+                elif current_parent != collection_parent:
+                    return ()
+                try:
+                    fields = json.loads(fields_match.group("fields"))
+                except (TypeError, ValueError):
+                    return ()
+                if (
+                    not isinstance(fields, dict)
+                    or not fields
+                    or not firebase_projected_fields_are_safe(source_type, fields)
+                ):
+                    return ()
+                items.append(
+                    _FirebaseListItem(
+                        position=offset + 1,
+                        document_path=document_path,
+                        fields=fields,
+                    )
+                )
+
+            groups.append(
+                _FirebaseListGroup(
+                    festival=festival,
+                    source_type=source_type,
+                    title=first.title,
+                    source_url=first.source_url,
+                    returned=returned,
+                    matched=matched,
+                    firestore_fetched=fetched,
+                    reader_limit=reader_limit,
+                    completeness=completeness,
+                    order=list_result.group("order").strip(),
+                    items=tuple(items),
+                )
+            )
+            cursor += returned
+        return tuple(groups)
+
+    @staticmethod
+    def _escape_untrusted_markdown(value: object) -> str:
+        escaped = str(value).replace("\\", "\\\\")
+        for character in "`*_[]<>#":
+            escaped = escaped.replace(character, f"\\{character}")
+        return escaped.replace("@", "@\u200b")
+
+    @classmethod
+    def _render_firebase_list_groups(
+        cls,
+        groups: tuple[_FirebaseListGroup, ...],
+    ) -> str:
+        """Render every projected field without an LLM or an output-token cap."""
+        lines: list[str] = []
+        if len(groups) > 1:
+            lines.extend(("# Firebase現在値一覧", ""))
+        for group_index, group in enumerate(groups):
+            safe_title = cls._escape_untrusted_markdown(group.title)
+            lines.append(f"## {safe_title}一覧（{group.returned}件）")
+            if group.completeness == "complete":
+                lines.append(
+                    f"Firebaseで質問条件に一致した{group.matched}件を、"
+                    "省略せずすべて掲載するぽん。"
+                )
+            else:
+                lines.append(
+                    f"取得上限（{group.reader_limit}件）に到達したため、取得できた"
+                    f"{group.returned}件はすべて掲載するが、Firestore全体の全件性は"
+                    "まだ確認できないぽん。"
+                )
+            lines.append(
+                f"並び順: {cls._escape_untrusted_markdown(group.order)}"
+            )
+            lines.append("")
+            for item in group.items:
+                display_name = next(
+                    (
+                        str(item.fields[key])
+                        for key in ("title", "eventName", "name")
+                        if isinstance(item.fields.get(key), str) and item.fields[key].strip()
+                    ),
+                    item.document_path.rsplit("/", 1)[-1],
+                )
+                lines.append(
+                    f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}"
+                )
+                lines.append(
+                    f"- `document`: {cls._escape_untrusted_markdown(item.document_path)}"
+                )
+                for key, value in item.fields.items():
+                    rendered_value = json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    lines.append(
+                        f"- `{cls._escape_untrusted_markdown(key)}`: "
+                        f"{cls._escape_untrusted_markdown(rendered_value)}"
+                    )
+                lines.append("")
+            if group_index + 1 < len(groups):
+                lines.append("---")
+                lines.append("")
+        return "\n".join(lines).rstrip()
 
     @staticmethod
     def _lexical_sources(hits: list[LexicalHit], existing: list[str]) -> list[str]:
@@ -2101,6 +2662,8 @@ class CorpusManager:
         answer_text: str | None = None,
         expected_festival: int | None = None,
         expected_date: str | None = None,
+        expected_date_from: str | None = None,
+        expected_date_to: str | None = None,
         question_kind: QuestionKind | None = None,
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
@@ -2157,6 +2720,7 @@ class CorpusManager:
             metadata = cls._metadata_map(context)
             channel = metadata.get("channel_name")
             start = str(metadata.get("start_at") or "")[:10]
+            end = str(metadata.get("end_at") or "")[:10]
             festival = metadata.get("festival")
             status = str(metadata.get("status") or "")
             authority = str(metadata.get("authority") or "")
@@ -2203,6 +2767,18 @@ class CorpusManager:
             if expected_date is not None and start != expected_date:
                 rejected_supported_chunks += 1
                 continue
+            if expected_date_from is not None or expected_date_to is not None:
+                source_start = start or end
+                source_end = end or start
+                if not source_start or not source_end:
+                    rejected_supported_chunks += 1
+                    continue
+                if expected_date_from is not None and source_end < expected_date_from:
+                    rejected_supported_chunks += 1
+                    continue
+                if expected_date_to is not None and source_start > expected_date_to:
+                    rejected_supported_chunks += 1
+                    continue
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)
             raw_citation_metadata = " ".join(
@@ -2297,6 +2873,8 @@ class CorpusManager:
         *,
         expected_festival: int | None = None,
         expected_date: str | None = None,
+        expected_date_from: str | None = None,
+        expected_date_to: str | None = None,
         question_kind: QuestionKind | None = None,
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
@@ -2307,6 +2885,8 @@ class CorpusManager:
             limit=limit,
             expected_festival=expected_festival,
             expected_date=expected_date,
+            expected_date_from=expected_date_from,
+            expected_date_to=expected_date_to,
             question_kind=question_kind,
             allowed_channel_ids=allowed_channel_ids,
             allow_unrestricted_conversations=allow_unrestricted_conversations,
@@ -2404,7 +2984,13 @@ class CorpusManager:
         return groups
 
     @classmethod
-    def _build_knowledge_documents(cls, channel, messages: list[KnowledgeMessage]) -> list[KnowledgeDocument]:
+    def _build_knowledge_documents(
+        cls,
+        channel,
+        messages: list[KnowledgeMessage],
+        *,
+        allow_automatic_promotion: bool = True,
+    ) -> list[KnowledgeDocument]:
         guild_id = int(channel.guild.id)
         channel_id = int(channel.id)
         channel_name = str(channel.name)
@@ -2418,6 +3004,11 @@ class CorpusManager:
             or getattr(parent, "category_id", None)
         )
         category_name = str(getattr(category, "name", "") or "")
+        auto_promote = allow_automatic_promotion and automatic_knowledge_promotion_allowed(
+            channel,
+            parent=parent,
+            category=category,
+        )
         topic = (getattr(channel, "topic", None) or "").strip()
         documents = []
         for group in cls._split_knowledge_messages(messages):
@@ -2461,6 +3052,7 @@ class CorpusManager:
                 {"key": "status", "string_value": "raw"},
                 {"key": "authority", "string_value": "conversation"},
                 {"key": "access_scope", "string_value": "channel"},
+                {"key": "auto_promote", "string_value": str(auto_promote).lower()},
                 {"key": "festival", "numeric_value": float(festival_number(start_at))},
                 {"key": "schema", "string_value": DOCUMENT_SCHEMA_VERSION},
                 {"key": "guild_id", "string_value": str(guild_id)},
@@ -2511,11 +3103,38 @@ class CorpusManager:
             result[getattr(item, "key", "")] = value
         return result
 
+    @staticmethod
+    def _is_discord_conversation_metadata(
+        metadata: dict[str, object],
+        *,
+        guild_id: int,
+        channel_id: int | None = None,
+    ) -> bool:
+        """Identify only raw Discord-history documents owned by this guild.
+
+        Several knowledge sources carry a ``channel_id`` for provenance.  It
+        is not, by itself, proof that the document is a replaceable Discord
+        history chunk.  Older Discord chunks without ``source_type`` are only
+        accepted when both their source and schema make that lineage explicit.
+        """
+        if str(metadata.get("guild_id") or "") != str(guild_id):
+            return False
+        if channel_id is not None and str(metadata.get("channel_id") or "") != str(channel_id):
+            return False
+        source_type = str(metadata.get("source_type") or "").strip()
+        if source_type:
+            return source_type == "discord_conversation"
+        return (
+            str(metadata.get("source") or "").strip() == "discord"
+            and str(metadata.get("schema") or "").strip().startswith("discord-")
+        )
+
     async def _existing_channel_documents(
         self,
         store_name: str,
         channel,
         after=None,
+        before=None,
         *,
         remote_inventory: tuple[dict[str, object], ...] | None = None,
         allow_legacy_name_match: bool = True,
@@ -2532,11 +3151,16 @@ class CorpusManager:
             documents = tuple(await self.list_remote_documents(store_name))
         prefix = f"#{channel.name} | "
         after_timestamp = after.timestamp() if after else None
+        before_timestamp = before.timestamp() if before else None
         matches = []
         for document in documents:
             metadata = document.get("metadata") or {}
             display_name = str(document.get("display_name") or "")
-            channel_matches = str(metadata.get("channel_id") or "") == str(channel.id)
+            channel_matches = self._is_discord_conversation_metadata(
+                metadata,
+                guild_id=int(channel.guild.id),
+                channel_id=int(channel.id),
+            )
             legacy_matches = (
                 allow_legacy_name_match
                 and not metadata
@@ -2544,16 +3168,83 @@ class CorpusManager:
             )
             if not (channel_matches or legacy_matches):
                 continue
-            if after_timestamp is not None:
-                start_epoch = metadata.get("start_epoch")
-                if start_epoch is not None and float(start_epoch) < after_timestamp:
-                    continue
-                if start_epoch is None:
-                    match = re.search(r"\| (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", display_name)
-                    if match:
-                        document_at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-                        if document_at < after:
-                            continue
+            def metadata_timestamp(epoch_key: str, iso_key: str) -> float | None:
+                epoch_value = metadata.get(epoch_key)
+                if epoch_value is not None:
+                    try:
+                        return float(epoch_value)
+                    except (TypeError, ValueError):
+                        pass
+                iso_value = metadata.get(iso_key)
+                if iso_value:
+                    try:
+                        parsed = datetime.fromisoformat(
+                            str(iso_value).replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        return None
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=JST)
+                    return parsed.timestamp()
+                return None
+
+            document_start = metadata_timestamp("start_epoch", "start_at")
+            document_end = metadata_timestamp("end_epoch", "end_at")
+            if document_start is None or document_end is None:
+                match = re.search(
+                    r"\|\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*-\s*"
+                    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})",
+                    display_name,
+                )
+                if match:
+                    try:
+                        inferred_start = datetime.strptime(
+                            match.group(1), "%Y-%m-%d %H:%M"
+                        ).replace(tzinfo=JST)
+                        # Legacy display names retain only minute precision.
+                        # Treat the end as the last possible instant in that
+                        # minute so a bounded replacement cannot drop seconds
+                        # that were rounded out of the name.
+                        inferred_end = (
+                            datetime.strptime(
+                                match.group(2), "%Y-%m-%d %H:%M"
+                            ).replace(tzinfo=JST)
+                            + timedelta(minutes=1)
+                            - timedelta(microseconds=1)
+                        )
+                    except ValueError:
+                        pass
+                    else:
+                        if inferred_start <= inferred_end:
+                            if document_start is None:
+                                document_start = inferred_start.timestamp()
+                            if document_end is None:
+                                document_end = inferred_end.timestamp()
+            if (
+                (after_timestamp is not None or before_timestamp is not None)
+                and document_start is not None
+                and document_end is not None
+                and document_start > document_end
+            ):
+                # Conflicting legacy name/metadata is not proof that the
+                # document is contained by a bounded fetch. Preserve it for a
+                # later unbounded maintenance rebuild.
+                continue
+            if (
+                after_timestamp is not None
+                and (document_start is None or document_start <= after_timestamp)
+            ):
+                # Discord's ``after`` bound is exclusive. Keep any document
+                # that is not provably wholly inside the fetched slice; deleting
+                # an overlapping chunk would lose its pre-boundary messages.
+                continue
+            if (
+                before_timestamp is not None
+                and (document_end is None or document_end >= before_timestamp)
+            ):
+                # ``before`` is exclusive as well. Equality and unknown ends
+                # are retained for the same lossless-replacement guarantee.
+                continue
             matches.append(str(document["name"]))
         return matches
 
@@ -2581,6 +3272,11 @@ class CorpusManager:
         }
         for document in session.remote_inventory:
             metadata = document.get("metadata") or {}
+            if not CorpusManager._is_discord_conversation_metadata(
+                metadata,
+                guild_id=session.guild_id,
+            ):
+                continue
             try:
                 channel_id = int(metadata.get("channel_id") or 0)
             except (TypeError, ValueError):
@@ -2619,6 +3315,7 @@ class CorpusManager:
         replace_existing: bool = True,
         dry_run: bool = False,
         session: BackfillSession | None = None,
+        complete_session_channel: bool = True,
     ) -> BackfillResult:
         """履歴を再現可能な文書へ変換し、成功後に同範囲の旧文書を置換する。"""
         if session is not None:
@@ -2630,7 +3327,13 @@ class CorpusManager:
                 raise ValueError("Channel is outside the prepared backfill session")
             if bool(dry_run) != session.dry_run:
                 raise ValueError("Backfill dry-run mode does not match prepared session")
-            before = session.cutoff
+            if before is None:
+                before = session.cutoff
+            else:
+                if before.tzinfo is None or before.utcoffset() is None:
+                    raise ValueError("Backfill before boundary must be timezone-aware")
+                if before > session.cutoff:
+                    raise ValueError("Backfill before boundary exceeds session cutoff")
         result = BackfillResult()
         existing = []
         if replace_existing:
@@ -2648,6 +3351,7 @@ class CorpusManager:
                 corpus_store_name,
                 channel,
                 after,
+                before,
                 remote_inventory=remote_inventory,
                 allow_legacy_name_match=allow_legacy_name_match,
             )
@@ -2677,7 +3381,15 @@ class CorpusManager:
                     log.warning("Backfill progress callback disabled after failure: %s", exc)
                     progress_callback = None
 
-        documents = self._build_knowledge_documents(channel, messages)
+        # Discord exposes only the current ACL, not the ACL that protected an
+        # old message when it was written. Backfilled history must therefore
+        # never autonomously become a repository Knowledge Draft. Operators
+        # can still opt specific reviewed channels in at the curation boundary.
+        documents = self._build_knowledge_documents(
+            channel,
+            messages,
+            allow_automatic_promotion=False,
+        )
         if dry_run:
             # Keep this explicit even though the counter is incremented above;
             # dry-run reports the exact number of indexable messages collected.
@@ -2712,7 +3424,7 @@ class CorpusManager:
                 raise RuntimeError(
                     f"Could not replace all existing channel documents ({deleted}/{len(existing)} deleted)"
                 )
-        if session is not None and not session.dry_run:
+        if session is not None and not session.dry_run and complete_session_channel:
             session.completed_channel_ids.add(int(channel.id))
         return result
 
@@ -2826,6 +3538,10 @@ class CorpusManager:
         current.parent_name = current.parent_name or incoming.parent_name
         current.category_id = current.category_id or incoming.category_id
         current.category_name = current.category_name or incoming.category_name
+        # A merged document is eligible for automatic Knowledge promotion only
+        # when every contributing message came from a proven guild-wide source.
+        # Permission changes during a backfill must fail closed.
+        current.auto_promote = current.auto_promote and incoming.auto_promote
 
     async def finish_backfill(self, session: BackfillSession | None) -> bool:
         """Release a session once and flush all post-cutoff live messages.

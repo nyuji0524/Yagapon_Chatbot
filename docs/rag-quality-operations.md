@@ -82,8 +82,10 @@ SHAが一致したものだけ`deployed_implementation/deployed`、それ以外�
 
 private repositoryは組織の`All repositories`へインストールしたread-only GitHub Appで読む。
 Appは`Contents: Read-only`と`Metadata: Read-only`以外の権限を持たせない。source workerは
-`source_index/repositories.yaml`と`YAGAPON_SOURCE_REPOSITORIES`の明示allowlistだけをinstallation tokenへ
-指定し、Appから未知のrepositoryを列挙・自動索引しない。環境変数が空でもmanifest内の全entryに限る。
+`source_index/repositories.yaml`のレビュー済みentryだけをinstallation tokenへ指定し、Appから未知の
+repositoryを列挙・自動索引しない。本番では`YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true`かつ
+`YAGAPON_SOURCE_REPOSITORIES`を空欄にして、Bot、Yaga Support、Functions、Web、Yagamy、Knowledgeの
+manifest全件を選ぶ。固定リストが残る誤設定はpreflightで拒否する。空欄でもmanifest外は対象にならない。
 private keyはSecret Managerから
 共有data path外の0600ファイルへ展開し、source workerだけへread-only mountする。1時間の
 installation tokenはメモリ上で更新する。個人PATは本番の標準経路にしない。
@@ -94,6 +96,8 @@ Knowledgeリポジトリも同じ常駐同期へ含めるが、front matterのst
 `.env`、認証情報、秘密鍵、生成物、依存物、lockfile、バイナリ、録音、ログは除外する。
 credentialらしい本文を検出したファイルもファイル単位で除外する。履歴diffとexact-SHA補助取得には
 未引用assignment、JWT、PEMを含むより厳しいfail-closed検査を適用し、該当内容を索引へ送らない。
+YagamyはGit treeから`lib/`、`test/`、選択済み仕様docs、`pubspec.yaml`、`firebase.json`だけを取得し、
+画像asset・native build生成物・プラットフォーム別設定を索引しない。
 初回同期は次で確認する。
 
 ```bash
@@ -107,19 +111,35 @@ python -m source_index
 
 ## Firebase現在値
 
-`FirebaseKnowledgeReader`は既定で未認証の公開RESTを使ってSecurity Rulesを適用し、`events`、`standbyPassEvents`、
-`notifications`、公開運用`config`だけを質問時に読み取る。取得後もフィールドallowlistで投影し、
-File SearchやSQLite本文へ保存しない。`users`、`staffInfos`、整理券申請・利用ログ、会計・申請情報は
-検索しない。`firestore` backendを選ぶ場合に限り、サービスアカウントへ対象プロジェクトの
-読み取り権限が必要になる。
+`FirebaseKnowledgeReader`は既定で未認証の公開RESTを使ってSecurity Rulesを適用し、現在は
+`events`、`standbyPassEvents`、`notifications`、大賞企画の公開集計`ranking`、公開`maps`、
+既知の公開運用`config`文書を質問時に読み取る。明示的な一覧要求ではページングして全件を返し、
+通知は公開日時順、大賞企画は部門別順位で扱う。取得値はFile SearchやSQLite本文へ永続化しない。
+安全上限`YAGAPON_FIREBASE_KNOWLEDGE_MAX_DOCUMENTS`へ到達した場合は全件と断定せず、取得できた件数と
+上限到達を回答へ明示する。
+
+運用上はFirebaseプロジェクトを広く読み取れる資格情報を与えてよいが、**読み取り権限と回答への開示権限は
+別**とする。回答へ渡すcollection/pathはコード上のレジストリへ登録し、フィールド単位の安全投影を必須にする。
+map型は子キーと型まで固定し、署名・認証queryやpercent-encodedの個人情報を含むURLを拒否する。
+LLMを使わない全件一覧rendererも、source type・固定path・投影fieldを同じレジストリで再検証する。
+未知collectionを利用者の質問から動的に組み立てて読まず、`users`、`staffInfos`、個人別投票、整理券申請・
+利用ログ、会計・申請情報、連絡先、認証情報は回答へ渡さない。新しいcollectionは、データ分類・公開可能field・
+集約単位・引用先をレビューしてからレジストリへ追加する。`firestore` backendを選ぶ場合はADCがRulesを
+迂回するため、専用サービスアカウントへ読み取り専用権限を付け、この投影境界を必ず維持する。
 
 ## 検索と回答
 
-1. Gemini File Searchで意味検索を行う。
-2. SQLiteのローカルミラーで用語辞書の別名、ID、固有語を完全一致検索する。
-3. 完全一致候補は一致語数、curated、レビュー済みstatusの順に加点して並べる。
-4. 両方の候補を回答モデルへ渡し、根拠が取れない場合は推測せず「記録を見つけられない」と返す。
-5. 回答末尾へ参照元を表示する。
+1. SQLiteのローカルミラーで用語辞書の別名、ID、固有語を完全一致検索する。
+2. 現在値が必要な質問では、安全投影したFirebaseを補助または直接根拠として取得する。
+3. 操作方法・データ構造・経緯などはFirebaseだけで早期終了せず、Gemini File Searchで意味検索する。
+4. 完全一致候補は一致語数、curated、レビュー済みstatusの順に加点して並べる。
+5. 候補を回答モデルへ渡し、根拠が取れない場合は推測せず「記録を見つけられない」と返す。
+6. 回答末尾へ参照元を表示する。
+
+「去年の今頃」「先月」「2025年10月」のような月単位の質問はカレンダー範囲へ解決し、SQLiteでは
+期間が重なる記録だけを検索する。File Searchの回答も採用前に同じ期間境界を再検証する。検索結果が
+安全性・年度・期間・grounding対応で棄却された場合は、検証済み本文だけを使って再生成する。この再生成は
+最初の失敗応答から出力枠を差し引かず、facetごとの全出力枠を使う。
 
 `YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS=true`を既定とし、File Searchが回答区間と
 根拠chunkの対応情報を返さない場合、その意味検索回答は採用しない。安全性を検証済みの

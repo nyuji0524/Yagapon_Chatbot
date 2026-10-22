@@ -302,6 +302,18 @@ DEFAULT_REPOSITORY_MANIFEST = {
             ],
         },
         {
+            "name": "YagamiFes-IT/Yagamy",
+            "ref": "main",
+            "private": True,
+            "history": True,
+            "fetch": "tree",
+            "include": [
+                "lib/", "test/", "docs/readMe26th/", "docs/implementations/",
+                "docs/requirements/", "docs/map-navigation/", "pubspec.yaml",
+                "firebase.json",
+            ],
+        },
+        {
             "name": "YagamiFes-IT/YagamiFes-IT-Knowledge",
             "ref": "main",
             "private": True,
@@ -924,6 +936,16 @@ def load_repositories(path: Path) -> list[Repository]:
         for item in os.environ.get("YAGAPON_SOURCE_REPOSITORIES", "").split(",")
         if item.strip()
     }
+    require_full_manifest = os.environ.get(
+        "YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST",
+        "false",
+    ).strip().lower() == "true"
+    if require_full_manifest and allowed_env:
+        raise RuntimeError(
+            "YAGAPON_SOURCE_REPOSITORIES must be empty when "
+            "YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true; an empty filter selects every "
+            "reviewed manifest entry"
+        )
     repositories = []
     seen_names = set()
     for item in payload.get("repositories", ()):
@@ -2228,6 +2250,7 @@ async def preflight_once(args) -> dict:
     return {
         "preflight": True,
         "repositories_checked": len(resolved),
+        "repositories": sorted(resolved),
         "file_search_store": store_name,
         "remote_documents_sampled": remote_document_sample,
         "state_documents": len(state["documents"]),

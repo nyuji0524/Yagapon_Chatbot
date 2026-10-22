@@ -34,6 +34,19 @@ def test_remote_deploy_preflights_source_index_before_restart():
     assert deploy.index(preflight) < restart
 
 
+def test_remote_deploy_keeps_rollback_image_until_health_succeeds():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    pull = deploy.index('docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon')
+    preflight = deploy.index("python -m bot.preflight")
+    restart = deploy.rindex("systemctl restart yagapon")
+    health_check = deploy.index('"http://127.0.0.1:${host_port}/health"')
+    prune = deploy.index("docker system prune --all --force")
+
+    assert pull < preflight < restart < health_check < prune
+    assert "Warning: deployment is healthy but Docker cleanup failed" in deploy
+
+
 def _direct_source_credential_scanner() -> str:
     deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
     marker = 'if ! python3 - "$runtime_env" <<\'PY\'\n'

@@ -216,10 +216,10 @@ YAGAPON_KNOWLEDGE_CURATION_INTERVAL_SECONDS=21600
 YAGAPON_KNOWLEDGE_CURATION_RETRY_SECONDS=900
 YAGAPON_KNOWLEDGE_BACKFILL_STATE=
 YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS=28800
-# true時は下記2 allowlistが必須。空要素以外は正の10進Discord IDだけを許可
+# true時はGuild allowlistが必須。Channelは任意の絞り込み
 YAGAPON_SCHEDULED_BACKFILL_ENABLED=false
 YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS=your_discord_guild_id
-# 必須。Text/Forum親/明示的なprivate thread（Text親を含む）のimmutable ID
+# 空なら/ignore・denyを除く全TextChannel/public threadを動的取得
 YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS=
 # curationの6時間周期より古いcheckpointを使わないよう、同じ6時間周期を推奨
 YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
@@ -241,21 +241,31 @@ YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=/etc/yagapon/secrets/github-app-
 YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/github-app-private-key.pem
 YAGAPON_SOURCE_GITHUB_TOKEN=
 YAGAPON_SOURCE_GITHUB_TOKEN_FILE=
-YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025,YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true
+# 空欄でsource_index/repositories.yamlのレビュー済みentryをすべて選ぶ
+YAGAPON_SOURCE_REPOSITORIES=
 YAGAPON_SOURCE_HISTORY_SINCE=2024-10-01T00:00:00+09:00
 YAGAPON_SOURCE_HISTORY_COMMITS_PER_CYCLE=100
 YAGAPON_FIREBASE_KNOWLEDGE_ENABLED=false
 YAGAPON_FIREBASE_KNOWLEDGE_BACKEND=public
 YAGAPON_FIREBASE_KNOWLEDGE_PROJECT=yagamy26th
 YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=
+YAGAPON_FIREBASE_KNOWLEDGE_LIMIT=100
+YAGAPON_FIREBASE_KNOWLEDGE_MAX_DOCUMENTS=2000
 ```
 
 Firebase現在値の`public` backendは未認証RESTを使うため、Firestore Security Rulesが適用される。
 `firestore`を指定した場合はADCがRulesを迂回するため、専用サービスアカウントと最小権限を使う。
+資格情報がプロジェクトを広く読み取れる場合でも、回答へ渡すのはcollection/pathとfieldをレビュー済みの
+安全投影だけである。map型も子キーと型を固定し、署名・認証情報や個人情報を含むURLを除外する。
+決定論的一覧表示でも同じpath/field契約を再検証するため、個人情報・個票・申請・会計・認証情報を
+動的な質問で読み出すことはない。
 非公開リポジトリをソース索引へ含める場合、本番では組織の`All repositories`へインストールした
 read-only GitHub Appを使う。権限は`Contents: Read-only`と自動付与される`Metadata: Read-only`だけにする。
-App自体は組織の全repositoryを読めるが、source indexは`source_index/repositories.yaml`にあり、かつ
-`YAGAPON_SOURCE_REPOSITORIES`で選択された明示allowlistだけをinstallation tokenへ指定して取り込む。
+App自体は組織の全repositoryを読めるが、source indexは`source_index/repositories.yaml`のレビュー済み
+entryだけをinstallation tokenへ指定して取り込む。本番は`YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true`かつ
+`YAGAPON_SOURCE_REPOSITORIES`を空欄にし、manifest追加時に古い固定リストで対象が欠落することを防ぐ。
+ローカルで意図的に対象を絞る場合だけfull-manifest guardを無効にして明示allowlistを指定する。
 未知のrepositoryを列挙・自動索引しない。環境変数が空でも対象はmanifest内の全entryであり、組織の
 全repositoryではない。private keyはSecret Managerから共有data path外へ0600で展開し、source workerだけへread-only mountする。
 `YAGAPON_SOURCE_GITHUB_TOKEN`は
@@ -368,14 +378,16 @@ File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質
 既存文書から用語・人名候補を一括生成し、管理画面から確認・編集するための仕様は
 [用語・人名カタログ](docs/knowledge-catalog.md)を参照。
 
-承認済みGitHubリポジトリのソース同期は`python -m source_index --dry-run`で対象を確認してから
+承認済みGitHubリポジトリ（Bot、Yaga Support、Functions、Web、Yagamy、Knowledge）のソース同期は
+`python -m source_index --dry-run`で対象を確認してから
 `YAGAPON_SOURCE_INDEX_ENABLED=true`にする。privateリポジトリはread-only GitHub Appの
 App ID、installation ID、private-keyファイルで読み取る。installation tokenは短命で自動更新され、
 Knowledgeへの書き込みには使わない。PEMは共有`/data`へ置かず、`source-index-watch`だけの
 `/run/secrets` read-only bindから読む。`*_FILE`を使えばSecret Managerから0600でmountした値を
 環境変数へ展開せずに利用できる。Knowledgeリポジトリはfront matterが`active`または
 `historical`の文書だけを`curated`として同期し、`draft`と
-`needs-review`は検索対象へ昇格させない。tokenはmanifest/envで明示選択したリポジトリだけに限定し、
+`needs-review`は検索対象へ昇格させない。tokenはmanifest（ローカルsubset時のみmanifestとenvの積集合）で
+明示選択したリポジトリだけに限定し、
 本文やログへ出力しない。
 
 現在のmainはcommit固定URL付きの`source_code`として、過去の変更はcommit日時・SHA・変更path・diffを

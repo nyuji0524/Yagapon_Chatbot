@@ -40,7 +40,8 @@ YAGAPON_SOURCE_GITHUB_APP_ID=123456
 YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=78901234
 YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=yagapon-github-app-private-key
 YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=/etc/yagapon/secrets/github-app-private-key.pem
-YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025,YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true
+YAGAPON_SOURCE_REPOSITORIES=
 YAGAPON_SOURCE_HISTORY_SINCE=2024-10-01T00:00:00+09:00
 YAGAPON_SOURCE_INDEX_ENABLED=true
 EOF
@@ -119,9 +120,11 @@ OAuth同意画面がTestingの間はrefresh tokenが7日で失効するため、
 ソースコードの正本は複製snapshotではなくGitHubとする。組織所有の専用GitHub Appを作成し、
 webhookを無効、Repository permissionsは`Contents: Read-only`（`Metadata: Read-only`は自動）だけ、
 Repository accessは`All repositories`としてインストールする。Appは組織の全repositoryを読めるが、
-source workerは`source_index/repositories.yaml`にあり、かつ`YAGAPON_SOURCE_REPOSITORIES`で選択された
-明示allowlistだけをinstallation tokenへ指定して取り込む。GitHub Appからrepositoryを列挙して未知の
-repositoryを自動索引する処理はない。環境変数が空でもmanifest内の全entryだけが対象である。
+source workerは`source_index/repositories.yaml`のレビュー済みentryだけをinstallation tokenへ指定して
+取り込む。GitHub Appからrepositoryを列挙して未知のrepositoryを自動索引する処理はない。本番では
+`YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true`のまま`YAGAPON_SOURCE_REPOSITORIES`を空欄にする。これにより
+manifestへYagamyなどを追加した後も、古い固定リストが新規entryを黙って除外せず、preflightで誤設定を
+拒否できる。環境変数が空でも対象はmanifest内の全entryだけであり、組織全体を意味しない。
 個人PATや書き込み権限を本番Botへ渡さない。
 
 GitHub Appのprivate key PEMはSecret Managerの`yagapon-github-app-private-key`へ保存する。

@@ -3,7 +3,9 @@ from datetime import date, datetime, timezone
 import pytest
 
 from bot.festival import (
+    CalendarWindow,
     calendar_date_from_query,
+    calendar_window_from_query,
     festival_from_query,
     festival_number,
     festival_period,
@@ -65,6 +67,33 @@ def test_invalid_calendar_date_does_not_create_a_filter():
     assert calendar_date_from_query("2/30の会議", now) is None
 
 
+@pytest.mark.parametrize(
+    "query",
+    ["2024年10月32日の会議", "2024年10月99日の会議", "2024-10-32の会議"],
+)
+def test_invalid_day_is_not_partially_matched(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_from_query(query, now) is None
+    assert calendar_date_from_query(query, now) is None
+    assert calendar_window_from_query(query, now) is None
+
+
+def test_invalid_explicit_date_disables_even_an_explicit_festival_filter():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_from_query("27th 2024年10月32日の会議", now) is None
+
+
+@pytest.mark.parametrize("query", ["2024年13月の活動", "2024/13の活動"])
+def test_invalid_month_is_not_partially_matched(query):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_from_query(query, now) is None
+    assert calendar_date_from_query(query, now) is None
+    assert calendar_window_from_query(query, now) is None
+
+
 def test_multiple_explicit_dates_do_not_create_a_single_date_filter():
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
 
@@ -112,3 +141,165 @@ def test_yearless_date_accepts_weekday_suffix(query):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
 
     assert calendar_date_from_query(query, now) == date(2026, 10, 9)
+
+
+def test_relative_period_resolves_last_year_current_month():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "去年の今頃って何してた？",
+        now,
+        festival=27,
+    ) == CalendarWindow(date(2025, 10, 1), date(2025, 10, 31))
+
+
+def test_relative_last_year_wording_uses_already_resolved_festival():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "昨年度の今頃",
+        now,
+        festival=25,
+    ) == CalendarWindow(date(2023, 10, 1), date(2023, 10, 31))
+
+
+@pytest.mark.parametrize("query", ["27thの今頃", "27thのこの時期"])
+def test_relative_period_uses_explicit_festival_operating_year(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now, festival=27) == CalendarWindow(
+        date(2025, 10, 1),
+        date(2025, 10, 31),
+    )
+
+
+def test_relative_previous_month_uses_explicit_festival_operating_year():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("27thの先月", now, festival=27) == CalendarWindow(
+        date(2026, 9, 1),
+        date(2026, 9, 30),
+    )
+
+
+def test_relative_period_maps_january_into_explicit_festival():
+    now = datetime(2026, 1, 15, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("27thの今頃", now, festival=27) == CalendarWindow(
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+
+def test_month_window_uses_festival_operating_year_and_leap_day():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("27thの2月頃", now, festival=27) == CalendarWindow(
+        date(2026, 2, 1),
+        date(2026, 2, 28),
+    )
+    assert calendar_window_from_query("2024年2月の活動", now) == CalendarWindow(
+        date(2024, 2, 1),
+        date(2024, 2, 29),
+    )
+
+
+def test_explicit_multi_month_range_covers_every_mentioned_month():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "2024年10月から2024年12月までの活動",
+        now,
+    ) == CalendarWindow(date(2024, 10, 1), date(2024, 12, 31))
+
+    assert calendar_date_from_query(
+        "2024年10月9日から2024年12月までの活動",
+        now,
+    ) is None
+    assert calendar_window_from_query(
+        "2024年10月9日から2024年12月までの活動",
+        now,
+    ) == CalendarWindow(date(2024, 10, 1), date(2024, 12, 31))
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2024年10月1日から2024年10月5日まで",
+        "2024-10-01 - 2024-10-05",
+        "2024-10-01..2024-10-05",
+    ],
+)
+def test_explicit_date_range_preserves_exact_endpoints(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now) == CalendarWindow(
+        date(2024, 10, 1),
+        date(2024, 10, 5),
+    )
+
+
+def test_partially_qualified_multi_month_comparison_is_not_narrowed():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("2024年5月と6月の比較", now, festival=25) is None
+    assert calendar_date_from_query("2024年5月9日と6月の比較", now) is None
+    assert calendar_window_from_query("2024年5月9日と6月の比較", now, festival=25) is None
+
+
+def test_multi_month_window_maps_across_festival_operating_year():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "27thの11月から2月まで",
+        now,
+        festival=27,
+    ) == CalendarWindow(date(2025, 11, 1), date(2026, 2, 28))
+
+    assert calendar_window_from_query(
+        "27thの2月から11月まで",
+        now,
+        festival=27,
+    ) is None
+
+
+def test_reverse_explicit_calendar_range_is_not_silently_reordered():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "2024年12月から2024年10月まで",
+        now,
+    ) is None
+
+    assert calendar_window_from_query(
+        "2024-12-09 - 2024-10-01",
+        now,
+    ) is None
+
+    assert calendar_window_from_query(
+        "2024-12-09..2024-10-01",
+        now,
+    ) is None
+
+
+@pytest.mark.parametrize("query", ["27thの第1月曜の定例", "27thの第2月曜日の会議"])
+def test_weekday_ordinal_is_not_mistaken_for_a_calendar_month(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now, festival=27) is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["例年この時期は何をしてる？", "過去のこの時期のトラブルは？", "この時期は毎年何をする？"],
+)
+def test_multi_year_season_question_is_not_narrowed_to_one_year(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now) is None
+
+
+def test_exact_date_does_not_also_create_a_month_window():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query("2025年10月9日の会議", now, festival=27) is None

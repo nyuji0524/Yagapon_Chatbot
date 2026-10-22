@@ -63,6 +63,9 @@ def test_shared_env_file_cannot_expose_direct_source_credentials():
         "/run/secrets/github-app-private-key.pem"
     )
     assert source_environment["YAGAPON_SOURCE_GITHUB_TOKEN_FILE"] == ""
+    assert source_environment["YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST"] == (
+        "${YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST:-true}"
+    )
 
 
 def test_empty_direct_secret_falls_back_to_mounted_file(tmp_path, monkeypatch):

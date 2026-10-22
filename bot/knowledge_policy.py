@@ -167,6 +167,21 @@ def protected_channel(channel, *, parent=None, category=None) -> bool:
     )
 
 
+def automatic_knowledge_promotion_allowed(channel, *, parent=None, category=None) -> bool:
+    """Return whether raw Discord material may become a Knowledge Draft.
+
+    Reading raw history and publishing it to the Knowledge repository are two
+    different trust boundaries.  Dynamic ingestion may index any readable,
+    non-protected channel with a channel ACL, but automatic promotion is only
+    safe when Discord proves that the guild's default role can read the
+    source.  Restricted channels can still use the explicit, reviewed intake
+    command or an operator-configured curation channel override.
+    """
+    if channel is None or protected_channel(channel, parent=parent, category=category):
+        return False
+    return _guildwide_channel_audience(channel)
+
+
 def evaluate_knowledge_export(
     *,
     guild_id: int,

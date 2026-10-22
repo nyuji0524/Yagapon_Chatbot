@@ -24,7 +24,7 @@ Discordへ検証メッセージを大量投稿したり、本番ロール・鍵�
 | Knowledge retry | PR失敗bundle保持、再送、sensitive block、冪等キー、保存権限0600 | 単体済み |
 | Source Index | Bot repo + 承認済みKnowledge snapshot、世代切替、リモート実在確認、孤児reconcile、ロールバック | 単体済み・要本番確認 |
 | Discord backfill | dry-run、範囲・年度、並列処理、checkpoint、429、失敗・再開、shutdown時cancel | 単体済み |
-| 継続Knowledge整理 | guild許可とimmutable channel ID許可の両方を満たす原文だけを草案化 | 単体済み・要本番設定 |
+| 継続Knowledge整理 | guild許可内を動的取得し、denyを除外。全員閲覧可能資料または明示Channelだけを草案化 | 単体済み・要本番設定 |
 | `/glossary` | 候補、承認、追加、一覧、削除、一括登録 | 単体済み |
 | レポート | 週次・月次のJST期間境界とFile Search期間フィルタ | 単体済み |
 | 委員会登録 | 局・学年・メール、Yaga Support照合、未登録fallback、企画長・役員の重複申告、承認 | 単体済み・Emulator確認対象 |

@@ -169,12 +169,6 @@ systemctl daemon-reload
 registry=${image%%/*}
 gcloud auth configure-docker "$registry" --quiet
 
-# Release images are content-addressed by commit SHA, so tagged images accumulate
-# on the small VM disk. Reclaim every unused Docker object before pulling the next
-# release. Deliberately omit --volumes: volumes and /var/lib/yagapon contain
-# recordings, transcripts, configuration, and replay state and must survive.
-docker system prune --all --force >/dev/null
-
 oauth_secret=$(sed -n 's/^YAGAPON_GOOGLE_OAUTH_SECRET=//p' "$deploy_env" | tail -1)
 oauth_project=$(sed -n 's/^YAGAPON_GCP_PROJECT_ID=//p' "$deploy_env" | tail -1)
 if [[ -n "$oauth_secret" ]]; then
@@ -297,7 +291,14 @@ for _ in $(seq 1 48); do
     chown 10001:10001 "$data_path/releases/current.json"
     chmod 0640 "$data_path/releases/current.json"
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
-    docker image prune --force --filter 'until=168h' >/dev/null
+    # Release images are content-addressed by commit SHA, so unused images and
+    # build objects accumulate on the small VM disk. Prune only after the new
+    # generation is healthy: the rollback trap must retain the former image
+    # until every preflight, restart, and health check has succeeded. Deliberately
+    # omit --volumes because /var/lib/yagapon contains durable user data.
+    if ! docker system prune --all --force >/dev/null; then
+      echo "Warning: deployment is healthy but Docker cleanup failed" >&2
+    fi
     if [[ "$github_app_key_installed" == true ]]; then
       # The former location was part of the shared /data bind and therefore
       # visible to every Compose service running as UID 10001. Keep it until

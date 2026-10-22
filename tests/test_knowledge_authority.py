@@ -20,6 +20,11 @@ def test_question_classification_covers_source_authority_modes():
     assert classify_question("やがサポの使い方は？") == QuestionKind.USAGE
     assert classify_question("この決定の経緯は？") == QuestionKind.HISTORY
     assert classify_question("10/10の役員反省会では何が出た？") == QuestionKind.HISTORY
+    assert classify_question("27thのrankingの構造はどうなっていた？") == QuestionKind.DATA_CONTRACT
+    assert classify_question("27thのmapのfirestore構造ってどうなってた？") == QuestionKind.DATA_CONTRACT
+    assert classify_question("27thの大賞企画の結果と票数を教えて") == QuestionKind.RUNTIME
+    assert classify_question("去年の今頃って何してた？") == QuestionKind.HISTORY
+    assert classify_question("新歓Webで他局から要求があった内容をまとめて") == QuestionKind.HISTORY
 
 
 def test_authority_priority_changes_with_question_kind():

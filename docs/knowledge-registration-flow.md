@@ -82,7 +82,7 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 
 ## 定期更新と即時更新
 
-本番では、固定Guild/Channel IDのallowlistに含めたDiscord原文を差分取得し、その完了checkpointを
+本番では、固定Guild allowlist内でBotが閲覧できるDiscord原文を動的に列挙して差分取得し、その完了checkpointを
 確認してから議題別Knowledge整理を行う。どちらも6時間周期とし、失敗またはcheckpoint未完了時は
 15分以内の短周期pollへ切り替える。配送再送はSQLiteの`next_attempt_at`（決定的jitterを含む）まで
 短周期pollを続ける。自動整理が生成するものは確認待ちDraft PRであり、自動マージしない。
@@ -91,21 +91,27 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 
 ```text
 /knowledge refresh mode:<Discord差分取得 → Knowledge整理（推奨）>
+/knowledge refresh mode:<全期間を年度別に再構築 → Knowledge整理>
 /knowledge refresh mode:<Knowledge整理のみ>
 ```
 
 - `full`相当の推奨モードは、Discord差分取得が全件完了した場合だけ整理へ進む。
+- 全期間モードは最古メッセージから現在までを、10月1日〜翌9月30日の矢上祭年度ごとに分割して
+  再構築する。結果Embedにも`26th`、`27th`、`28th`のように年度別件数を表示する。
 - 整理のみの場合も、最新の正常なbackfill checkpointがなければfail closedで保留する。
 - 定期処理または別の手動処理と重なった場合は、同じプロセス内のasync lockとプロセス間file lockで
   二重実行を防ぐ。
 - コマンドは即時に受付を返し、長時間処理の結果を実行チャンネルへEmbedで通知する。
-- 対象Guild/Channelはコマンド引数で変更できない。環境変数のimmutable ID allowlistだけを使う。
-- 定期取得を`true`にする場合、Guild IDとChannel IDは正の10進Discord IDだけで構成し、両方を
-  空でなく設定する。1件でも不正なら旧checkpointを失敗状態へ同期更新して整理を止める。Forum親IDを
-  許可するとpublicなactive/archived投稿を展開するが、private threadはForum/Text親を問わず
-  そのthread ID自体を明示した場合だけ扱う。
-- `YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`はKnowledge外部化の別allowlistである。Forum親の許可を
-  private投稿へ暗黙継承しないため、整理対象にする投稿は取得後にthread IDを明示して追加する。
+- 対象Guildはコマンド引数で変更できず、環境変数のimmutable Guild ID allowlistだけを使う。
+  Channel設定が空なら、Botが履歴を読めるTextChannelとpublicなactive/archived threadを動的に列挙する。
+  `/ignore`、`YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS`、deny名称は常に除外する。private threadは自動列挙しない。
+- `YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS`を設定した場合は従来どおり狭い対象へ限定できる。明示した
+  Forum親はpublic投稿へ展開し、private threadはそのthread ID自体を明示した場合だけ扱う。
+- Raw索引とGitHub Knowledgeへの外部化は別境界である。全readable履歴は`access_scope=channel`のまま
+  RAGへ登録する。リアルタイム受信は、その時点でguild全員が読めると検証できた場合だけ自動Draft候補にする。
+  過去ログは投稿当時のACLをDiscordから証明できないため、現在公開チャンネルでもbackfill由来の
+  `auto_promote`を常にfalseにする。過去ログをKnowledge化する場合は、
+  `YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`による明示許可または管理者の明示申請を使う。
 
 ### 旧outboxを移行する
 
@@ -193,7 +199,7 @@ YAGAPON_KNOWLEDGE_BACKFILL_STATE=/data/scheduled-backfill-state.json
 YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS=28800
 YAGAPON_SCHEDULED_BACKFILL_ENABLED=false
 YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS=<差分取得を許可するGuild ID>
-YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS=<差分取得を許可するChannel/Forum親ID>
+YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS=<任意の限定Channel/Forum親ID。空なら動的全対象>
 YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
 YAGAPON_SCHEDULED_BACKFILL_RETRY_SECONDS=900
 YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
@@ -204,7 +210,8 @@ YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
 `failures=[]`、`channels_completed == channels_total`の場合だけ整理を開始する。ファイル欠落、古い時刻、
 `failed`、`deferred`、`interrupted`、一部チャンネル失敗はいずれもfail closedとなり、古いコーパスから
 新しい草案を生成しない。workerへscheduler設定が渡されている場合はschedulerが有効で、かつ
-checkpoint内のGuild/Channel inventoryが現設定と完全一致することも必須とする。schedulerの無効化や
+checkpoint内のGuild inventoryと、動的に検出したeligible/completed inventoryが整合することも必須とする。
+schedulerの無効化や
 設定変更前の成功checkpointは再利用しない。
 
 個人用の`gh`認証やPATを本番VMへコピーしない。キューobjectは機密検査済みの候補だけを含み、
@@ -213,10 +220,10 @@ KnowledgeリポジトリのOrganization/Repository Actions設定では、Workflo
 `Allow GitHub Actions to create and approve pull requests`を有効にする。これを確認するまでは
 `YAGAPON_KNOWLEDGE_CURATION_ENABLED=false`のままにする。
 
-Discord会話は検索上 `access_scope=channel` を維持するため、継続整理の対象にするチャンネルIDを
-`YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`へカンマ区切りで明示する。許可済みguildかつ、この
-positive allowlistに一致するチャンネルだけが非公開Knowledgeリポジトリの確認待ち草案になる。
-未指定、親カテゴリ名だけの一致、`restricted`資料は自動送信しない。
+Discord会話は検索上 `access_scope=channel` を維持する。`YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`が
+空の場合、取り込み時にguild全員が読めることをDiscord権限から検証し、`auto_promote=true`を付けた資料だけが
+非公開Knowledgeリポジトリの確認待ち草案になる。IDを設定した場合はその明示subsetだけに限定する。
+deny対象と`restricted`資料は、どちらの場合も自動送信しない。
 
 承認後にKnowledge PRがmainへ入ると、`source-index-watch`がcommit SHAの変更を検出する。
 front matterのstatusが`active`または`historical`の文書だけを

@@ -1,12 +1,21 @@
 """Festival-year rules shared by ingestion, retrieval, and evaluation."""
 
 import re
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 FESTIVAL_YEAR_OFFSET = 1998
+_MONTH_NAME_PATTERN = r"(?<![第\d])(1[0-2]|0?[1-9])\s*月(?!\s*[\d曜])"
+_EXPLICIT_DATE_PATTERN = re.compile(
+    r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(\d+)\s*"
+    r"(?:月|[/.-])\s*(\d+)\s*日?(?!\d)"
+)
+_RANGE_SEPARATOR_PATTERN = re.compile(
+    r"(?:から|まで|[〜～~]|\.{2,}|[–—]|(?<=\s)-|-(?=\s))"
+)
 
 
 def festival_number(value: date | datetime) -> int:
@@ -30,6 +39,14 @@ class FestivalPeriod:
     ends_on: date
 
 
+@dataclass(frozen=True)
+class CalendarWindow:
+    """Inclusive calendar window inferred from a coarse time expression."""
+
+    starts_on: date
+    ends_on: date
+
+
 def festival_period(number: int) -> FestivalPeriod:
     if number < 1:
         raise ValueError("festival number must be positive")
@@ -44,12 +61,24 @@ def festival_period(number: int) -> FestivalPeriod:
 def festival_from_query(query: str, now: datetime | None = None) -> int | None:
     """Resolve explicit/relative festival references; leave timeless queries unfiltered."""
     normalized = query.strip()
+    try:
+        for explicit_date in _EXPLICIT_DATE_PATTERN.finditer(normalized):
+            date(
+                int(explicit_date.group(1)),
+                int(explicit_date.group(2)),
+                int(explicit_date.group(3)),
+            )
+    except ValueError:
+        # An invalid explicit date must not leave only a broad festival filter;
+        # doing so would silently answer a different, year-wide question.
+        return None
+
     match = re.search(r"(?:第\s*)?(\d{1,3})(?:th|回)", normalized, re.IGNORECASE)
     if match:
         return int(match.group(1))
 
     dated_matches = list(
-        re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?", normalized)
+        re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?(?!\d)", normalized)
     )
     if dated_matches:
         dated_festivals = {
@@ -89,17 +118,28 @@ def calendar_date_from_query(
     normalized = query.translate(
         str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
     )
-    explicit_matches = list(re.finditer(
-        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*"
-        r"(?:月|[/.-])\s*(3[01]|[12]\d|0?[1-9])\s*日?",
-        normalized,
-    ))
+    explicit_matches = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
     # A single-date filter must not silently discard evidence for comparison
     # questions containing two distinct dates.
     if len(explicit_matches) > 1:
         return None
     if explicit_matches:
         explicit = explicit_matches[0]
+        explicit_months = list(
+            re.finditer(
+                r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])(?!\d)",
+                normalized,
+            )
+        )
+        additional_named_months = list(
+            re.finditer(_MONTH_NAME_PATTERN, normalized)
+        )
+        # A day plus another month is a range/comparison, not a single-date
+        # question.  Let the month-window resolver cover fully-qualified
+        # ranges; leave partially-qualified ones broad instead of excluding
+        # their second endpoint.
+        if len(explicit_months) > 1 or additional_named_months:
+            return None
         try:
             return date(int(explicit.group(1)), int(explicit.group(2)), int(explicit.group(3)))
         except ValueError:
@@ -133,6 +173,164 @@ def calendar_date_from_query(
         if candidate <= current:
             return candidate
     return None
+
+
+def calendar_window_from_query(
+    query: str,
+    now: datetime | None = None,
+    *,
+    festival: int | None = None,
+) -> CalendarWindow | None:
+    """Resolve month-level expressions such as ``去年の今頃``.
+
+    Exact dates remain the responsibility of :func:`calendar_date_from_query`.
+    A month is intentionally used instead of one guessed day: committee work
+    is usually discussed over several days and a one-day filter would make a
+    natural question such as "去年の今頃" miss almost every relevant record.
+    """
+    if calendar_date_from_query(query, now, festival=festival) is not None:
+        return None
+    normalized = query.translate(
+        str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
+    )
+    current = (now or datetime.now(JST)).astimezone(JST).date()
+
+    explicit_dates = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
+    try:
+        explicit_date_values = [
+            date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            for match in explicit_dates
+        ]
+    except ValueError:
+        return None
+    if len(explicit_dates) > 1:
+        date_separator = normalized[explicit_dates[0].end():explicit_dates[-1].start()]
+        if _RANGE_SEPARATOR_PATTERN.search(date_separator):
+            if explicit_date_values[0] > explicit_date_values[-1]:
+                return None
+            return CalendarWindow(
+                starts_on=explicit_date_values[0],
+                ends_on=explicit_date_values[-1],
+            )
+
+    if (
+        re.search(r"例年|毎年|過去", normalized)
+        and re.search(r"今頃|この時期|今月", normalized)
+    ):
+        # These ask for the same season across multiple operating years.  A
+        # single calendar year would discard the very comparisons requested.
+        return None
+
+    explicit_matches = list(re.finditer(
+        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?(?!\d)",
+        normalized,
+    ))
+    named_months = list(
+        re.finditer(_MONTH_NAME_PATTERN, normalized)
+    )
+    additional_named_months = [
+        month
+        for month in named_months
+        if not any(
+            explicit.start() <= month.start() and month.end() <= explicit.end()
+            for explicit in explicit_matches
+        )
+    ]
+    if len(explicit_matches) > 1:
+        if additional_named_months:
+            return None
+        windows = [
+            _month_window(int(match.group(1)), int(match.group(2)))
+            for match in explicit_matches
+        ]
+        range_separator = normalized[
+            explicit_matches[0].end():explicit_matches[-1].start()
+        ]
+        if _RANGE_SEPARATOR_PATTERN.search(range_separator) and (
+            windows[0].starts_on > windows[-1].starts_on
+        ):
+            return None
+        return CalendarWindow(
+            starts_on=min(window.starts_on for window in windows),
+            ends_on=max(window.ends_on for window in windows),
+        )
+    if explicit_matches:
+        explicit = explicit_matches[0]
+        # A partially-qualified comparison such as ``2024年5月と6月`` is
+        # ambiguous without parsing the connective (and ``12月から1月`` may
+        # cross a year).  A broad search is safer than silently restricting
+        # the second month out of the grounding audit.
+        if additional_named_months:
+            return None
+        year, month = int(explicit.group(1)), int(explicit.group(2))
+        return _month_window(year, month)
+
+    relative_month = None
+    if re.search(r"先月", normalized):
+        if current.month == 1:
+            relative_month = (current.year - 1, 12)
+        else:
+            relative_month = (current.year, current.month - 1)
+        if festival is not None:
+            period = festival_period(festival)
+            month = relative_month[1]
+            relative_month = (
+                period.starts_on.year if month >= 10 else period.ends_on.year,
+                month,
+            )
+    elif re.search(r"(?:去年|昨年|昨年度).{0,4}(?:今頃|この時期|今月)", normalized):
+        if festival is None:
+            relative_month = (current.year - 1, current.month)
+        else:
+            # festival_from_query() has already resolved relative wording such
+            # as 昨年度 to the target operating year.  Map the month into that
+            # period instead of subtracting the Gregorian year a second time.
+            period = festival_period(festival)
+            relative_month = (
+                period.starts_on.year if current.month >= 10 else period.ends_on.year,
+                current.month,
+            )
+    elif re.search(r"今頃|この時期|今月", normalized):
+        if festival is None:
+            relative_month = (current.year, current.month)
+        else:
+            period = festival_period(festival)
+            relative_month = (
+                period.starts_on.year if current.month >= 10 else period.ends_on.year,
+                current.month,
+            )
+    if relative_month:
+        return _month_window(*relative_month)
+
+    mentioned_months = list(
+        re.finditer(_MONTH_NAME_PATTERN, normalized)
+    )
+    if mentioned_months and festival is not None:
+        period = festival_period(festival)
+        windows = []
+        for match in mentioned_months:
+            month = int(match.group(1))
+            year = period.starts_on.year if month >= 10 else period.ends_on.year
+            windows.append(_month_window(year, month))
+        range_separator = normalized[
+            mentioned_months[0].end():mentioned_months[-1].start()
+        ]
+        if _RANGE_SEPARATOR_PATTERN.search(range_separator) and (
+            windows[0].starts_on > windows[-1].starts_on
+        ):
+            return None
+        return CalendarWindow(
+            starts_on=min(window.starts_on for window in windows),
+            ends_on=max(window.ends_on for window in windows),
+        )
+    return None
+
+
+def _month_window(year: int, month: int) -> CalendarWindow:
+    return CalendarWindow(
+        starts_on=date(year, month, 1),
+        ends_on=date(year, month, monthrange(year, month)[1]),
+    )
 
 
 def festival_metadata_filter(number: int | None) -> str | None:

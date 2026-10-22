@@ -18,6 +18,12 @@ repositories:
     history: true
     fetch: tree
     include: [src/, app/, pages/, components/, lib/, public/, package.json, next.config.js, next.config.mjs]
+  - name: YagamiFes-IT/Yagamy
+    ref: main
+    private: true
+    history: true
+    fetch: tree
+    include: [lib/, test/, docs/readMe26th/, docs/implementations/, docs/requirements/, docs/map-navigation/, pubspec.yaml, firebase.json]
   - name: YagamiFes-IT/YagamiFes-IT-Knowledge
     ref: main
     private: true

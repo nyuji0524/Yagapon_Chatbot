@@ -181,6 +181,7 @@ def _digest(document: dict) -> str:
             "category_id",
             "category_name",
             "category",
+            "auto_promote",
         )
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
@@ -188,13 +189,28 @@ def _digest(document: dict) -> str:
 
 
 def configured_curation_channel_ids() -> set[int]:
-    """Return immutable Discord channel IDs explicitly approved for export."""
+    """Return an optional explicit subset of Discord channels to curate.
+
+    With no subset, channel-scoped sources require trusted ``auto_promote``
+    metadata.  Neither mode bypasses the independent deny policy.
+    """
     result: set[int] = set()
     for raw in os.environ.get("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "").split(","):
         value = raw.strip()
         if value.isdecimal() and int(value) > 0:
             result.add(int(value))
     return result
+
+
+def _trusted_metadata_flag(value: object) -> bool:
+    """Parse a producer-owned metadata flag without permissive truthiness."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _configured_deny_channel_ids() -> set[int]:
@@ -238,7 +254,7 @@ def curation_document_denied(document: dict) -> bool:
 
 
 def curation_document_allowed(document: dict) -> bool:
-    """Apply the positive guild/channel export allowlist to one source."""
+    """Apply the guild boundary and optional channel subset to one source."""
     if curation_document_denied(document):
         return False
     try:
@@ -253,7 +269,15 @@ def curation_document_allowed(document: dict) -> bool:
         channel_id = int(document.get("channel_id") or 0)
     except (TypeError, ValueError):
         return False
-    return document.get("access_scope") == "channel" and channel_id in configured_curation_channel_ids()
+    if document.get("access_scope") != "channel" or channel_id <= 0:
+        return False
+    explicit_channels = configured_curation_channel_ids()
+    if explicit_channels:
+        return channel_id in explicit_channels
+    # Dynamic ingestion may read every bot-visible channel, but only material
+    # whose effective audience was verified as guild-wide by the trusted
+    # producer is eligible for autonomous promotion into GitHub Knowledge.
+    return _trusted_metadata_flag(document.get("auto_promote"))
 
 
 def _safe_slug(value: str, fallback: str) -> str:
@@ -462,7 +486,9 @@ def _current_backfill_inventory() -> tuple[set[str], set[str]] | None:
     A standalone curator may intentionally consume an externally produced
     checkpoint without receiving scheduler environment variables. Once this
     deployment supplies scheduler configuration, however, scheduling must be
-    enabled and the checkpoint must describe that exact immutable inventory.
+    enabled and the checkpoint must describe its exact guild inventory.  The
+    channel inventory may intentionally be empty: that selects all channels
+    dynamically discovered as readable during each producer cycle.
     """
     guilds_raw = os.environ.get("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "").strip()
     channels_raw = os.environ.get("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "").strip()
@@ -474,9 +500,9 @@ def _current_backfill_inventory() -> tuple[set[str], set[str]] | None:
             "scheduled backfill is disabled for this checkpoint consumer"
         )
     guild_ids, channel_ids = configured_inventory()
-    if not guild_ids or not channel_ids:
+    if not guild_ids:
         raise ScheduledBackfillConfigurationError(
-            "scheduled backfill requires non-empty guild and channel allowlists"
+            "scheduled backfill requires a non-empty guild allowlist"
         )
     return (
         {str(value) for value in guild_ids},
@@ -1217,8 +1243,10 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
     store = RagStore()
     all_candidates = expand_curation_documents(store.list_curation_documents(limit=10_000))
     # The central private repository cannot reproduce Discord's live ACLs.
-    # Guild-wide material is safe for an allowlisted guild; channel-scoped
-    # material requires a second positive allowlist of immutable channel IDs.
+    # Only explicitly allowed guilds are eligible.  Operators may explicitly
+    # approve immutable channel IDs.  Otherwise, channel-scoped material must
+    # carry the producer-owned auto_promote flag, which is set only after its
+    # effective audience is verified as guild-wide.  Deny policy always wins.
     candidates = [item for item in all_candidates if curation_document_allowed(item)]
     candidate_channel_ids: set[int] = set()
     candidate_without_channel = False
