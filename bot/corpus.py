@@ -97,8 +97,15 @@ GLOBAL_NO_EVIDENCE_MARKER = "[[YAGAPON_NO_RELEVANT_EVIDENCE]]"
 REQUIRE_EXPLICIT_ANSWER_STATUS = (
     os.environ.get("YAGAPON_RAG_REQUIRE_ANSWER_STATUS", "false").lower() == "true"
 )
-REQUIRE_GROUNDING_SUPPORTS = (
-    os.environ.get("YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS", "false").lower() == "true"
+
+
+def _grounding_supports_required(value: str | None) -> bool:
+    """Fail closed unless compatibility fallback is explicitly requested."""
+    return (value if value is not None else "true").strip().casefold() != "false"
+
+
+REQUIRE_GROUNDING_SUPPORTS = _grounding_supports_required(
+    os.environ.get("YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS")
 )
 
 

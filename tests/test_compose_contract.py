@@ -75,3 +75,11 @@ def test_empty_direct_secret_falls_back_to_mounted_file(tmp_path, monkeypatch):
     )
 
     assert read_secret("YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY") == "mounted-secret"
+
+
+def test_bot_requires_file_search_grounding_supports_by_default():
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+
+    assert compose["services"]["yagapon"]["environment"][
+        "YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS"
+    ] == "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}"

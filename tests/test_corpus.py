@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+import bot.corpus as corpus_module
 from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     AnswerStatus,
@@ -842,7 +843,10 @@ def test_response_sources_deduplicates_discord_links(corpus_manager):
                     grounding_chunks=[
                         SimpleNamespace(retrieved_context=context),
                         SimpleNamespace(retrieved_context=context),
-                    ]
+                    ],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0, 1])
+                    ],
                 )
             )
         ]
@@ -1175,19 +1179,28 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
                 )
             )
         )
+    answer_text = (
+        "## 権限\n整理券管理者が全体管理を行うぽん。\n\n"
+        "## 運用上の問題\n確認できた問題を整理したぽん。\n\n"
+        "## 未確認事項\n一部の時期については記録を確認できなかったぽん。\n"
+        "[[YAGAPON_EVIDENCE_KEYS:knowledge:standby-pass]]\n"
+        "[[YAGAPON_ANSWER_STATUS:partial]]"
+    )
     response = SimpleNamespace(
-        text=(
-            "## 権限\n整理券管理者が全体管理を行うぽん。\n\n"
-            "## 運用上の問題\n確認できた問題を整理したぽん。\n\n"
-            "## 未確認事項\n一部の時期については記録を確認できなかったぽん。\n"
-            "[[YAGAPON_EVIDENCE_KEYS:knowledge:standby-pass]]\n"
-            "[[YAGAPON_ANSWER_STATUS:partial]]"
-        ),
+        text=answer_text,
         usage_metadata=None,
         candidates=[
             SimpleNamespace(
                 finish_reason="STOP",
-                grounding_metadata=SimpleNamespace(grounding_chunks=contexts),
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=contexts,
+                    grounding_supports=[
+                        SimpleNamespace(
+                            grounding_chunk_indices=list(range(len(contexts))),
+                            segment=SimpleNamespace(text=answer_text),
+                        )
+                    ],
+                ),
             )
         ],
     )
@@ -1386,7 +1399,16 @@ def test_expanded_citation_limit_still_enforces_channel_acl(corpus_manager):
             )
         )
     response = SimpleNamespace(
-        candidates=[SimpleNamespace(grounding_metadata=SimpleNamespace(grounding_chunks=chunks))]
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=chunks,
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=list(range(6)))
+                    ],
+                )
+            )
+        ]
     )
 
     sources = corpus_manager._response_sources(
@@ -1451,6 +1473,20 @@ def test_explicit_empty_grounding_supports_do_not_cite_retrieval_candidates(corp
     )
 
     assert corpus_manager._response_sources(response) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (None, True),
+        ("", True),
+        ("true", True),
+        ("invalid", True),
+        (" FALSE ", False),
+    ),
+)
+def test_grounding_support_requirement_is_fail_closed_by_default(value, expected):
+    assert corpus_module._grounding_supports_required(value) is expected
 
 
 def test_missing_grounding_supports_uses_observable_compatibility_fallback(
@@ -1721,7 +1757,10 @@ def test_semantic_source_history_citation_includes_commit_and_historical_status(
         candidates=[
             SimpleNamespace(
                 grounding_metadata=SimpleNamespace(
-                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
                 )
             )
         ]
@@ -1750,7 +1789,12 @@ def test_semantic_meeting_source_uses_meeting_label(corpus_manager):
     response = SimpleNamespace(
         candidates=[
             SimpleNamespace(
-                grounding_metadata=SimpleNamespace(grounding_chunks=[SimpleNamespace(retrieved_context=context)])
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
             )
         ]
     )
@@ -1920,7 +1964,14 @@ def test_response_sources_keep_only_the_expected_festival(corpus_manager):
 
     response = SimpleNamespace(
         candidates=[
-            SimpleNamespace(grounding_metadata=SimpleNamespace(grounding_chunks=[chunk(27), chunk(None), chunk(28)]))
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[chunk(27), chunk(None), chunk(28)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[2])
+                    ],
+                )
+            )
         ]
     )
 
@@ -2107,7 +2158,10 @@ def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):
                     grounding_chunks=[
                         chunk(authority="conversation", status="raw", source_type="discord_conversation"),
                         chunk(authority="curated", status="active", source_type="knowledge_repository"),
-                    ]
+                    ],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[1])
+                    ],
                 )
             )
         ]
@@ -2134,7 +2188,12 @@ def test_builtin_reference_title_is_not_rendered_as_discord_channel(corpus_manag
     response = SimpleNamespace(
         candidates=[
             SimpleNamespace(
-                grounding_metadata=SimpleNamespace(grounding_chunks=[SimpleNamespace(retrieved_context=context)])
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
             )
         ]
     )
@@ -2163,7 +2222,12 @@ def test_response_sources_keep_only_the_expected_calendar_date(corpus_manager):
     response = SimpleNamespace(
         candidates=[
             SimpleNamespace(
-                grounding_metadata=SimpleNamespace(grounding_chunks=[chunk("2025-10-09"), chunk("2026-10-09")])
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[chunk("2025-10-09"), chunk("2026-10-09")],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[1])
+                    ],
+                )
             )
         ]
     )
@@ -2378,7 +2442,15 @@ async def test_query_drops_curated_source_when_curated_answer_fails(corpus_manag
         candidates=[
             SimpleNamespace(
                 grounding_metadata=SimpleNamespace(
-                    grounding_chunks=[SimpleNamespace(retrieved_context=semantic_context)]
+                    grounding_chunks=[SimpleNamespace(retrieved_context=semantic_context)],
+                    grounding_supports=[
+                        SimpleNamespace(
+                            grounding_chunk_indices=[0],
+                            segment=SimpleNamespace(
+                                text="整理券は当日受付で利用したぽん。"
+                            ),
+                        )
+                    ],
                 )
             )
         ],
@@ -2776,7 +2848,15 @@ async def test_query_filters_explicit_festival_and_records_trace(corpus_manager,
         usage_metadata=None,
         candidates=[
             SimpleNamespace(
-                grounding_metadata=SimpleNamespace(grounding_chunks=[SimpleNamespace(retrieved_context=context)])
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(
+                            grounding_chunk_indices=[0],
+                            segment=SimpleNamespace(text="27thの回答"),
+                        )
+                    ],
+                )
             )
         ],
     )
