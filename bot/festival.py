@@ -13,6 +13,10 @@ _EXPLICIT_DATE_PATTERN = re.compile(
     r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(\d+)\s*"
     r"(?:月|[/.-])\s*(\d+)\s*日?(?!\d)"
 )
+_EXPLICIT_MONTH_PATTERN = re.compile(
+    r"(?<!\d)(20\d{2})\s*(?:"
+    r"年\s*(\d{1,2})\s*月|[/.-]\s*(\d{1,2})(?!\d))"
+)
 _RANGE_SEPARATOR_PATTERN = re.compile(
     r"(?:から|まで|[〜～~]|\.{2,}|[–—]|(?<=\s)-|-(?=\s))"
 )
@@ -104,11 +108,9 @@ def has_invalid_explicit_calendar_reference(query: str) -> bool:
             date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     except ValueError:
         return True
-    for match in re.finditer(
-        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(\d{1,2})(?:\s*月)?",
-        normalized,
-    ):
-        if not 1 <= int(match.group(2)) <= 12:
+    for match in _EXPLICIT_MONTH_PATTERN.finditer(normalized):
+        month = int(match.group(2) or match.group(3))
+        if not 1 <= month <= 12:
             return True
     return False
 

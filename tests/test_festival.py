@@ -161,6 +161,18 @@ def test_invalid_explicit_calendar_reference_is_detected(query):
     assert has_invalid_explicit_calendar_reference(query) is True
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2024年150人の参加者がいました",
+        "2024年13回目の定例会議です",
+        "2024年度は15人で運用しました",
+    ],
+)
+def test_quantities_after_year_are_not_treated_as_invalid_months(query):
+    assert has_invalid_explicit_calendar_reference(query) is False
+
+
 @pytest.mark.parametrize("query", ["1.5倍速", "2-3人で参加", "1-2時間", "gemini-3.1-flash", "2/3人"])
 def test_non_date_numbers_do_not_create_a_filter(query):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)

@@ -788,7 +788,7 @@ class RagStore:
             for hit in hits
             if hit.document_key not in selected_keys
         )
-        return selected[:limit]
+        return sorted(selected[:limit], key=lambda hit: hit.score, reverse=True)
 
     def find_approved_topic(self, topic_id: str, *, festival: int) -> dict | None:
         """Find a reviewed Knowledge article that reconciles an open topic draft."""

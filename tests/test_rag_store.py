@@ -517,6 +517,9 @@ def test_history_search_reserves_conversation_before_repository_history_limit(tm
     )
 
     assert "meeting" in {hit.document_key for hit in hits}
+    assert [hit.score for hit in hits] == sorted(
+        (hit.score for hit in hits), reverse=True
+    )
 
 
 def test_history_reservation_does_not_bypass_channel_acl(tmp_path):

@@ -266,7 +266,7 @@ def _select_lexical_context_hits(
     narrative_hits = [
         hit for hit in ranked if is_history_narrative_source(hit.source_type)
     ]
-    reserved = min(len(narrative_hits), max(1, limit // 3))
+    reserved = min(len(narrative_hits), max(1, limit // 3)) if limit >= 3 else 0
     selected_narratives = sum(
         is_history_narrative_source(hit.source_type) for hit in selected
     )

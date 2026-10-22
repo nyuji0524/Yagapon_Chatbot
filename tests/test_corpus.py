@@ -133,6 +133,30 @@ def test_non_history_context_keeps_direct_authority_priority():
     assert selected == [deployed]
 
 
+def test_small_history_context_limit_does_not_replace_best_hit():
+    implementation = lexical_hit(
+        "implementation",
+        score=900,
+        authority="repository_history",
+        source_type="source_code_history",
+    )
+    conversation = lexical_hit(
+        "conversation",
+        score=100,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+
+    selected = _select_lexical_context_hits(
+        [implementation, conversation],
+        question_kind=QuestionKind.HISTORY,
+        limit=1,
+    )
+
+    assert selected == [implementation]
+
+
 @pytest.mark.asyncio
 async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus_manager):
     implementation = lexical_hit(
