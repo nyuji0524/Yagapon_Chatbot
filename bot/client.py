@@ -12,6 +12,7 @@ from bot.key_management import KeyManagementManager
 from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
+from bot.scheduled_backfill import ScheduledBackfillManager
 from bot.support_directory import SupportDirectory
 from knowledge_catalog.store import CatalogStore, normalize_label
 
@@ -209,6 +210,7 @@ class YagaPon(discord.Bot):
         self.key_management = KeyManagementManager(self)
         self.catalog = CatalogStore()
         self.recording_replays = RecordingReplayManager(self)
+        self.scheduled_backfill = ScheduledBackfillManager(self)
         self.support_directory = SupportDirectory()
         self._recording_recovery_task: asyncio.Task | None = None
         self._close_lock = asyncio.Lock()
@@ -257,6 +259,7 @@ class YagaPon(discord.Bot):
     async def on_ready(self):
         self.corpus.start_flush_loop()
         self.key_management.start()
+        self.scheduled_backfill.start()
         removed = await asyncio.to_thread(cleanup_old_recordings)
         if removed:
             log.info("Removed %s expired delivered recording(s)", removed)
@@ -835,6 +838,10 @@ class YagaPon(discord.Bot):
                 await self.recording_replays.shutdown(timeout=20)
             except Exception:
                 log.exception("Recording replay shutdown failed; continuing cleanup")
+            try:
+                await self.scheduled_backfill.stop()
+            except Exception:
+                log.exception("Scheduled backfill shutdown failed; continuing cleanup")
             if self._recording_recovery_task and not self._recording_recovery_task.done():
                 self._recording_recovery_task.cancel()
                 try:
