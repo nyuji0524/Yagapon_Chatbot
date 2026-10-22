@@ -80,6 +80,42 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')
     assert contains_secret('{"client_secret": "1234567890abcdefghijklmnop"}')
     assert contains_secret('password = "Prod(Real)Secret123!"')
+    assert contains_secret('password = "!ProdRealSecret123"')
+    assert contains_secret("パスワード: 本番用秘密文字列12345678")
+    assert contains_history_secret("+パスワード: 本番用秘密文字列12345678")
+
+
+def test_source_secret_scanner_blocks_yaml_block_scalars():
+    assert contains_secret("password: |\n  ProdRealSecret123")
+    assert contains_secret("password: >- # stored credential\n\n  ProdRealSecret123")
+    assert contains_secret("password: |\n  example-password\n  ProdRealSecret123")
+    assert not contains_secret("password: |\n  example-password")
+    assert contains_history_secret("+password: |\n+  ProdRealSecret123")
+    assert contains_secret("- password: |2-\n    ProdRealSecret123")
+    assert contains_history_secret("+- password: >2+\n+    ProdRealSecret123")
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        'password = process.env.DB_PASSWORD || "ProdRealSecret123"',
+        'password = x ?? "ProdRealSecret123"',
+        'password = x ?: "ProdRealSecret123"',
+        'password = condition ? "ProdRealSecret123" : process.env.PASSWORD',
+        'password = condition ? process.env.PASSWORD : "ProdRealSecret123"',
+        'api_key = os.getenv("API_KEY", "ProdRealSecret123")',
+        'password = settings.get("PASSWORD", "ProdRealSecret123")',
+        "token = read_secret('TOKEN') or production-token-value",
+    ),
+)
+def test_source_secret_scanner_blocks_concrete_fallbacks(assignment):
+    assert contains_secret(assignment)
+
+
+def test_source_secret_scanner_allows_placeholder_fallback():
+    assert not contains_secret(
+        'password = process.env.DB_PASSWORD || "example-password"'
+    )
 
 
 @pytest.mark.parametrize(
@@ -103,6 +139,9 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         "token = os.environ['GITHUB_TOKEN']",
         "api_key: ${API_KEY}",
         'api_key: "${API_KEY}"',
+        'password: "%PASSWORD%"',
+        'password: "{{ vault_password }}"',
+        'password: "<PASSWORD>"',
         'client_secret: read_secret("CLIENT_SECRET")',
         "password: replace-with-your-password",
         'api_key = "example-api-key-for-docs"',

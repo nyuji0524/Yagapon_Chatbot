@@ -106,18 +106,66 @@ SOURCE_SECRET_PATTERNS = {
 }
 SOURCE_SECRET_ASSIGNMENT = re.compile(
     r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?P<key>password|passwd|client[_ -]?secret|secret|api[_ -]?key|"
+    r"['\"]?(?P<key>password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
     r"access[_ -]?token|refresh[_ -]?token|token)['\"]?"
-    r"\s*(?P<operator>[:=])\s*"
+    r"[ \t]*(?P<operator>[:=])[ \t]*"
     r'(?:"(?P<double>[^"\r\n]{8,})"|'
     r"'(?P<single>[^'\r\n]{8,})'|"
-    r"(?P<unquoted>[^\s'\"`,;#}\]]{8,}))"
+    r"(?P<unquoted>[^\s'\"`,;#]{8,}))"
+)
+SOURCE_SECRET_BLOCK_ASSIGNMENT = re.compile(
+    r"(?im)^(?P<indent>[ \t]*)(?P<sequence>-[ \t]+)?"
+    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
+    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?"
+    r"[ \t]*:[ \t]*[>|](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*"
+    r"(?:#[^\r\n]*)?\r?\n"
+)
+SOURCE_SECRET_FALLBACK_ASSIGNMENT = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
+    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=][^\r\n]{0,4096}?"
+    r"(?:\|\||\?\?|\bor\b|\belse\b)\s*"
+    r'(?:"(?P<double>[^"\r\n]{8,})"|'
+    r"'(?P<single>[^'\r\n]{8,})'|"
+    r"(?P<unquoted>[^\s'\"`,;#]{8,}))"
+)
+SOURCE_SECRET_DEFAULT_ARGUMENT = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
+    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=][^\r\n]{0,4096}?"
+    r"(?:getenv|(?:environ|config|settings|credentials|vault)\.get|read_secret)"
+    r"\([^,\r\n]+,\s*"
+    r'(?:"(?P<double>[^"\r\n]{8,})"|'
+    r"'(?P<single>[^'\r\n]{8,})')"
+)
+SOURCE_SECRET_TERNARY_TRUE_ASSIGNMENT = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
+    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=]"
+    r"[^?\r\n]{0,4096}\?\s*"
+    r'(?:"(?P<double>[^"\r\n]{8,})"|'
+    r"'(?P<single>[^'\r\n]{8,})')"
+)
+SOURCE_SECRET_TERNARY_FALSE_ASSIGNMENT = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
+    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=]"
+    r"[^?\r\n]{0,2048}\?[^:\r\n]{0,2048}:\s*"
+    r'(?:"(?P<double>[^"\r\n]{8,})"|'
+    r"'(?P<single>[^'\r\n]{8,})')"
 )
 SOURCE_SECRET_PLACEHOLDER = re.compile(
     r"(?i)(?:^|[-_./<>{}\s])"
     r"(?:example|sample|placeholder|changeme|change-me|replace|redacted|"
     r"fixture|dummy|fake|not-a-real|your|xxxxx+|todo|goes-here)"
     r"(?:$|[-_./<>{}\s])"
+)
+SOURCE_SECRET_TEMPLATE = re.compile(
+    r"(?ix)(?:"
+    r"\$[A-Z_][A-Z0-9_]*|\$\{[A-Z_][A-Z0-9_]*\}|"
+    r"%[A-Z_][A-Z0-9_]*%|\{\{[^{}\r\n]+\}\}|"
+    r"<[A-Z_][A-Z0-9_-]*>"
+    r")"
 )
 SOURCE_SECRET_TYPES = frozenset(
     {
@@ -138,7 +186,7 @@ SOURCE_SECRET_TYPES = frozenset(
 HISTORY_SECRET_PATTERNS = {
     **SOURCE_SECRET_PATTERNS,
     "sensitive-assignment": re.compile(
-        r"(?i)['\"]?(?:password|passwd|client[_ -]?secret|secret|api[_ -]?key|"
+        r"(?i)['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
         r"access[_ -]?token|refresh[_ -]?token|token|authorization)['\"]?"
         r"\s*[:=]\s*['\"]?[^\s'\",}\]]{8,}"
     ),
@@ -1059,22 +1107,18 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
     )
 
 
-def _concrete_source_secret(match: re.Match[str]) -> bool:
+def _concrete_source_secret_value(
+    value: str,
+    *,
+    operator: str,
+    quoted: bool,
+) -> bool:
     """Separate credential literals from types, placeholders, and references."""
-    quoted = match.group("double") is not None or match.group("single") is not None
-    value = next(
-        candidate
-        for candidate in (
-            match.group("double"),
-            match.group("single"),
-            match.group("unquoted"),
-        )
-        if candidate is not None
-    ).strip()
+    value = value.strip()
     normalized = value.casefold()
     if SOURCE_SECRET_PLACEHOLDER.search(normalized):
         return False
-    if value.startswith(("$", "%", "<", "{{", "*", "&", "!")):
+    if SOURCE_SECRET_TEMPLATE.fullmatch(value):
         return False
     if quoted:
         return True
@@ -1087,7 +1131,7 @@ def _concrete_source_secret(match: re.Match[str]) -> bool:
         "undefined",
     }:
         return False
-    if any(character in value for character in "()[]{}"):
+    if value.startswith(("*", "&", "!")):
         return False
     if re.match(
         r"(?i)(?:os\.(?:environ|environ\.get|getenv)|process\.env|"
@@ -1096,34 +1140,117 @@ def _concrete_source_secret(match: re.Match[str]) -> bool:
         value,
     ):
         return False
-    if re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
+    if operator == "=" and re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
         return False
-    if match.group("operator") == ":" and re.fullmatch(
-        r"[A-Z][A-Za-z0-9_]*(?:\[[^\]]+\])?",
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*\([^\r\n]*\)", value):
+        return False
+    if any(character in value for character in "([") and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_.]*"
+        r"(?:\([A-Za-z_][A-Za-z0-9_.]*)*"
+        r"(?:\(|\[)?(?:br|rb|[rubf])?",
+        value,
+    ):
+        return False
+    if re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_.]*(?:\[[^\]\r\n]+\])+",
+        value,
+    ):
+        return False
+    if operator == ":" and re.match(
+        r"(?i)(?:optional|annotated|union|list|tuple|dict|set|literal)\[",
         value,
     ):
         return False
     if re.fullmatch(
         r"(?i)(?:[a-z][a-z0-9]*_)*(?:api_key|access_token|refresh_token|"
         r"client_secret|token|secret|password|passwd)(?:_value)?",
-        value,
+        value.rstrip(")]}"),
     ):
         return False
     return True
 
 
+def _concrete_source_secret(match: re.Match[str]) -> bool:
+    quoted = match.group("double") is not None or match.group("single") is not None
+    value = next(
+        candidate
+        for candidate in (
+            match.group("double"),
+            match.group("single"),
+            match.group("unquoted"),
+        )
+        if candidate is not None
+    )
+    return _concrete_source_secret_value(
+        value,
+        operator=match.group("operator"),
+        quoted=quoted,
+    )
+
+
+def _concrete_source_secret_fallback(match: re.Match[str]) -> bool:
+    quoted = match.group("double") is not None or match.group("single") is not None
+    value = next(
+        candidate
+        for candidate in (
+            match.group("double"),
+            match.group("single"),
+            match.groupdict().get("unquoted"),
+        )
+        if candidate is not None
+    )
+    return _concrete_source_secret_value(value, operator="=", quoted=quoted)
+
+
+def _contains_source_secret_block(text: str) -> bool:
+    """Inspect every content line in sensitive YAML block scalars."""
+    for match in SOURCE_SECRET_BLOCK_ASSIGNMENT.finditer(text):
+        prefix = match.group("indent") + (match.group("sequence") or "")
+        base_indent = len(prefix.expandtabs(8))
+        for line in text[match.end() :].splitlines():
+            if not line.strip():
+                continue
+            leading = line[: len(line) - len(line.lstrip(" \t"))]
+            indent = len(leading.expandtabs(8))
+            if indent <= base_indent:
+                break
+            if _concrete_source_secret_value(
+                line.strip(),
+                operator=":",
+                quoted=True,
+            ):
+                return True
+    return False
+
+
 def contains_secret(text: str) -> bool:
     if any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values()):
         return True
-    return any(
+    if any(
         _concrete_source_secret(match)
         for match in SOURCE_SECRET_ASSIGNMENT.finditer(text)
-    )
+    ):
+        return True
+    if any(
+        _concrete_source_secret_fallback(match)
+        for pattern in (
+            SOURCE_SECRET_FALLBACK_ASSIGNMENT,
+            SOURCE_SECRET_DEFAULT_ARGUMENT,
+            SOURCE_SECRET_TERNARY_TRUE_ASSIGNMENT,
+            SOURCE_SECRET_TERNARY_FALSE_ASSIGNMENT,
+        )
+        for match in pattern.finditer(text)
+    ):
+        return True
+    return _contains_source_secret_block(text)
 
 
 def contains_history_secret(text: str) -> bool:
     """Fail closed for credentials that may survive only in Git history."""
-    return any(pattern.search(text) for pattern in HISTORY_SECRET_PATTERNS.values())
+    if any(pattern.search(text) for pattern in HISTORY_SECRET_PATTERNS.values()):
+        return True
+    normalized_diff = re.sub(r"(?m)^(?:\+(?!\+\+)|-(?!--))", "", text)
+    return contains_secret(normalized_diff)
 
 
 def document_policy(
