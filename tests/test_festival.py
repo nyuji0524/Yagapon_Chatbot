@@ -79,6 +79,12 @@ def test_invalid_day_is_not_partially_matched(query):
     assert calendar_window_from_query(query, now) is None
 
 
+def test_invalid_explicit_date_disables_even_an_explicit_festival_filter():
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+    assert festival_from_query("27th 2024年10月32日の会議", now) is None
+
+
 @pytest.mark.parametrize("query", ["2024年13月の活動", "2024/13の活動"])
 def test_invalid_month_is_not_partially_matched(query):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
@@ -214,6 +220,23 @@ def test_explicit_multi_month_range_covers_every_mentioned_month():
         "2024年10月9日から2024年12月までの活動",
         now,
     ) == CalendarWindow(date(2024, 10, 1), date(2024, 12, 31))
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "2024年10月1日から2024年10月5日まで",
+        "2024-10-01 - 2024-10-05",
+        "2024-10-01..2024-10-05",
+    ],
+)
+def test_explicit_date_range_preserves_exact_endpoints(query):
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(query, now) == CalendarWindow(
+        date(2024, 10, 1),
+        date(2024, 10, 5),
+    )
 
 
 def test_partially_qualified_multi_month_comparison_is_not_narrowed():

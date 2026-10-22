@@ -14,7 +14,7 @@ _EXPLICIT_DATE_PATTERN = re.compile(
     r"(?:月|[/.-])\s*(\d+)\s*日?(?!\d)"
 )
 _RANGE_SEPARATOR_PATTERN = re.compile(
-    r"(?:から|まで|[〜～~]|\.{2,}|[–—]|(?<=\s)-(?=\s))"
+    r"(?:から|まで|[〜～~]|\.{2,}|[–—]|(?<=\s)-|-(?=\s))"
 )
 
 
@@ -61,10 +61,6 @@ def festival_period(number: int) -> FestivalPeriod:
 def festival_from_query(query: str, now: datetime | None = None) -> int | None:
     """Resolve explicit/relative festival references; leave timeless queries unfiltered."""
     normalized = query.strip()
-    match = re.search(r"(?:第\s*)?(\d{1,3})(?:th|回)", normalized, re.IGNORECASE)
-    if match:
-        return int(match.group(1))
-
     try:
         for explicit_date in _EXPLICIT_DATE_PATTERN.finditer(normalized):
             date(
@@ -76,6 +72,10 @@ def festival_from_query(query: str, now: datetime | None = None) -> int | None:
         # An invalid explicit date must not leave only a broad festival filter;
         # doing so would silently answer a different, year-wide question.
         return None
+
+    match = re.search(r"(?:第\s*)?(\d{1,3})(?:th|回)", normalized, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
 
     dated_matches = list(
         re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?(?!\d)", normalized)
@@ -205,11 +205,13 @@ def calendar_window_from_query(
         return None
     if len(explicit_dates) > 1:
         date_separator = normalized[explicit_dates[0].end():explicit_dates[-1].start()]
-        if (
-            _RANGE_SEPARATOR_PATTERN.search(date_separator)
-            and explicit_date_values[0] > explicit_date_values[-1]
-        ):
-            return None
+        if _RANGE_SEPARATOR_PATTERN.search(date_separator):
+            if explicit_date_values[0] > explicit_date_values[-1]:
+                return None
+            return CalendarWindow(
+                starts_on=explicit_date_values[0],
+                ends_on=explicit_date_values[-1],
+            )
 
     if (
         re.search(r"例年|毎年|過去", normalized)

@@ -2433,6 +2433,9 @@ def test_citation_safety_rejects_credentials_jwt_and_private_contacts(label, url
         ("private\u034f@example.com", "https://example.com/reference"),
         ("API\u034fKEY: supersecret123", "https://example.com/reference"),
         ("履歴", "https://example.com/reference?api\u034f_key=secret"),
+        ("履歴", "https://example.com/%0Abar"),
+        ("履歴", "https://example.com/%00bar"),
+        ("履歴", "https://example.com/%1Fbar"),
     ],
 )
 def test_citation_safety_rejects_invisible_character_obfuscation(label, url):
