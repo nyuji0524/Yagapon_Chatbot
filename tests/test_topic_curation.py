@@ -72,6 +72,25 @@ def test_curation_digest_changes_when_discord_lineage_changes():
     assert curation._digest(document | {"category_name": "選考"}) != original
 
 
+def test_watch_delay_retries_checkpoint_handoff_but_keeps_six_hour_cadence():
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        {"enabled": True, "checkpoint_ready": True},
+    ) == 21_600
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        {"enabled": True, "checkpoint_ready": False},
+    ) == 900
+    assert curation.next_watch_delay(
+        21_600,
+        900,
+        None,
+        cycle_failed=True,
+    ) == 900
+
+
 def topic_draft() -> TopicDraft:
     return TopicDraft(
         title="新歓Webページ",

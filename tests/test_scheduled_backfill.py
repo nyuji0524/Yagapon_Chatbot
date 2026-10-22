@@ -190,15 +190,18 @@ def _forum_bot(
     return bot, archive_calls, prepared_target_ids
 
 
-def test_scheduler_requires_feature_gate_and_explicit_guild_allowlist(monkeypatch):
+def test_scheduler_requires_feature_gate_and_explicit_guild_and_channel_allowlists(monkeypatch):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.delenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", raising=False)
+    monkeypatch.delenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", raising=False)
     assert scheduler_enabled() is False
 
     monkeypatch.setenv(
         "YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS",
         "1,invalid,2,1",
     )
+    assert scheduler_enabled() is False
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10,20")
     assert configured_guild_ids() == (1, 2)
     assert scheduler_enabled() is True
 
@@ -275,6 +278,7 @@ async def test_scheduled_cycle_defers_when_manual_backfill_owns_lock(
 async def test_scheduler_stop_cancels_sleeping_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS", "600")
     state_path = tmp_path / "state.json"
     state_path.write_text(

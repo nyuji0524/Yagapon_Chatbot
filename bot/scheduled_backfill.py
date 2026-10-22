@@ -1,6 +1,6 @@
 """Periodic, resumable Discord history refresh for the RAG corpus.
 
-The scheduler is opt-in and requires an immutable guild-ID allowlist.  It
+The scheduler is opt-in and requires immutable guild/channel-ID allowlists.  It
 reuses the same per-guild lock and per-channel cursors as the manual/API
 backfill paths, so a scheduled cycle never races an operator run.  A durable
 cycle checkpoint lets downstream curation wait for a completed refresh rather
@@ -51,7 +51,7 @@ def configured_guild_ids() -> tuple[int, ...]:
 
 
 def configured_channel_ids() -> frozenset[int]:
-    """Optionally narrow scheduled refreshes to immutable channel IDs."""
+    """Return the immutable channel/forum allowlist required by the scheduler."""
     values = {
         int(raw.strip())
         for raw in os.environ.get("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "").split(",")
@@ -61,8 +61,11 @@ def configured_channel_ids() -> frozenset[int]:
 
 
 def scheduler_enabled() -> bool:
-    return os.environ.get("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false").lower() == "true" and bool(
-        configured_guild_ids()
+    return (
+        os.environ.get("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false").lower()
+        == "true"
+        and bool(configured_guild_ids())
+        and bool(configured_channel_ids())
     )
 
 

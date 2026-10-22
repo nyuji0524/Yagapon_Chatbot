@@ -108,6 +108,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/glossary delete <term>` | 語録から削除 |
 | `/knowledge discord <message_url>` | Discordメッセージと周辺会話をKnowledgeの確認待ち資料として申請（管理者のみ） |
 | `/knowledge drive <drive_url>` | Drive資料を要約・構造化してKnowledgeの確認待ち資料として申請（管理者のみ） |
+| `/knowledge refresh [mode]` | Discord差分取得と議題別Knowledge整理を即時実行（管理者のみ・固定allowlist必須） |
 | `/knowledge status` | 最近の登録申請、機密検知、Draft PR作成状況を確認（管理者のみ） |
 | `/knowledge retry <bundle_id>` | 永続outboxに残った申請を再送（管理者のみ） |
 | `/corpus delete` | コーパスを完全削除 |
@@ -208,8 +209,17 @@ YAGAPON_KNOWLEDGE_CURATION_STATE=/data/knowledge-curation.sqlite3
 YAGAPON_KNOWLEDGE_CURATION_MODEL_CALLS_PER_RUN=6
 YAGAPON_KNOWLEDGE_CURATION_GENERATIONS_PER_RUN=3
 YAGAPON_KNOWLEDGE_CURATION_MAX_OPEN_BUNDLES=5
+YAGAPON_KNOWLEDGE_CURATION_INTERVAL_SECONDS=21600
+YAGAPON_KNOWLEDGE_CURATION_RETRY_SECONDS=900
 YAGAPON_KNOWLEDGE_BACKFILL_STATE=
 YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS=28800
+YAGAPON_SCHEDULED_BACKFILL_ENABLED=false
+YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS=your_discord_guild_id
+# 必須。Text/Forum親/明示的なprivate threadのimmutable ID
+YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS=
+# curationの6時間周期より古いcheckpointを使わないよう、同じ6時間周期を推奨
+YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
+YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
 YAGAPON_MAX_RECORDING_BYTES=4294967296
 YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
 YAGAPON_RECORDING_RETENTION_DAYS=7

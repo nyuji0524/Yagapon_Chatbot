@@ -244,6 +244,7 @@ class YagaPon(discord.Bot):
         self.catalog = CatalogStore()
         self.recording_replays = RecordingReplayManager(self)
         self.scheduled_backfill = ScheduledBackfillManager(self)
+        self.knowledge_refresh_tasks: set[asyncio.Task] = set()
         self.support_directory = SupportDirectory()
         self._recording_recovery_task: asyncio.Task | None = None
         self._close_lock = asyncio.Lock()
@@ -894,6 +895,13 @@ class YagaPon(discord.Bot):
                 await self.scheduled_backfill.stop()
             except Exception:
                 log.exception("Scheduled backfill shutdown failed; continuing cleanup")
+            pending_refreshes = [
+                task for task in self.knowledge_refresh_tasks if not task.done()
+            ]
+            for task in pending_refreshes:
+                task.cancel()
+            if pending_refreshes:
+                await asyncio.gather(*pending_refreshes, return_exceptions=True)
             if self._recording_recovery_task and not self._recording_recovery_task.done():
                 self._recording_recovery_task.cancel()
                 try:

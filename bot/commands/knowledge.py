@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import os
+from pathlib import Path
 
 import discord
 from google.auth.exceptions import RefreshError
@@ -33,10 +34,128 @@ from bot.knowledge_publish import (
     publish_knowledge_bundle,
     retry_knowledge_delivery,
 )
+from bot.scheduled_backfill import configured_guild_ids, scheduler_enabled
 from knowledge_sync.draft import redact_credentials, structure_source
 from knowledge_sync.drive import DriveReader
 
 log = logging.getLogger("yagapon.commands.knowledge")
+
+
+def _curation_state_path() -> Path:
+    return Path(
+        os.environ.get(
+            "YAGAPON_KNOWLEDGE_CURATION_STATE",
+            "/data/knowledge-curation.sqlite3",
+        )
+    )
+
+
+def _curation_batch_limit() -> int:
+    try:
+        configured = int(os.environ.get("YAGAPON_KNOWLEDGE_CURATION_BATCH", "3"))
+    except ValueError:
+        configured = 3
+    return max(1, min(configured, 10))
+
+
+def _run_curation_cycle_sync() -> dict:
+    """Run one curation cycle under the same cross-process lock as the worker."""
+    from knowledge_curation.__main__ import curate_once, curation_lock
+
+    state_path = _curation_state_path()
+    with curation_lock(state_path):
+        return asyncio.run(
+            curate_once(
+                state_path=state_path,
+                limit=_curation_batch_limit(),
+            )
+        )
+
+
+async def _run_curation_cycle() -> dict:
+    return await asyncio.to_thread(_run_curation_cycle_sync)
+
+
+async def _run_knowledge_refresh(bot, *, mode: str) -> dict:
+    """Run the operator-triggered pipeline without bypassing production gates."""
+    result: dict[str, object] = {"mode": mode}
+    if mode == "full":
+        backfill = await bot.scheduled_backfill.run_once()
+        result["backfill"] = backfill
+        if backfill.get("status") != "completed":
+            result["curation"] = {
+                "enabled": True,
+                "checkpoint_ready": False,
+                "checkpoint_reason": "manual-backfill-not-completed",
+                "processed": 0,
+                "queued": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+            return result
+    result["curation"] = await _run_curation_cycle()
+    return result
+
+
+def _knowledge_refresh_status(result: dict) -> str:
+    backfill = result.get("backfill") or {}
+    curation = result.get("curation") or {}
+    if result.get("error_type"):
+        return "failed"
+    if backfill and backfill.get("status") != "completed":
+        return str(backfill.get("status") or "failed")
+    if not curation.get("enabled", False):
+        return "disabled"
+    if not curation.get("checkpoint_ready", True):
+        return "deferred"
+    if int(curation.get("failed") or 0) > 0:
+        return "partial"
+    return "completed"
+
+
+def _knowledge_refresh_embed(result: dict) -> discord.Embed:
+    status = _knowledge_refresh_status(result)
+    presentations = {
+        "completed": ("✅ Knowledge更新が完了したぽん", discord.Color.green()),
+        "partial": ("⚠️ Knowledge更新が一部失敗したぽん", discord.Color.orange()),
+        "deferred": ("⏳ Knowledge更新を保留したぽん", discord.Color.orange()),
+        "disabled": ("⏸️ Knowledge整理は無効だぽん", discord.Color.light_grey()),
+        "busy": ("⏳ 別のKnowledge更新が実行中だぽん", discord.Color.orange()),
+        "failed": ("❌ Knowledge更新に失敗したぽん", discord.Color.red()),
+    }
+    title, color = presentations.get(status, presentations["failed"])
+    embed = discord.Embed(title=title, color=color)
+    backfill = result.get("backfill") or {}
+    if backfill:
+        guilds = list((backfill.get("guilds") or {}).values())
+        embed.add_field(
+            name="Discord差分取得",
+            value=(
+                f"状態: `{backfill.get('status', 'unknown')}`\n"
+                f"チャンネル: {sum(int(item.get('channels_completed') or 0) for item in guilds)} / "
+                f"{sum(int(item.get('channels_total') or 0) for item in guilds)}\n"
+                f"メッセージ: {sum(int(item.get('messages_indexed') or 0) for item in guilds)}\n"
+                f"文書: {sum(int(item.get('documents_uploaded') or 0) for item in guilds)}"
+            ),
+            inline=False,
+        )
+    curation = result.get("curation") or {}
+    checkpoint = str(curation.get("checkpoint_reason") or "ready")
+    embed.add_field(
+        name="議題別Knowledge整理",
+        value=(
+            f"checkpoint: `{checkpoint}`\n"
+            f"処理: {int(curation.get('processed') or 0)} / "
+            f"Draft送信: {int(curation.get('queued') or 0)} / "
+            f"見送り: {int(curation.get('skipped') or 0)} / "
+            f"失敗: {int(curation.get('failed') or 0)}\n"
+            f"再送: {int(curation.get('retried') or 0)} / "
+            f"未確認bundle: {int(curation.get('open_bundles') or 0)}"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="自動更新は6時間ごと。生成物はDraft PRで人の確認が必要です。")
+    return embed
 
 
 def _result_message(result: KnowledgePublishResult) -> str:
@@ -200,6 +319,139 @@ def _read_drive_source(file_id: str):
 
 def register(bot):
     group = bot.create_group("knowledge", "正式ナレッジへの登録候補を管理するぽん")
+    manual_refresh_lock = asyncio.Lock()
+    manual_refresh_tasks: set[asyncio.Task] = getattr(
+        bot,
+        "knowledge_refresh_tasks",
+        set(),
+    )
+
+    @group.command(name="refresh", description="Discord差分取得とKnowledge整理を今すぐ実行するぽん")
+    @discord.default_permissions(administrator=True)
+    @discord.option(
+        "mode",
+        description="Discord差分取得から実行するか、整理だけ実行するか",
+        choices=[
+            discord.OptionChoice("Discord差分取得 → Knowledge整理（推奨）", "full"),
+            discord.OptionChoice("Knowledge整理のみ", "curation"),
+        ],
+        default="full",
+    )
+    async def knowledge_refresh(
+        ctx: discord.ApplicationContext,
+        mode: str = "full",
+    ):
+        if not await require_guild_admin(ctx):
+            return
+        if not ctx.guild:
+            await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
+            return
+        if not await _require_knowledge_guild(ctx):
+            return
+        if os.environ.get("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "false").lower() != "true":
+            await ctx.respond(
+                "⏸️ Knowledge自動整理は本番設定でまだ有効になっていないぽん。",
+                ephemeral=True,
+            )
+            return
+        if mode == "full" and (
+            not scheduler_enabled() or ctx.guild.id not in configured_guild_ids()
+        ):
+            await ctx.respond(
+                "⏸️ このサーバーの定期Discord差分取得が許可されていないぽん。"
+                "固定Guild IDの設定を管理者に確認してほしいぽん。",
+                ephemeral=True,
+            )
+            return
+        if manual_refresh_lock.locked():
+            await ctx.respond(
+                "⏳ このBotでは別のKnowledge即時更新が実行中だぽん。完了後に試してほしいぽん。",
+                ephemeral=True,
+            )
+            return
+        await manual_refresh_lock.acquire()
+        try:
+            await ctx.respond(
+                "🚀 Knowledge更新を開始したぽん。長時間かかっても処理を継続し、"
+                "完了結果をこのチャンネルへ表示するぽん。",
+                ephemeral=True,
+            )
+        except Exception:
+            manual_refresh_lock.release()
+            raise
+        channel = ctx.channel
+        guild_id = ctx.guild.id
+        requester = getattr(ctx.author, "display_name", None) or getattr(ctx.author, "name", "管理者")
+
+        async def run_and_report() -> None:
+            try:
+                try:
+                    result = await _run_knowledge_refresh(bot, mode=mode)
+                except RuntimeError as exc:
+                    if str(exc) == "Another Knowledge curation run is active":
+                        result = {
+                            "mode": mode,
+                            "curation": {
+                                "enabled": True,
+                                "checkpoint_ready": False,
+                                "checkpoint_reason": "curation-already-running",
+                            },
+                        }
+                    else:
+                        raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception("Manual Knowledge refresh failed")
+                    result = {
+                        "mode": mode,
+                        "curation": {
+                            "enabled": True,
+                            "checkpoint_ready": True,
+                            "failed": 1,
+                        },
+                        "error_type": type(exc).__name__,
+                    }
+                status = _knowledge_refresh_status(result)
+                operations = getattr(bot, "operations", None)
+                if operations is not None and hasattr(operations, "record_event"):
+                    try:
+                        curation = result.get("curation") or {}
+                        operations.record_event(
+                            "knowledge",
+                            "manual_refresh",
+                            status,
+                            guild_id=guild_id,
+                            details={
+                                "mode": mode,
+                                "backfill_status": (result.get("backfill") or {}).get("status"),
+                                "checkpoint_ready": curation.get("checkpoint_ready"),
+                                "processed": int(curation.get("processed") or 0),
+                                "queued": int(curation.get("queued") or 0),
+                                "failed": int(curation.get("failed") or 0),
+                            },
+                        )
+                    except Exception:
+                        log.exception("Could not record manual Knowledge refresh telemetry")
+                try:
+                    embed = _knowledge_refresh_embed(result)
+                    embed.set_author(name=f"実行者: {requester}")
+                    await channel.send(embed=embed, silent=True)
+                except Exception:
+                    log.exception("Could not publish manual Knowledge refresh result")
+            finally:
+                manual_refresh_lock.release()
+
+        try:
+            task = asyncio.create_task(
+                run_and_report(),
+                name=f"manual-knowledge-refresh-{guild_id}",
+            )
+        except Exception:
+            manual_refresh_lock.release()
+            raise
+        manual_refresh_tasks.add(task)
+        task.add_done_callback(manual_refresh_tasks.discard)
 
     @group.command(name="discord", description="Discordメッセージを確認待ち資料として申請するぽん")
     @discord.default_permissions(administrator=True)

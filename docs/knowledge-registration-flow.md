@@ -80,6 +80,30 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 
 申請IDは内容ハッシュを含む。同じ原本でも内容が変われば別申請となり、過去PRを黙って上書きしない。
 
+## 定期更新と即時更新
+
+本番では、固定Guild/Channel IDのallowlistに含めたDiscord原文を差分取得し、その完了checkpointを
+確認してから議題別Knowledge整理を行う。どちらも6時間周期とし、失敗またはcheckpoint未完了時だけ
+15分後に再試行する。自動整理が生成するものは確認待ちDraft PRであり、自動マージしない。
+
+サーバー管理者は、同じ経路をDiscordから即時実行できる。
+
+```text
+/knowledge refresh mode:<Discord差分取得 → Knowledge整理（推奨）>
+/knowledge refresh mode:<Knowledge整理のみ>
+```
+
+- `full`相当の推奨モードは、Discord差分取得が全件完了した場合だけ整理へ進む。
+- 整理のみの場合も、最新の正常なbackfill checkpointがなければfail closedで保留する。
+- 定期処理または別の手動処理と重なった場合は、同じプロセス内のasync lockとプロセス間file lockで
+  二重実行を防ぐ。
+- コマンドは即時に受付を返し、長時間処理の結果を実行チャンネルへEmbedで通知する。
+- 対象Guild/Channelはコマンド引数で変更できない。環境変数のimmutable ID allowlistだけを使う。
+- 定期取得はGuild IDとChannel IDの両方が空でない場合だけ有効になる。Forum親IDを許可すると
+  publicなactive/archived投稿を展開するが、private threadはそのthread ID自体を明示した場合だけ扱う。
+- `YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`はKnowledge外部化の別allowlistである。Forum親の許可を
+  private投稿へ暗黙継承しないため、整理対象にする投稿は取得後にthread IDを明示して追加する。
+
 ### 旧outboxを移行する
 
 現行の再送情報を持たない旧bundleは、まず書き込みを行わない診断を実行する。
@@ -159,8 +183,15 @@ YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS=
 YAGAPON_KNOWLEDGE_CURATION_MODEL_CALLS_PER_RUN=6
 YAGAPON_KNOWLEDGE_CURATION_GENERATIONS_PER_RUN=3
 YAGAPON_KNOWLEDGE_CURATION_MAX_OPEN_BUNDLES=5
+YAGAPON_KNOWLEDGE_CURATION_INTERVAL_SECONDS=21600
+YAGAPON_KNOWLEDGE_CURATION_RETRY_SECONDS=900
 YAGAPON_KNOWLEDGE_BACKFILL_STATE=/data/scheduled-backfill-state.json
 YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS=28800
+YAGAPON_SCHEDULED_BACKFILL_ENABLED=false
+YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS=<差分取得を許可するGuild ID>
+YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS=<差分取得を許可するChannel/Forum親ID>
+YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
+YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
 ```
 
 `YAGAPON_KNOWLEDGE_BACKFILL_STATE`は任意である。未設定なら従来どおり独立して整理する。設定時は、

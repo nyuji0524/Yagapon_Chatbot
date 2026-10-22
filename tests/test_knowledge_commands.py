@@ -1,19 +1,99 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from google.auth.exceptions import RefreshError
 
 from bot.commands.knowledge import (
     _channel_lineage,
+    _curation_batch_limit,
     _discord_messages,
     _knowledge_guild_allowed,
+    _knowledge_refresh_status,
     _permission_channel,
     _protected_channel,
     _read_drive_source,
+    _run_knowledge_refresh,
 )
 from bot.google_credentials import GoogleCredentialScopeError
 from bot.knowledge_policy import evaluate_knowledge_export, evaluate_meeting_export
+
+
+def test_curation_batch_limit_is_bounded(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_BATCH", "99")
+    assert _curation_batch_limit() == 10
+
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_BATCH", "invalid")
+    assert _curation_batch_limit() == 3
+
+
+@pytest.mark.asyncio
+async def test_full_knowledge_refresh_runs_backfill_before_curation(monkeypatch):
+    calls = []
+
+    class Backfill:
+        async def run_once(self):
+            calls.append("backfill")
+            return {"status": "completed", "guilds": {}}
+
+    async def curate():
+        calls.append("curation")
+        return {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "processed": 2,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr("bot.commands.knowledge._run_curation_cycle", curate)
+    result = await _run_knowledge_refresh(
+        SimpleNamespace(scheduled_backfill=Backfill()),
+        mode="full",
+    )
+
+    assert calls == ["backfill", "curation"]
+    assert _knowledge_refresh_status(result) == "completed"
+
+
+@pytest.mark.asyncio
+async def test_full_knowledge_refresh_does_not_curate_failed_checkpoint(monkeypatch):
+    class Backfill:
+        async def run_once(self):
+            return {"status": "failed", "guilds": {}}
+
+    curate = AsyncMock()
+    monkeypatch.setattr("bot.commands.knowledge._run_curation_cycle", curate)
+    result = await _run_knowledge_refresh(
+        SimpleNamespace(scheduled_backfill=Backfill()),
+        mode="full",
+    )
+
+    curate.assert_not_awaited()
+    assert result["curation"]["checkpoint_reason"] == "manual-backfill-not-completed"
+    assert _knowledge_refresh_status(result) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_curation_only_refresh_does_not_run_discord_backfill(monkeypatch):
+    backfill = AsyncMock()
+    curate = AsyncMock(
+        return_value={
+            "enabled": True,
+            "checkpoint_ready": False,
+            "checkpoint_reason": "checkpoint-stale",
+        }
+    )
+    monkeypatch.setattr("bot.commands.knowledge._run_curation_cycle", curate)
+
+    result = await _run_knowledge_refresh(
+        SimpleNamespace(scheduled_backfill=SimpleNamespace(run_once=backfill)),
+        mode="curation",
+    )
+
+    backfill.assert_not_awaited()
+    curate.assert_awaited_once()
+    assert _knowledge_refresh_status(result) == "deferred"
 
 
 def test_knowledge_guild_allowlist_uses_explicit_list(monkeypatch):

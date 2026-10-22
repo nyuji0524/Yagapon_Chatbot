@@ -408,6 +408,21 @@ def _positive_int_env(name: str, default: int, *, maximum: int) -> int:
     return max(1, min(parsed, maximum))
 
 
+def next_watch_delay(
+    watch_interval: int,
+    retry_interval: int,
+    result: dict | None,
+    *,
+    cycle_failed: bool = False,
+) -> int:
+    """Use the configured cadence after success and a bounded handoff retry."""
+    if cycle_failed:
+        return min(watch_interval, retry_interval)
+    if result and result.get("enabled") and not result.get("checkpoint_ready", True):
+        return min(watch_interval, retry_interval)
+    return watch_interval
+
+
 def backfill_checkpoint_status(
     *,
     now: datetime | None = None,
@@ -1439,27 +1454,45 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=int(os.environ.get("YAGAPON_KNOWLEDGE_CURATION_BATCH", "3")))
     parser.add_argument("--watch-interval", type=int, default=0)
+    parser.add_argument(
+        "--retry-interval",
+        type=int,
+        default=_positive_int_env(
+            "YAGAPON_KNOWLEDGE_CURATION_RETRY_SECONDS",
+            900,
+            maximum=3600,
+        ),
+    )
     args = parser.parse_args()
     if args.watch_interval and args.watch_interval < 300:
         parser.error("--watch-interval must be at least 300 seconds")
+    if args.retry_interval < 300:
+        parser.error("--retry-interval must be at least 300 seconds")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     while True:
+        cycle_result = None
+        cycle_failed = False
         try:
             with curation_lock(args.state):
-                print(
-                    json.dumps(
-                        asyncio.run(curate_once(state_path=args.state, limit=args.limit)),
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
+                cycle_result = asyncio.run(
+                    curate_once(state_path=args.state, limit=args.limit)
                 )
+                print(json.dumps(cycle_result, ensure_ascii=False), flush=True)
         except Exception:
             if not args.watch_interval:
                 raise
+            cycle_failed = True
             log.exception("Knowledge curation cycle failed; retrying later")
         if not args.watch_interval:
             return
-        time.sleep(args.watch_interval)
+        time.sleep(
+            next_watch_delay(
+                args.watch_interval,
+                args.retry_interval,
+                cycle_result,
+                cycle_failed=cycle_failed,
+            )
+        )
 
 
 if __name__ == "__main__":
