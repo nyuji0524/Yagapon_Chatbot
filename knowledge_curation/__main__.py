@@ -165,6 +165,10 @@ def _digest(document: dict) -> str:
             "status",
             "start_at",
             "end_at",
+            "parent_id",
+            "parent_name",
+            "category_id",
+            "category_name",
             "category",
         )
     }

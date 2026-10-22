@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -7,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.server import create_app, shutdown_backfill_tasks
-from bot.corpus import BackfillResult, RagAnswer
+from bot.corpus import BackfillResult, BackfillSession, RagAnswer
 from bot.rag_judge import QualityJudgment
 from bot.recording_replay import RecordingArtifact, ReplayJob
 
@@ -59,6 +60,13 @@ def make_client():
         get_channel=lambda channel_id: channel if channel_id == 20 else None,
     )
     channel.guild = guild
+    backfill_session = BackfillSession(
+        guild_id=1,
+        target_channel_ids=frozenset({20}),
+        corpus_store_name="fileSearchStores/test",
+        cutoff=datetime(2026, 10, 22, tzinfo=timezone.utc),
+    )
+    backfill_session.prepared = True
     corpus = SimpleNamespace(
         evaluate_answer_quality=AsyncMock(),
         query=AsyncMock(return_value="回答"),
@@ -83,8 +91,8 @@ def make_client():
                 "examples": {},
             }
         ),
-        start_backfill=Mock(return_value=True),
-        finish_backfill=Mock(),
+        prepare_backfill=AsyncMock(return_value=backfill_session),
+        finish_backfill=AsyncMock(return_value=True),
         backfill_channel=AsyncMock(return_value=BackfillResult(
             messages_indexed=2,
             documents_uploaded=1,
@@ -243,7 +251,9 @@ def test_backfill_exposes_job_progress(monkeypatch):
     assert status.json()["channel_concurrency"] == 1
     assert status.json()["messages_indexed"] == 2
     assert status.json()["documents_uploaded"] == 1
-    bot.corpus.finish_backfill.assert_called_once_with(1)
+    bot.corpus.finish_backfill.assert_awaited_once_with(
+        bot.corpus.prepare_backfill.return_value
+    )
 
 
 def test_app_startup_reconciles_stale_backfill_jobs(tmp_path):
@@ -328,7 +338,7 @@ async def test_api_shutdown_cancels_tasks_releases_guards_and_marks_jobs():
     assert app.state.backfill_tasks == set()
     assert app.state.backfill_jobs[job_id]["status"] == "cancelled"
     assert app.state.backfill_jobs[job_id]["finished_at"] is not None
-    bot.corpus.finish_backfill.assert_called_once_with(1)
+    bot.corpus.finish_backfill.assert_not_awaited()
 
 
 def test_backfill_rejects_new_work_after_shutdown_begins(monkeypatch):
@@ -343,7 +353,7 @@ def test_backfill_rejects_new_work_after_shutdown_begins(monkeypatch):
     )
 
     assert response.status_code == 503
-    bot.corpus.start_backfill.assert_not_called()
+    bot.corpus.prepare_backfill.assert_not_awaited()
 
 
 def test_catalog_candidate_can_be_approved_for_glossary(monkeypatch, tmp_path):

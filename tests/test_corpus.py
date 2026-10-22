@@ -90,13 +90,18 @@ class FakeChannel:
     id = 2
     name = "開発"
     topic = "開発の意思決定"
-    category = SimpleNamespace(name="IT局")
+    category = SimpleNamespace(id=90, name="IT局")
+    category_id = 90
+    parent = None
+    parent_id = None
     guild = SimpleNamespace(id=1)
 
     def __init__(self, messages):
         self.messages = messages
+        self.history_kwargs = None
 
     def history(self, **kwargs):
+        self.history_kwargs = kwargs
         async def iterate():
             for message in self.messages:
                 yield message
@@ -114,6 +119,11 @@ def test_knowledge_document_has_traceable_metadata(corpus_manager):
     metadata = {item["key"]: item.get("string_value", item.get("numeric_value")) for item in documents[0].metadata}
 
     assert metadata["channel_id"] == "2"
+    assert metadata["parent_id"] == ""
+    assert metadata["parent_name"] == ""
+    assert metadata["category_id"] == "90"
+    assert metadata["category_name"] == "IT局"
+    assert metadata["category"] == "IT局"
     assert metadata["schema"] == "discord-v2"
     assert metadata["source_url"].endswith("/1")
     assert metadata["message_count"] == 2.0
@@ -138,6 +148,156 @@ async def test_backfill_replaces_old_documents_only_after_all_uploads(corpus_man
     assert result.messages_indexed == 2
     assert result.documents_uploaded == 1
     corpus_manager._delete_documents.assert_awaited_once_with(["documents/old"])
+
+
+@pytest.mark.asyncio
+async def test_prepared_backfill_uses_one_fixed_utc_cutoff(corpus_manager):
+    channel = FakeChannel([fake_message(1)])
+    corpus_manager._existing_channel_documents = AsyncMock(return_value=[])
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+    cutoff = datetime(2026, 10, 22, 3, 4, tzinfo=timezone.utc)
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        cutoff=cutoff,
+    )
+
+    await corpus_manager.backfill_channel(
+        channel,
+        "fileSearchStores/test",
+        session=session,
+    )
+    await corpus_manager.finish_backfill(session)
+
+    assert channel.history_kwargs["before"] == cutoff
+    assert session.completed_channel_ids == {2}
+
+
+@pytest.mark.asyncio
+async def test_prepare_quarantines_only_exact_target_and_flushes_deferred_live_messages(
+    corpus_manager,
+):
+    before = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    corpus_manager.add_message(
+        1, 2, "対象", "member", "履歴側で再取得", before,
+        "fileSearchStores/test", message_id=1,
+    )
+    corpus_manager.add_message(
+        1, 3, "対象のスレッド", "member", "スレッドは触らない", before,
+        "fileSearchStores/test", message_id=2, parent_id=2, parent_name="対象",
+    )
+    cutoff = before + timedelta(minutes=1)
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        cutoff=cutoff,
+    )
+
+    assert (1, 2) not in corpus_manager._buffers
+    assert (1, 2) in session.quarantined_buffers
+    assert (1, 3) in corpus_manager._buffers
+    corpus_manager.add_message(
+        1, 2, "対象", "member", "遅延到着した過去メッセージ", before,
+        "fileSearchStores/test", message_id=3,
+    )
+    corpus_manager.add_message(
+        1, 2, "対象", "member", "cutoff後のメッセージ", cutoff,
+        "fileSearchStores/test", message_id=4,
+        parent_id=10, parent_name="親", category_id=20, category_name="IT局",
+    )
+    assert len(session.quarantined_buffers[(1, 2)].messages) == 2
+    assert len(session.deferred_buffers[(1, 2)].messages) == 1
+    session.completed_channel_ids.add(2)
+    corpus_manager._upload_document = AsyncMock(return_value="documents/live")
+
+    assert await corpus_manager.finish_backfill(session) is True
+    assert await corpus_manager.finish_backfill(session) is True
+
+    corpus_manager._upload_document.assert_awaited_once()
+    uploaded_text = corpus_manager._upload_document.await_args.args[2]
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in corpus_manager._upload_document.await_args.args[3]
+    }
+    assert "cutoff後のメッセージ" in uploaded_text
+    assert "履歴側で再取得" not in uploaded_text
+    assert metadata["parent_id"] == "10"
+    assert metadata["category_id"] == "20"
+    assert metadata["category_name"] == "IT局"
+    assert (1, 3) in corpus_manager._buffers
+    assert corpus_manager._active_backfills == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_backfill_restores_quarantined_live_buffer(corpus_manager):
+    timestamp = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    add_message(corpus_manager, content="失敗時に復元", timestamp=timestamp)
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        cutoff=timestamp + timedelta(minutes=1),
+    )
+    corpus_manager._upload_document = AsyncMock(return_value="documents/restored")
+
+    await corpus_manager.finish_backfill(session)
+
+    assert "失敗時に復元" in corpus_manager._upload_document.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_prepare_reserves_guild_without_touching_live_buffers(corpus_manager):
+    add_message(corpus_manager, content="そのまま残す")
+    original = corpus_manager._buffers[(1, 2)]
+
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        dry_run=True,
+    )
+
+    assert corpus_manager._buffers[(1, 2)] is original
+    assert corpus_manager._active_backfills == {1: session}
+    add_message(corpus_manager, content="dry-run中も通常バッファ")
+    assert len(corpus_manager._buffers[(1, 2)].messages) == 2
+    assert await corpus_manager.finish_backfill(session) is True
+    assert corpus_manager._active_backfills == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_prepare_restores_messages_arriving_while_quiescing(corpus_manager):
+    lock = corpus_manager._guild_flush_lock(1)
+    await lock.acquire()
+    task = asyncio.create_task(
+        corpus_manager.prepare_backfill(
+            1,
+            {2},
+            "fileSearchStores/test",
+            cutoff=datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc),
+        )
+    )
+    await asyncio.sleep(0)
+    session = corpus_manager._active_backfills[1]
+    corpus_manager.add_message(
+        1,
+        2,
+        "対象",
+        "member",
+        "待機中に到着",
+        session.cutoff,
+        "fileSearchStores/test",
+        message_id=10,
+    )
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    lock.release()
+
+    assert corpus_manager._active_backfills == {}
+    assert "待機中に到着" in corpus_manager._buffers[(1, 2)].messages[0]
 
 
 @pytest.mark.asyncio

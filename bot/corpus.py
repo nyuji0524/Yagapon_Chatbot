@@ -345,6 +345,32 @@ class MessageBuffer:
     first_message_id: int | None = None
     last_message_id: int | None = None
     source_url: str = ""
+    parent_id: int | None = None
+    parent_name: str = ""
+    category_id: int | None = None
+    category_name: str = ""
+
+
+@dataclass
+class BackfillSession:
+    """One immutable Discord-history snapshot boundary for a guild.
+
+    Live messages at or after ``cutoff`` are held in ``deferred_buffers``
+    until the snapshot has finished.  Buffers which existed before the
+    snapshot are quarantined per exact target channel so a failed channel can
+    restore them without disturbing threads or unrelated channels.
+    """
+
+    guild_id: int
+    target_channel_ids: frozenset[int]
+    corpus_store_name: str
+    cutoff: datetime
+    dry_run: bool = False
+    quarantined_buffers: dict[tuple[int, int], MessageBuffer] = field(default_factory=dict)
+    deferred_buffers: dict[tuple[int, int], MessageBuffer] = field(default_factory=dict)
+    completed_channel_ids: set[int] = field(default_factory=set)
+    prepared: bool = False
+    finished: bool = False
 
 
 @dataclass(frozen=True)
@@ -402,7 +428,8 @@ class CorpusManager:
         self._flush_task: asyncio.Task | None = None
         self._inflight_flushes: set[asyncio.Task] = set()
         self._scheduled_flush_keys: set[tuple[int, int]] = set()
-        self._active_backfills: set[int] = set()
+        self._active_backfills: dict[int, BackfillSession] = {}
+        self._guild_flush_locks: dict[int, asyncio.Lock] = {}
         # レート制限: {guild_id: {"date": "2026-03-16", "count": 42}}
         self._query_counts: dict[int, dict] = {}
 
@@ -451,6 +478,8 @@ class CorpusManager:
             self._flush_task = None
         if self._inflight_flushes:
             await asyncio.gather(*tuple(self._inflight_flushes), return_exceptions=True)
+        for session in tuple(self._active_backfills.values()):
+            await self.finish_backfill(session)
         await self.flush_all()
 
     async def _flush_loop(self):
@@ -633,11 +662,30 @@ class CorpusManager:
         corpus_store_name: str,
         message_id: int | None = None,
         source_url: str = "",
+        parent_id: int | None = None,
+        parent_name: str = "",
+        category_id: int | None = None,
+        category_name: str = "",
     ):
         """メッセージをバッファに追加。閾値超えたらflushをスケジュール。"""
         key = (guild_id, channel_id)
-        if key not in self._buffers:
-            self._buffers[key] = MessageBuffer(
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        session = self._active_backfills.get(guild_id)
+        buffers = self._buffers
+        if session is not None and not session.dry_run and channel_id in session.target_channel_ids:
+            # The fixed Discord history snapshot owns every pre-cutoff message,
+            # including an old event delivered to on_message slightly late.
+            # Keep that late event quarantined until success is known so a
+            # cancelled snapshot can restore it instead of losing the fallback.
+            buffers = (
+                session.quarantined_buffers
+                if timestamp < session.cutoff
+                else session.deferred_buffers
+            )
+
+        if key not in buffers:
+            buffers[key] = MessageBuffer(
                 channel_name=channel_name,
                 guild_id=guild_id,
                 channel_id=channel_id,
@@ -647,14 +695,16 @@ class CorpusManager:
                 first_message_id=message_id,
                 last_message_id=message_id,
                 source_url=source_url,
+                parent_id=parent_id,
+                parent_name=parent_name,
+                category_id=category_id,
+                category_name=category_name,
             )
 
-        buf = self._buffers[key]
+        buf = buffers[key]
         # セットアップ変更後は、以後のメッセージを現在のストアへ保存する。
         buf.corpus_store_name = corpus_store_name
         buf.last_message_at = max(buf.last_message_at, timestamp)
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
         ts = timestamp.astimezone(JST).strftime("%Y-%m-%d %H:%M")
         buf.messages.append(f"[{ts}] [{author}]: {content}")
         buf.authors[author] = buf.authors.get(author, 0) + 1
@@ -662,9 +712,13 @@ class CorpusManager:
             buf.first_message_id = buf.first_message_id or message_id
             buf.last_message_id = message_id
         buf.source_url = buf.source_url or source_url
+        buf.parent_id = buf.parent_id or parent_id
+        buf.parent_name = buf.parent_name or parent_name
+        buf.category_id = buf.category_id or category_id
+        buf.category_name = buf.category_name or category_name
 
         # メッセージ数閾値
-        if len(buf.messages) >= FLUSH_MESSAGE_THRESHOLD:
+        if buffers is self._buffers and len(buf.messages) >= FLUSH_MESSAGE_THRESHOLD:
             self._schedule_flush(key, corpus_store_name)
 
     def _schedule_flush(self, key: tuple[int, int], corpus_store_name: str) -> None:
@@ -683,7 +737,27 @@ class CorpusManager:
         self._inflight_flushes.add(task)
         task.add_done_callback(self._inflight_flushes.discard)
 
+    def _guild_flush_lock(self, guild_id: int) -> asyncio.Lock:
+        lock = self._guild_flush_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._guild_flush_locks[guild_id] = lock
+        return lock
+
     async def _flush_buffer(self, key: tuple[int, int], corpus_store_name: str | None = None) -> bool:
+        async with self._guild_flush_lock(key[0]):
+            session = self._active_backfills.get(key[0])
+            if session is not None and not session.dry_run and key[1] in session.target_channel_ids:
+                # prepare_backfill owns this exact channel.  A threshold task
+                # queued just before preparation must not race the snapshot.
+                return True
+            return await self._flush_buffer_locked(key, corpus_store_name)
+
+    async def _flush_buffer_locked(
+        self,
+        key: tuple[int, int],
+        corpus_store_name: str | None = None,
+    ) -> bool:
         buf = self._buffers.pop(key, None)
         if not buf or not buf.messages:
             return True
@@ -710,6 +784,12 @@ class CorpusManager:
             {"key": "guild_id", "string_value": str(buf.guild_id)},
             {"key": "channel_id", "string_value": str(buf.channel_id)},
             {"key": "channel_name", "string_value": buf.channel_name[:500]},
+            {"key": "parent_id", "string_value": str(buf.parent_id or "")},
+            {"key": "parent_name", "string_value": buf.parent_name[:500]},
+            {"key": "category_id", "string_value": str(buf.category_id or "")},
+            {"key": "category_name", "string_value": buf.category_name[:500]},
+            # Keep the legacy category name for existing curation consumers.
+            {"key": "category", "string_value": buf.category_name[:500]},
             {"key": "start_at", "string_value": start_at.isoformat()},
             {"key": "end_at", "string_value": end_at.isoformat()},
             {"key": "start_epoch", "numeric_value": start_at.timestamp()},
@@ -754,6 +834,10 @@ class CorpusManager:
         current.last_message_at = max(failed.last_message_at, current.last_message_at)
         current.first_message_id = failed.first_message_id or current.first_message_id
         current.source_url = failed.source_url or current.source_url
+        current.parent_id = current.parent_id or failed.parent_id
+        current.parent_name = current.parent_name or failed.parent_name
+        current.category_id = current.category_id or failed.category_id
+        current.category_name = current.category_name or failed.category_name
 
     async def flush_all(self, corpus_store_name_lookup=None):
         """全バッファをflush。corpus_store_name_lookup: guild_id -> store_name"""
@@ -1518,7 +1602,16 @@ class CorpusManager:
         guild_id = int(channel.guild.id)
         channel_id = int(channel.id)
         channel_name = str(channel.name)
-        category = getattr(getattr(channel, "category", None), "name", "") or ""
+        parent = getattr(channel, "parent", None)
+        parent_id = getattr(channel, "parent_id", None) or getattr(parent, "id", None)
+        parent_name = str(getattr(parent, "name", "") or "")
+        category = getattr(channel, "category", None) or getattr(parent, "category", None)
+        category_id = (
+            getattr(channel, "category_id", None)
+            or getattr(category, "id", None)
+            or getattr(parent, "category_id", None)
+        )
+        category_name = str(getattr(category, "name", "") or "")
         topic = (getattr(channel, "topic", None) or "").strip()
         documents = []
         for group in cls._split_knowledge_messages(messages):
@@ -1542,7 +1635,8 @@ class CorpusManager:
             header = [
                 "文書種別: Discord会話記録",
                 f"チャンネル: #{channel_name}",
-                f"カテゴリ: {category or 'なし'}",
+                f"親チャンネル: {parent_name or 'なし'}",
+                f"カテゴリ: {category_name or 'なし'}",
                 f"期間: {start_at.isoformat(timespec='minutes')} ～ {end_at.isoformat(timespec='minutes')}",
                 f"参加者: {participants}",
                 f"発言数: {len(group)}",
@@ -1566,7 +1660,12 @@ class CorpusManager:
                 {"key": "guild_id", "string_value": str(guild_id)},
                 {"key": "channel_id", "string_value": str(channel_id)},
                 {"key": "channel_name", "string_value": channel_name[:500]},
-                {"key": "category", "string_value": category[:500]},
+                {"key": "parent_id", "string_value": str(parent_id or "")},
+                {"key": "parent_name", "string_value": parent_name[:500]},
+                {"key": "category_id", "string_value": str(category_id or "")},
+                {"key": "category_name", "string_value": category_name[:500]},
+                # Retained for readers created before explicit Discord lineage.
+                {"key": "category", "string_value": category_name[:500]},
                 {"key": "start_at", "string_value": start_at.isoformat()},
                 {"key": "end_at", "string_value": end_at.isoformat()},
                 {"key": "start_epoch", "numeric_value": start_at.timestamp()},
@@ -1645,18 +1744,33 @@ class CorpusManager:
         channel,
         corpus_store_name: str,
         after=None,
+        before=None,
         progress_callback=None,
         replace_existing: bool = True,
         dry_run: bool = False,
+        session: BackfillSession | None = None,
     ) -> BackfillResult:
         """履歴を再現可能な文書へ変換し、成功後に同範囲の旧文書を置換する。"""
+        if session is not None:
+            if int(channel.guild.id) != session.guild_id:
+                raise ValueError("Backfill session guild does not match channel")
+            if int(channel.id) not in session.target_channel_ids:
+                raise ValueError("Channel is outside the prepared backfill session")
+            if bool(dry_run) != session.dry_run:
+                raise ValueError("Backfill dry-run mode does not match prepared session")
+            before = session.cutoff
         result = BackfillResult()
         existing = []
         if replace_existing:
             existing = await self._existing_channel_documents(corpus_store_name, channel, after)
 
         messages = []
-        async for message in channel.history(limit=None, after=after, oldest_first=True):
+        async for message in channel.history(
+            limit=None,
+            after=after,
+            before=before,
+            oldest_first=True,
+        ):
             result.messages_seen += 1
             knowledge_message = self._knowledge_message(message)
             if knowledge_message is None:
@@ -1710,14 +1824,136 @@ class CorpusManager:
                 raise RuntimeError(
                     f"Could not replace all existing channel documents ({deleted}/{len(existing)} deleted)"
                 )
+        if session is not None and not session.dry_run:
+            session.completed_channel_ids.add(int(channel.id))
         return result
 
-    def start_backfill(self, guild_id: int) -> bool:
-        """同じサーバーへの重複実行を防ぐ。"""
-        if guild_id in self._active_backfills:
-            return False
-        self._active_backfills.add(guild_id)
-        return True
+    async def prepare_backfill(
+        self,
+        guild_id: int,
+        target_channel_ids,
+        corpus_store_name: str,
+        *,
+        dry_run: bool = False,
+        cutoff: datetime | None = None,
+    ) -> BackfillSession | None:
+        """Freeze one exact, per-guild history boundary before replacement.
 
-    def finish_backfill(self, guild_id: int):
-        self._active_backfills.discard(guild_id)
+        A dry run returns the same immutable boundary and reserves the guild,
+        but never touches live buffers or flush scheduling. A real run first
+        publishes the session synchronously, making new target-channel events
+        deferred, then waits for the per-guild flush lock and quarantines only
+        those exact channel buffers. Thread buffers have different IDs and
+        remain untouched.
+        """
+        normalized_ids = frozenset(int(value) for value in target_channel_ids)
+        if not normalized_ids:
+            raise ValueError("Backfill requires at least one target channel")
+        snapshot_at = cutoff or datetime.now(timezone.utc)
+        if snapshot_at.tzinfo is None:
+            snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+        snapshot_at = snapshot_at.astimezone(timezone.utc)
+        session = BackfillSession(
+            guild_id=int(guild_id),
+            target_channel_ids=normalized_ids,
+            corpus_store_name=corpus_store_name,
+            cutoff=snapshot_at,
+            dry_run=dry_run,
+        )
+        if guild_id in self._active_backfills:
+            return None
+        # No await before publishing. A dry-run uses the guard only; a real run
+        # also makes on_message defer post-cutoff target events.
+        self._active_backfills[guild_id] = session
+        if dry_run:
+            session.prepared = True
+            return session
+        try:
+            async with self._guild_flush_lock(guild_id):
+                if self._active_backfills.get(guild_id) is not session:
+                    return None
+                for channel_id in session.target_channel_ids:
+                    key = (guild_id, channel_id)
+                    buffered = self._buffers.pop(key, None)
+                    if buffered is not None:
+                        self._merge_buffer(session.quarantined_buffers, key, buffered)
+                session.prepared = True
+        except BaseException:
+            if self._active_backfills.get(guild_id) is session:
+                self._active_backfills.pop(guild_id, None)
+                for key, buffered in session.quarantined_buffers.items():
+                    self._merge_buffer(self._buffers, key, buffered)
+                for key, buffered in session.deferred_buffers.items():
+                    self._merge_buffer(self._buffers, key, buffered)
+            raise
+        return session
+
+    @staticmethod
+    def _merge_buffer(
+        destination: dict[tuple[int, int], MessageBuffer],
+        key: tuple[int, int],
+        incoming: MessageBuffer,
+    ) -> None:
+        current = destination.get(key)
+        if current is None:
+            destination[key] = incoming
+            return
+        incoming_is_earlier = incoming.first_message_at <= current.first_message_at
+        if incoming_is_earlier:
+            current.messages = incoming.messages + current.messages
+            first_message_id = incoming.first_message_id or current.first_message_id
+            last_message_id = current.last_message_id or incoming.last_message_id
+        else:
+            current.messages.extend(incoming.messages)
+            first_message_id = current.first_message_id or incoming.first_message_id
+            last_message_id = incoming.last_message_id or current.last_message_id
+        for author, count in incoming.authors.items():
+            current.authors[author] = current.authors.get(author, 0) + count
+        current.first_message_at = min(incoming.first_message_at, current.first_message_at)
+        current.last_message_at = max(incoming.last_message_at, current.last_message_at)
+        current.first_message_id = first_message_id
+        current.last_message_id = last_message_id
+        current.source_url = incoming.source_url or current.source_url
+        current.parent_id = current.parent_id or incoming.parent_id
+        current.parent_name = current.parent_name or incoming.parent_name
+        current.category_id = current.category_id or incoming.category_id
+        current.category_name = current.category_name or incoming.category_name
+
+    async def finish_backfill(self, session: BackfillSession | None) -> bool:
+        """Release a session once and flush all post-cutoff live messages.
+
+        Calling this method more than once is harmless.  Pre-cutoff buffers are
+        discarded only for channels whose replacement completed; failed or
+        cancelled channels have their quarantined messages restored.
+        """
+        if session is None:
+            return True
+        if session.dry_run:
+            if self._active_backfills.get(session.guild_id) is session:
+                self._active_backfills.pop(session.guild_id, None)
+            session.finished = True
+            return True
+        guild_id = session.guild_id
+        keys_to_flush: set[tuple[int, int]] = set()
+        async with self._guild_flush_lock(guild_id):
+            if self._active_backfills.get(guild_id) is not session:
+                session.finished = True
+                return True
+            # Failed channels must retain their pre-cutoff live copy. Successful
+            # channels are now represented by the bounded history snapshot.
+            for key, buffered in session.quarantined_buffers.items():
+                if key[1] not in session.completed_channel_ids:
+                    self._merge_buffer(self._buffers, key, buffered)
+                    keys_to_flush.add(key)
+            for key, buffered in session.deferred_buffers.items():
+                self._merge_buffer(self._buffers, key, buffered)
+                keys_to_flush.add(key)
+            session.quarantined_buffers.clear()
+            session.deferred_buffers.clear()
+            self._active_backfills.pop(guild_id, None)
+            session.finished = True
+
+        outcomes = []
+        for key in sorted(keys_to_flush):
+            outcomes.append(await self._flush_buffer(key, session.corpus_store_name))
+        return all(outcomes)

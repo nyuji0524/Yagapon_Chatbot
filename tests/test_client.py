@@ -7,6 +7,7 @@ from bot.client import (
     YagaPon,
     _clean_rag_query,
     _decorate_rag_answer,
+    _discord_channel_lineage,
     _guild_yagapon_emojis,
     _is_ignored_with_parent,
     _is_rag_invocation,
@@ -122,6 +123,26 @@ def test_ignore_is_inherited_by_threads():
         1,
         SimpleNamespace(id=12, parent_id=20),
     )
+
+
+def test_discord_channel_lineage_resolves_thread_parent_and_category():
+    category = SimpleNamespace(id=30, name="03会議")
+    parent = SimpleNamespace(id=20, name="タスク・議題", category=category, category_id=30)
+    thread = SimpleNamespace(
+        id=10,
+        name="新歓Web",
+        parent=parent,
+        parent_id=20,
+        category=None,
+        category_id=None,
+    )
+
+    assert _discord_channel_lineage(thread) == {
+        "parent_id": 20,
+        "parent_name": "タスク・議題",
+        "category_id": 30,
+        "category_name": "03会議",
+    }
 
 
 def test_guild_yagapon_emojis_only_returns_available_usable_custom_emojis():

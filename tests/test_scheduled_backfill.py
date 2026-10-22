@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from bot.corpus import BackfillResult
+from bot.corpus import BackfillResult, BackfillSession
 from bot.scheduled_backfill import (
     ScheduledBackfillManager,
     configured_guild_ids,
@@ -44,9 +44,16 @@ def _bot(*, failing_channel_id=None):
         has_backfill_cursors=lambda _guild_id: False,
         set_backfill_cursor=AsyncMock(),
     )
+    session = BackfillSession(
+        guild_id=1,
+        target_channel_ids=frozenset({10, 20}),
+        corpus_store_name="fileSearchStores/test",
+        cutoff=datetime(2026, 10, 22, tzinfo=timezone.utc),
+    )
+    session.prepared = True
     corpus = SimpleNamespace(
-        start_backfill=Mock(return_value=True),
-        finish_backfill=Mock(),
+        prepare_backfill=AsyncMock(return_value=session),
+        finish_backfill=AsyncMock(return_value=True),
         backfill_channel=AsyncMock(side_effect=backfill),
     )
     return SimpleNamespace(
@@ -91,7 +98,9 @@ async def test_scheduled_cycle_is_incremental_and_checkpoints_after_completion(
     assert guild["eligible_channel_ids"] == ["10", "20"]
     assert guild["completed_channel_ids"] == ["10", "20"]
     assert bot.config.set_backfill_cursor.await_count == 2
-    assert bot.corpus.finish_backfill.call_args_list == [((1,), {})]
+    bot.corpus.finish_backfill.assert_awaited_once_with(
+        bot.corpus.prepare_backfill.return_value
+    )
     assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "completed"
     assert not state_path.with_suffix(".json.tmp").exists()
 
@@ -116,7 +125,9 @@ async def test_scheduled_cycle_keeps_other_channels_when_one_fails(
     assert guild["failures"] == [
         {"channel_id": "20", "error_type": "RuntimeError"}
     ]
-    bot.corpus.finish_backfill.assert_called_once_with(1)
+    bot.corpus.finish_backfill.assert_awaited_once_with(
+        bot.corpus.prepare_backfill.return_value
+    )
 
 
 @pytest.mark.asyncio
@@ -126,7 +137,7 @@ async def test_scheduled_cycle_defers_when_manual_backfill_owns_lock(
 ):
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
     bot = _bot()
-    bot.corpus.start_backfill.return_value = False
+    bot.corpus.prepare_backfill.return_value = None
 
     result = await ScheduledBackfillManager(
         bot,
@@ -137,7 +148,7 @@ async def test_scheduled_cycle_defers_when_manual_backfill_owns_lock(
     assert result["status"] == "failed"
     assert guild["status"] == "deferred"
     bot.corpus.backfill_channel.assert_not_awaited()
-    bot.corpus.finish_backfill.assert_not_called()
+    bot.corpus.finish_backfill.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -184,7 +195,10 @@ async def test_scheduled_cycle_rejects_missing_configured_channel_and_releases_l
     assert result["discovered_channel_ids"] == ["10", "20", "30"]
     assert result["eligible_channel_ids"] == ["10"]
     assert result["missing_channel_ids"] == ["999"]
-    bot.corpus.finish_backfill.assert_called_once_with(1)
+    bot.corpus.prepare_backfill.assert_awaited_once()
+    bot.corpus.finish_backfill.assert_awaited_once_with(
+        bot.corpus.prepare_backfill.return_value
+    )
 
 
 @pytest.mark.asyncio

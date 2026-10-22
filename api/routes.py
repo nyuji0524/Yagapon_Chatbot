@@ -133,8 +133,16 @@ async def backfill(request: Request, body: BackfillRequest):
             if ch.permissions_for(guild.me).read_message_history
             and not bot.config.is_ignored(body.guild_id, ch.id)
         ]
+    if not channels:
+        raise HTTPException(404, "No readable channels available for backfill")
 
-    if not bot.corpus.start_backfill(body.guild_id):
+    session = await bot.corpus.prepare_backfill(
+        body.guild_id,
+        (channel.id for channel in channels),
+        corpus,
+        dry_run=body.dry_run,
+    )
+    if session is None:
         raise HTTPException(409, "Backfill already running for this guild")
 
     concurrency = min(len(channels), backfill_channel_concurrency())
@@ -151,11 +159,19 @@ async def backfill(request: Request, body: BackfillRequest):
         "documents_replaced": 0,
         "failures": [],
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "cutoff_at": session.cutoff.isoformat(),
         "finished_at": None,
     }
     request.app.state.backfill_jobs[job_id] = job
-    if hasattr(bot.operations, "start_job"):
-        bot.operations.start_job("backfill", guild_id=body.guild_id, job_id=job_id, progress=job)
+    request.app.state.backfill_sessions[job_id] = session
+    try:
+        if hasattr(bot.operations, "start_job"):
+            bot.operations.start_job("backfill", guild_id=body.guild_id, job_id=job_id, progress=job)
+    except Exception:
+        request.app.state.backfill_jobs.pop(job_id, None)
+        request.app.state.backfill_sessions.pop(job_id, None)
+        await bot.corpus.finish_backfill(session)
+        raise
 
     async def run():
         job_lock = asyncio.Lock()
@@ -169,15 +185,18 @@ async def backfill(request: Request, body: BackfillRequest):
                         bot.config,
                         body.guild_id,
                         ch.id,
+                        now=session.cutoff,
                     )
                 else:
-                    after = datetime.now(timezone.utc) - timedelta(days=body.days) if body.days else None
+                    after = session.cutoff - timedelta(days=body.days) if body.days else None
                 result = await bot.corpus.backfill_channel(
                     ch,
                     corpus,
                     after=after,
+                    before=session.cutoff,
                     replace_existing=True,
                     dry_run=body.dry_run,
+                    session=session,
                 )
                 if result.latest_message_id and result.latest_message_at and not body.dry_run:
                     await bot.config.set_backfill_cursor(
@@ -223,7 +242,8 @@ async def backfill(request: Request, body: BackfillRequest):
             log.exception("API backfill job failed: %s", job_id)
         finally:
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
-            bot.corpus.finish_backfill(body.guild_id)
+            await bot.corpus.finish_backfill(session)
+            request.app.state.backfill_sessions.pop(job_id, None)
             if hasattr(bot.operations, "update_job"):
                 try:
                     bot.operations.update_job(job_id, job["status"], job)

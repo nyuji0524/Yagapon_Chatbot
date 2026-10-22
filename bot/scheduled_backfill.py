@@ -245,16 +245,9 @@ class ScheduledBackfillManager:
                 "reason": "guild-or-corpus-unavailable",
                 "missing_channel_ids": [str(value) for value in sorted(selected_ids)],
             }
-        if not self.bot.corpus.start_backfill(guild_id):
-            # A manual or API run owns the same lock. This is a normal deferred
-            # cycle, not a second concurrent refresh.
-            return base_summary | {
-                "status": "deferred",
-                "reason": "backfill-already-running",
-            }
-
         summary = dict(base_summary)
         summary_lock = asyncio.Lock()
+        session = None
 
         async def process_channel(channel) -> None:
             try:
@@ -262,13 +255,16 @@ class ScheduledBackfillManager:
                     self.bot.config,
                     guild_id,
                     channel.id,
+                    now=session.cutoff,
                 )
                 channel_result = await self.bot.corpus.backfill_channel(
                     channel,
                     corpus_store,
                     after=after,
+                    before=session.cutoff,
                     replace_existing=True,
                     dry_run=False,
+                    session=session,
                 )
                 if channel_result.latest_message_id and channel_result.latest_message_at:
                     await self.bot.config.set_backfill_cursor(
@@ -336,6 +332,15 @@ class ScheduledBackfillManager:
                 summary["status"] = "failed"
                 summary["reason"] = "configured-channels-not-readable"
                 return summary
+            session = await self.bot.corpus.prepare_backfill(
+                guild_id,
+                (channel.id for channel in channels),
+                corpus_store,
+            )
+            if session is None:
+                summary["status"] = "deferred"
+                summary["reason"] = "backfill-already-running"
+                return summary
             await run_backfill_channels(
                 channels,
                 process_channel,
@@ -354,7 +359,8 @@ class ScheduledBackfillManager:
             summary["failures"].append({"channel_id": None, "error_type": type(exc).__name__})
             log.exception("Scheduled backfill failed while preparing guild=%s", guild_id)
         finally:
-            self.bot.corpus.finish_backfill(guild_id)
+            if session is not None:
+                await self.bot.corpus.finish_backfill(session)
             operations = getattr(self.bot, "operations", None)
             if operations is not None and hasattr(operations, "record_event"):
                 try:

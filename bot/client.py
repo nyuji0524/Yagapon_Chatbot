@@ -116,6 +116,25 @@ def _is_ignored_with_parent(config, guild_id: int, channel) -> bool:
     return any(config.is_ignored(guild_id, int(channel_id)) for channel_id in identifiers)
 
 
+def _discord_channel_lineage(channel) -> dict[str, object]:
+    """Return stable thread/parent/category identities for RAG access checks."""
+    parent = getattr(channel, "parent", None)
+    parent_id = getattr(channel, "parent_id", None) or getattr(parent, "id", None)
+    parent_name = str(getattr(parent, "name", "") or "")
+    category = getattr(channel, "category", None) or getattr(parent, "category", None)
+    category_id = (
+        getattr(channel, "category_id", None)
+        or getattr(category, "id", None)
+        or getattr(parent, "category_id", None)
+    )
+    return {
+        "parent_id": int(parent_id) if parent_id is not None else None,
+        "parent_name": parent_name,
+        "category_id": int(category_id) if category_id is not None else None,
+        "category_name": str(getattr(category, "name", "") or ""),
+    }
+
+
 def _guild_yagapon_emojis(guild) -> dict[str, str]:
     """Return custom YagaPon emojis which the bot can use in this guild."""
     emojis: dict[str, str] = {}
@@ -650,6 +669,7 @@ class YagaPon(discord.Bot):
         if len(learning_content) < 4 and not message.attachments:
             return
 
+        lineage = _discord_channel_lineage(message.channel)
         self.corpus.add_message(
             guild_id=guild_id,
             channel_id=message.channel.id,
@@ -660,6 +680,7 @@ class YagaPon(discord.Bot):
             corpus_store_name=corpus,
             message_id=message.id,
             source_url=getattr(message, "jump_url", ""),
+            **lineage,
         )
 
         # スマートリアクション (別モジュールで処理)

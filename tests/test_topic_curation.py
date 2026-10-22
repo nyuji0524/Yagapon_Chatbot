@@ -54,6 +54,24 @@ def evidence(
     )
 
 
+def test_curation_digest_changes_when_discord_lineage_changes():
+    document = {
+        "body": "同じ本文",
+        "guild_id": 1,
+        "channel_id": 10,
+        "access_scope": "channel",
+        "parent_id": 20,
+        "parent_name": "親",
+        "category_id": 30,
+        "category_name": "会議",
+        "category": "会議",
+    }
+
+    original = curation._digest(document)
+    assert curation._digest(document | {"parent_id": 21}) != original
+    assert curation._digest(document | {"category_name": "選考"}) != original
+
+
 def topic_draft() -> TopicDraft:
     return TopicDraft(
         title="新歓Webページ",
