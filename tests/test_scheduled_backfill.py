@@ -10,6 +10,7 @@ from bot.corpus import BackfillResult, BackfillSession
 from bot.scheduled_backfill import (
     ScheduledBackfillManager,
     configured_guild_ids,
+    next_backfill_delay,
     scheduler_enabled,
 )
 
@@ -204,6 +205,23 @@ def test_scheduler_requires_feature_gate_and_explicit_guild_and_channel_allowlis
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10,20")
     assert configured_guild_ids() == (1, 2)
     assert scheduler_enabled() is True
+
+
+def test_backfill_retry_keeps_six_hour_success_cadence():
+    six_hours = 6 * 60 * 60
+    fifteen_minutes = 15 * 60
+
+    assert next_backfill_delay(
+        six_hours,
+        fifteen_minutes,
+        {"status": "completed"},
+    ) == six_hours
+    assert next_backfill_delay(
+        six_hours,
+        fifteen_minutes,
+        {"status": "failed"},
+    ) == fifteen_minutes
+    assert next_backfill_delay(six_hours, fifteen_minutes, None) == fifteen_minutes
 
 
 @pytest.mark.asyncio

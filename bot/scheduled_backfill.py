@@ -29,6 +29,7 @@ log = logging.getLogger("yagapon.scheduled_backfill")
 DEFAULT_INTERVAL_SECONDS = 6 * 60 * 60
 MIN_INTERVAL_SECONDS = 6 * 60 * 60
 DEFAULT_INITIAL_DELAY_SECONDS = 5 * 60
+DEFAULT_RETRY_SECONDS = 15 * 60
 
 
 def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
@@ -67,6 +68,13 @@ def scheduler_enabled() -> bool:
         and bool(configured_guild_ids())
         and bool(configured_channel_ids())
     )
+
+
+def next_backfill_delay(interval: int, retry_interval: int, result: dict | None) -> int:
+    """Keep the six-hour cadence after success and retry failed handoffs sooner."""
+    if not result or result.get("status") != "completed":
+        return min(interval, retry_interval)
+    return interval
 
 
 def _write_state(path: Path, payload: dict) -> None:
@@ -239,18 +247,26 @@ class ScheduledBackfillManager:
             DEFAULT_INTERVAL_SECONDS,
             minimum=MIN_INTERVAL_SECONDS,
         )
+        retry_interval = _positive_int_env(
+            "YAGAPON_SCHEDULED_BACKFILL_RETRY_SECONDS",
+            DEFAULT_RETRY_SECONDS,
+            minimum=300,
+        )
         if initial_delay:
             await asyncio.sleep(initial_delay)
         while True:
+            result = None
             try:
-                await self.run_once()
+                result = await self.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # The loop must remain available for the next interval. Each
                 # guild/channel failure is also isolated inside run_once.
                 log.exception("Scheduled Discord backfill cycle failed")
-            await asyncio.sleep(interval)
+            await asyncio.sleep(
+                next_backfill_delay(interval, retry_interval, result)
+            )
 
     async def run_once(self) -> dict:
         if self._run_lock.locked():
