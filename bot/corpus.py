@@ -3221,6 +3221,16 @@ class CorpusManager:
                             if document_end is None:
                                 document_end = inferred_end.timestamp()
             if (
+                (after_timestamp is not None or before_timestamp is not None)
+                and document_start is not None
+                and document_end is not None
+                and document_start > document_end
+            ):
+                # Conflicting legacy name/metadata is not proof that the
+                # document is contained by a bounded fetch. Preserve it for a
+                # later unbounded maintenance rebuild.
+                continue
+            if (
                 after_timestamp is not None
                 and (document_start is None or document_start <= after_timestamp)
             ):

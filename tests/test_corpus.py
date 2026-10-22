@@ -473,6 +473,16 @@ async def test_bounded_replacement_keeps_imprecise_or_invalid_legacy_end(
             "display_name": "#開発 | 2027-01-01 00:00-2027-02-30 00:30",
             "metadata": discord_document_metadata(2, start_epoch=start.timestamp()),
         },
+        {
+            "name": "documents/conflicting-legacy-range",
+            "display_name": "#開発 | 2027-01-01 00:00-2027-01-01 00:00",
+            "metadata": discord_document_metadata(
+                2,
+                start_epoch=datetime(
+                    2027, 1, 2, 0, 0, tzinfo=timezone.utc
+                ).timestamp(),
+            ),
+        },
     )
 
     matches = await corpus_manager._existing_channel_documents(
