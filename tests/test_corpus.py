@@ -2777,6 +2777,50 @@ async def test_upload_waits_for_indexing_completion(corpus_manager):
 
 
 @pytest.mark.asyncio
+async def test_upload_caps_remote_metadata_without_truncating_local_mirror(corpus_manager):
+    complete = SimpleNamespace(
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/indexed"),
+    )
+    corpus_manager._client.file_search_stores.upload_to_file_search_store.return_value = complete
+    corpus_manager.rag_store.upsert_document = Mock()
+    messages = [
+        corpus_manager._knowledge_message(fake_message(1)),
+        corpus_manager._knowledge_message(fake_message(2, 1)),
+    ]
+    metadata = corpus_manager._build_knowledge_documents(FakeChannel([]), messages)[0].metadata
+
+    result = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        metadata,
+    )
+
+    assert result == "documents/indexed"
+    config = corpus_manager._client.file_search_stores.upload_to_file_search_store.call_args.kwargs[
+        "config"
+    ]
+    remote_metadata = config["custom_metadata"]
+    remote_keys = {item["key"] for item in remote_metadata}
+    assert len(metadata) > corpus_module.FILE_SEARCH_CUSTOM_METADATA_LIMIT
+    assert len(remote_metadata) == corpus_module.FILE_SEARCH_CUSTOM_METADATA_LIMIT
+    assert {
+        "document_key",
+        "guild_id",
+        "channel_id",
+        "access_scope",
+        "start_epoch",
+        "end_epoch",
+        "source_url",
+        "content_sha256",
+    } <= remote_keys
+    corpus_manager.rag_store.upsert_document.assert_called_once()
+    assert corpus_manager.rag_store.upsert_document.call_args.args[2] is metadata
+
+
+@pytest.mark.asyncio
 async def test_upload_rolls_back_remote_when_local_mirror_write_fails(corpus_manager):
     complete = SimpleNamespace(
         done=True,
