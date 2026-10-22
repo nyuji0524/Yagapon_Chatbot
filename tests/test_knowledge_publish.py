@@ -58,6 +58,33 @@ def test_meeting_bundle_marks_optional_minutes_as_draft():
     assert "status: draft" in files[f"{root}/minutes.md"]
 
 
+def test_meeting_bundle_keeps_linked_material_with_traceable_source():
+    root, files, manifest = build_meeting_bundle(
+        session_id="20261010T075451Z-material",
+        guild_id=123,
+        channel_name="全体会議部屋",
+        mode="listen",
+        transcript="[委員A]: 資料を変更します",
+        materials=[
+            {
+                "file_id": "doc-1",
+                "name": "全体会議資料",
+                "url": "https://docs.google.com/document/d/doc-1/edit",
+                "modified_time": "2026-10-10T07:00:00Z",
+                "text": "変更前の進行案",
+            }
+        ],
+    )
+
+    material = files[f"{root}/material-01.md"]
+    assert "status: draft" in material
+    assert "kind: document" in material
+    assert "https://docs.google.com/document/d/doc-1/edit" in material
+    assert "変更前の進行案" in material
+    assert manifest["materials"][0]["fileId"] == "doc-1"
+    assert manifest["materials"][0]["path"] == "material-01.md"
+
+
 @pytest.mark.asyncio
 async def test_publish_without_token_retains_complete_outbox(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
@@ -77,6 +104,26 @@ async def test_publish_without_token_retains_complete_outbox(tmp_path, monkeypat
     assert delivery["status"] == "pending"
     assert list(result.outbox_dir.rglob("transcript.md"))
     assert list(result.outbox_dir.rglob("manifest.json"))
+
+
+@pytest.mark.asyncio
+async def test_legacy_github_token_is_ignored_without_explicit_compatibility_flag(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "must-not-be-used")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_DIRECT_GITHUB_ENABLED", raising=False)
+
+    result = await publish_meeting_knowledge(
+        session_id="20261010T075451Z-no-pat",
+        guild_id=123,
+        channel_name="全体会議部屋",
+        mode="listen",
+        transcript="[Speaker 1]: 発言",
+    )
+
+    assert result.status == "pending"
+    assert result.pull_request_url is None
 
 
 @pytest.mark.asyncio
@@ -185,6 +232,7 @@ async def test_generic_bundle_can_be_listed_and_retried(tmp_path, monkeypatch):
             return "https://github.example/pr/2"
 
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "configured-token")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DIRECT_GITHUB_ENABLED", "true")
     monkeypatch.setattr("bot.knowledge_publish.GitHubKnowledgePublisher", FakePublisher)
     source_dir = result.outbox_dir / root
     (source_dir / "source.md.tmp").write_text("partial", encoding="utf-8")

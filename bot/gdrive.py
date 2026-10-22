@@ -6,12 +6,14 @@ import asyncio
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from googleapiclient.discovery import build
 
 from bot.google_credentials import load_google_credentials
 from bot.meeting_time import document_name
+from knowledge_sync.drive import READONLY_SCOPE, DriveReader
 
 log = logging.getLogger("yagapon.gdrive")
 
@@ -27,12 +29,60 @@ DEFAULT_MINUTES_IMAGE_URL = (
     # YAGAPON_MINUTES_IMAGE_URL to another publicly fetchable image URL.
     "https://raw.githubusercontent.com/nyuji0524/Yagapon_Chatbot/main/assets/yagapon_minutes.png"
 )
+MAX_MEETING_MATERIAL_CHARS = 120_000
+
+
+@dataclass(frozen=True)
+class MeetingMaterial:
+    file_id: str
+    name: str
+    url: str
+    modified_time: str
+    text: str
 
 
 def _extract_folder_id(url: str) -> str | None:
     """Extract a Drive folder ID from a configured URL."""
     match = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
     return match.group(1) if match else None
+
+
+def read_meeting_material(folder_url: str, file_id: str) -> MeetingMaterial:
+    """Read one meeting document only when it belongs to the configured Drive tree."""
+    folder_id = _extract_folder_id(folder_url)
+    if not folder_id:
+        raise ValueError("drive_setのフォルダURLが正しくありません")
+    reader = DriveReader(
+        credentials_path=os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or None,
+        drive_id="",
+        folder_id=folder_id,
+        scopes=[READONLY_SCOPE],
+    )
+    document = reader.get_document(file_id)
+    if not reader.is_in_scope(document):
+        raise PermissionError("指定資料はdrive_set配下にありません")
+    text = reader.read_text(document)
+    if text is None:
+        raise ValueError("このファイル形式は会議資料として読み取れません")
+    text = text.strip()
+    if not text:
+        raise ValueError("指定資料の本文が空です")
+    if len(text) > MAX_MEETING_MATERIAL_CHARS:
+        raise ValueError("指定資料が大きすぎます（12万文字まで）")
+    return MeetingMaterial(
+        file_id=document.file_id,
+        name=document.name,
+        url=document.web_view_link,
+        modified_time=document.modified_time,
+        text=text,
+    )
+
+
+async def load_meeting_material(config, guild_id: int, file_id: str) -> MeetingMaterial:
+    folder_url = config.get_drive_folder(guild_id)
+    if not folder_url:
+        raise ValueError("先に /drive_set で会議資料フォルダを設定してください")
+    return await asyncio.to_thread(read_meeting_material, folder_url, file_id)
 
 
 def _utf16_length(value: str) -> int:

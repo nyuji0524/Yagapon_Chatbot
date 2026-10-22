@@ -1,9 +1,17 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bot.gdrive import DriveWriter, _extract_folder_id, _render_markdown, upload_minutes, upload_transcript
+from bot.gdrive import (
+    DriveWriter,
+    _extract_folder_id,
+    _render_markdown,
+    read_meeting_material,
+    upload_minutes,
+    upload_transcript,
+)
 from bot.google_credentials import GoogleCredentialScopeError, load_google_credentials
 
 
@@ -19,6 +27,63 @@ def execute_result(value=None, error: Exception | None = None):
 def test_extract_folder_id():
     assert _extract_folder_id("https://drive.google.com/drive/folders/folder_123") == "folder_123"
     assert _extract_folder_id("https://example.com/no-folder") is None
+
+
+def test_read_meeting_material_requires_configured_folder_scope(monkeypatch):
+    document = SimpleNamespace(
+        file_id="doc-1",
+        name="会議資料",
+        modified_time="2026-10-22T00:00:00Z",
+        web_view_link="https://docs.google.com/document/d/doc-1/edit",
+    )
+
+    class FakeReader:
+        def __init__(self, **kwargs):
+            assert kwargs["folder_id"] == "folder-1"
+
+        def get_document(self, file_id):
+            assert file_id == "doc-1"
+            return document
+
+        def is_in_scope(self, value):
+            assert value is document
+            return True
+
+        def read_text(self, value):
+            assert value is document
+            return "議題資料"
+
+    monkeypatch.setattr("bot.gdrive.DriveReader", FakeReader)
+
+    result = read_meeting_material(
+        "https://drive.google.com/drive/folders/folder-1",
+        "doc-1",
+    )
+
+    assert result.name == "会議資料"
+    assert result.text == "議題資料"
+
+
+def test_read_meeting_material_rejects_file_outside_configured_folder(monkeypatch):
+    document = SimpleNamespace(file_id="doc-1")
+
+    class FakeReader:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_document(self, _file_id):
+            return document
+
+        def is_in_scope(self, _document):
+            return False
+
+    monkeypatch.setattr("bot.gdrive.DriveReader", FakeReader)
+
+    with pytest.raises(PermissionError, match="drive_set配下"):
+        read_meeting_material(
+            "https://drive.google.com/drive/folders/folder-1",
+            "doc-1",
+        )
 
 
 @pytest.mark.asyncio

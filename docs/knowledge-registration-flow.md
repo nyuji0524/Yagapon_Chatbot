@@ -15,6 +15,9 @@ Google Drive資料URL ──┘          │                 │
 merge後の文書 ─ status確認 ─ Knowledge差分索引 ─ RAGの整理済み根拠
 ```
 
+会議では`/join`に`drive_set`配下のGoogle Docs URLを渡せる。終了時に資料、Discord音声の生文字起こし、
+要約、議事録を同じ会議bundleへ保存し、資料にあった予定と会議中に確定した内容を区別する。
+
 ## Discordから登録する
 
 サーバー管理者が、登録の中心となるメッセージの「メッセージリンクをコピー」を使う。
@@ -89,6 +92,17 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 Knowledge用AIレビューは真偽を決めず、front matter、分類、状態、年度、出典、manifest、
 機密情報など構造を確認する。内容の承認は人が行う。
 
+## Discordログの継続整理
+
+`knowledge-curation-watch`はFile Searchへ登録済みのDiscord会話・会議文字起こしを少数ずつ読み、
+重要な選択、方針変更、仕様、優先順位、運用判断がある文書だけをDecision候補にする。主資料の固有語で
+過去ログと整理済みKnowledgeも検索し、事実、当時の理由、結果、後日の振り返り、推測、未確認事項を分離する。
+
+保存先は`years/{festival}th/bureaus/{bureau}/decisions/candidates/`で、IT、総務、装飾、ステージ、
+屋外、室内、広報、渉外の8局を同じように処理する。複数局名を含むチャンネルは`cross-bureau`、
+全体会議等は`committee`、判定不能は`unclassified`へ置く。分類はDiscordカテゴリ・チャンネル名で行い、
+AIが自由に選んだ局名を権限や保存先の根拠にしない。どの候補もDraft PR止まりで自動マージしない。
+
 ## 本番設定
 
 Botは専用GCS intake bucketへのObject Creatorだけを持つ。Knowledgeリポジトリの
@@ -104,10 +118,15 @@ YAGAPON_KNOWLEDGE_GUILD_ID=<IT Division Guild ID>
 YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS=<登録を許可するGuild ID。複数はカンマ区切り>
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS=<選考等の除外チャンネルID>
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS=選考
+YAGAPON_KNOWLEDGE_CURATION_ENABLED=false
+YAGAPON_KNOWLEDGE_CURATION_BATCH=3
 ```
 
 個人用の`gh`認証やPATを本番VMへコピーしない。キューobjectは機密検査済みの候補だけを含み、
 パイプライン処理後に`processed/`へ移動する。Draft PRは人が確認するまでマージしない。
+KnowledgeリポジトリのOrganization/Repository Actions設定では、Workflow permissionsをRead and writeにし、
+`Allow GitHub Actions to create and approve pull requests`を有効にする。これを確認するまでは
+`YAGAPON_KNOWLEDGE_CURATION_ENABLED=false`のままにする。
 
 承認後にKnowledge PRがmainへ入ると、`source-index-watch`がcommit SHAの変更を検出する。
 front matterのstatusが`active`または`historical`の文書だけを

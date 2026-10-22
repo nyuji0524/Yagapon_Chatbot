@@ -89,6 +89,23 @@ async def test_minutes_uses_reference_document_heading_structure():
 
 
 @pytest.mark.asyncio
+async def test_minutes_distinguishes_reference_material_from_meeting_decisions():
+    generated = AsyncMock(return_value=SimpleNamespace(text="# 議事録"))
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    await generate_minutes(
+        client,
+        "[Discord確定: 委員A]: 資料の案は変更して30分に決めます",
+        reference_text="[会議資料: 進行案]\n1枠20分で実施する予定",
+    )
+
+    prompt = generated.await_args.kwargs["contents"]
+    assert "会議資料（会議前の参考情報）" in prompt
+    assert "資料に書かれた案・予定・担当を、会議で確定した決定とみなさない" in prompt
+    assert "1枠20分で実施する予定" in prompt
+
+
+@pytest.mark.asyncio
 async def test_long_minutes_reuses_completed_segment_checkpoints(tmp_path, monkeypatch):
     first_generated = AsyncMock(
         side_effect=[

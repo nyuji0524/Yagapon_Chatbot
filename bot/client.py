@@ -244,6 +244,9 @@ class YagaPon(discord.Bot):
                     guild_id=member.guild.id,
                     session_id=session.session_id,
                     channel_name=session.channel.name,
+                    category_name=getattr(
+                        getattr(session.channel, "category", None), "name", ""
+                    ),
                     started_at=session.started_at,
                     transcript=session.transcript_text,
                     transcript_url=transcript_url,
@@ -290,6 +293,9 @@ class YagaPon(discord.Bot):
                         guild_id=member.guild.id,
                         session_id=session.session_id,
                         channel_name=session.channel.name,
+                        category_name=getattr(
+                            getattr(session.channel, "category", None), "name", ""
+                        ),
                         started_at=session.started_at,
                         transcript=session.transcript_text,
                         minutes=minutes,

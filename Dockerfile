@@ -25,6 +25,7 @@ COPY bot ./bot
 COPY knowledge_sync ./knowledge_sync
 COPY knowledge_catalog ./knowledge_catalog
 COPY knowledge_index ./knowledge_index
+COPY knowledge_curation ./knowledge_curation
 COPY source_index ./source_index
 COPY rag_eval ./rag_eval
 COPY main.py ./

@@ -73,6 +73,7 @@ class VoiceSession:
         self._conversation_history: list[dict] = []  # chat/meetingの会話履歴
         self._last_audio_len: dict[int, int] = {}  # user_id -> 文字起こし済みPCMバイト数
         self._reference_docs: list[str] = []  # VCテキストチャットに投稿された参考資料
+        self._meeting_materials: list[dict[str, str]] = []
         self._voiceprint_paths: dict[str, str] | None = None
 
     def _registered_voiceprints(self) -> dict[str, str]:
@@ -90,6 +91,21 @@ class VoiceSession:
         """VCテキストチャットに投稿された資料を参考資料として追加"""
         self._reference_docs.append(f"[{source}]\n{content}")
         log.info(f"Reference doc added: {source} ({len(content)} chars)")
+
+    async def add_meeting_material(self, material) -> None:
+        """Attach a verified Drive document to minutes and the review bundle."""
+        item = {
+            "file_id": material.file_id,
+            "name": material.name,
+            "url": material.url,
+            "modified_time": material.modified_time,
+            "text": material.text,
+        }
+        self._meeting_materials.append(item)
+        self._reference_docs.append(
+            f"[会議資料: {material.name}]\n原本: {material.url}\n{material.text}"
+        )
+        await self._checkpoint_state(meeting_materials=self._meeting_materials)
 
     def _speaker_label(self, user_id: int) -> str:
         """Return a stable label backed by Discord's per-user audio stream."""
@@ -578,6 +594,7 @@ class VoiceSession:
             transcript=self.transcript_text,
             summary=summary,
             minutes=minutes,
+            materials=self._meeting_materials,
         )
         if result:
             self._knowledge_pull_request_url = result.pull_request_url
@@ -920,6 +937,7 @@ class VoiceSession:
             speaker_roster=speaker_roster,
             title=self.channel.name,
             meeting_date=display_meeting_date(self.started_at),
+            reference_text="\n\n---\n\n".join(self._reference_docs),
             checkpoint_dir=(
                 self.recording_sink.session_dir / "minutes-checkpoints"
                 if self.recording_sink
@@ -1039,6 +1057,16 @@ async def _recover_recording(bot, candidate) -> None:
     session._diarization_chunk_sequence = int(
         metadata.get("diarization_chunk_sequence") or 0
     )
+    session._meeting_materials = [
+        item
+        for item in (metadata.get("meeting_materials") or [])
+        if isinstance(item, dict) and item.get("text")
+    ]
+    session._reference_docs = [
+        f"[会議資料: {item.get('name') or '名称未設定'}]\n"
+        f"原本: {item.get('url') or ''}\n{item.get('text') or ''}"
+        for item in session._meeting_materials
+    ]
     transcript_path_value = str(metadata.get("transcript_path") or "")
     session._transcript_path = Path(transcript_path_value) if transcript_path_value else None
     existing = load_transcript_content(session._transcript_path)
@@ -1065,6 +1093,7 @@ async def _recover_recording(bot, candidate) -> None:
             guild_id=guild_id,
             session_id=session.session_id,
             channel_name=channel.name,
+            category_name=getattr(getattr(channel, "category", None), "name", ""),
             started_at=session.started_at,
             transcript=session.transcript_text,
             minutes=minutes,

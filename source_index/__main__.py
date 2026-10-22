@@ -483,9 +483,7 @@ def metadata_for(chunk: SourceChunk, guild_id: int, digest: str) -> list[dict]:
 async def sync_once(args) -> dict:
     if os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() != "true":
         return {"disabled": True}
-    token = read_secret("YAGAPON_SOURCE_GITHUB_TOKEN") or read_secret(
-        "YAGAPON_KNOWLEDGE_GITHUB_TOKEN"
-    )
+    token = read_secret("YAGAPON_SOURCE_GITHUB_TOKEN")
     client = GitHubSourceClient(token)
     repositories = load_repositories(args.manifest)
     config = ConfigManager()

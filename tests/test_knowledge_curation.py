@@ -1,0 +1,168 @@
+import json
+
+import pytest
+import yaml
+
+from bot.rag_store import RagStore
+from knowledge_curation.__main__ import (
+    DecisionDraft,
+    build_bundle,
+    classify_bureau,
+    curate_once,
+    render_decision,
+)
+
+
+def source_document():
+    return {
+        "document_key": "discord-document-001",
+        "guild_id": 123,
+        "channel_name": "仕事に関する雑談",
+        "category": "27th IT局",
+        "festival": 27,
+        "source_type": "discord_conversation",
+        "authority": "conversation",
+        "status": "raw",
+        "source_url": "https://discord.com/channels/123/456/789",
+        "start_at": "2026-07-08T09:46:00+09:00",
+        "end_at": "2026-07-08T10:50:00+09:00",
+        "body": "カレンダー機能は主要機能の後にすることで了承した。" * 20,
+    }
+
+
+def decision():
+    return DecisionDraft(
+        title="27th：カレンダー追加機能を延期する判断",
+        slug="calendar-feature-priority",
+        date="2026-07-08",
+        decision_state="依頼者が延期を了承したところまで確認できる。",
+        facts=["日をまたぐ予定の登録機能について相談した。"],
+        contemporary_reasoning=["主要機能を優先する必要があると説明した。"],
+        alternatives_and_constraints=["1日ずつ入力する代替案があった。"],
+        results=["延期が了承された。"],
+        unknowns=["後日の実装状況は未確認。"],
+        related_roles=["IT局長"],
+        systems=["やがサポート"],
+        tags=["優先順位"],
+    )
+
+
+def test_rendered_curation_draft_separates_evidence_and_uncertainty():
+    rendered = render_decision(
+        source_document(),
+        decision(),
+        [
+            {
+                "document_key": "curated-history",
+                "source_url": "https://github.com/YagamiFes-IT/YagamiFes-IT-Knowledge/blob/main/history.md",
+                "authority": "curated",
+                "status": "historical",
+                "excerpt": "過去の記録",
+            }
+        ],
+    )
+    metadata = yaml.safe_load(rendered[4:].split("\n---\n", 1)[0])
+
+    assert metadata["type"] == "decision"
+    assert metadata["status"] == "draft"
+    assert metadata["festival"] == 27
+    assert metadata["bureau"] == "it"
+    assert metadata["sources"][0]["ref"].startswith("https://discord.com/")
+    assert "## 確認できる事実 / Fact" in rendered
+    assert "## 当時の判断理由 / Contemporary reasoning" in rendered
+    assert "## 推測 / Inference" in rendered
+    assert "後日の実装状況は未確認" in rendered
+    assert "人による確認後" in rendered
+
+
+def test_curation_bundle_targets_review_only_candidate_area():
+    args = build_bundle(source_document(), decision(), [])
+    bundle_id, root, files, manifest, branch, title, body = args
+
+    assert bundle_id.startswith("curation-discord-document-001-")
+    assert root.startswith("years/27th/bureaus/it/decisions/candidates/")
+    assert any(path.endswith("calendar-feature-priority.md") for path in files)
+    assert json.loads(files[f"{root}/manifest.json"]) == manifest
+    assert branch == f"yagapon/{bundle_id}"
+    assert "確認待ち草案" in title
+    assert "原文" in body
+
+
+@pytest.mark.parametrize(
+    ("category", "channel", "expected"),
+    [
+        ("28th 総務局", "一般", ("general-affairs", "総務局")),
+        ("09連絡チャット", "it総務連絡チャット", ("cross-bureau", "局間連携")),
+        ("01全体", "全体チャット", ("committee", "全体")),
+        ("10その他", "雑談", ("unclassified", "未分類")),
+    ],
+)
+def test_bureau_classification_uses_discord_structure(category, channel, expected):
+    assert classify_bureau({"category": category, "channel_name": channel}) == expected
+
+
+def test_bureau_classification_recovers_category_from_existing_document_header():
+    document = {
+        "channel_name": "一般",
+        "body": "文書種別: Discord会話記録\nチャンネル: #一般\nカテゴリ: 27th 装飾局\n\n本文",
+    }
+
+    assert classify_bureau(document) == ("decoration", "装飾局")
+
+
+def test_rag_store_lists_only_raw_curation_sources(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    raw_metadata = [
+        {"key": "document_key", "string_value": "raw-discord"},
+        {"key": "source_type", "string_value": "discord_conversation"},
+        {"key": "authority", "string_value": "conversation"},
+        {"key": "status", "string_value": "raw"},
+        {"key": "guild_id", "string_value": "123"},
+        {"key": "category", "string_value": "27th IT局"},
+    ]
+    store.upsert_document("documents/raw", "会話記録" * 100, raw_metadata)
+    store.upsert_document(
+        "documents/curated",
+        "整理済み" * 100,
+        [
+            {"key": "document_key", "string_value": "curated"},
+            {"key": "source_type", "string_value": "decision"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "guild_id", "string_value": "0"},
+        ],
+    )
+
+    result = store.list_curation_documents()
+
+    assert [item["document_key"] for item in result] == ["raw-discord"]
+    assert result[0]["category"] == "27th IT局"
+
+
+def test_rag_store_migrates_existing_database_with_category(tmp_path):
+    database = tmp_path / "old.sqlite3"
+    import sqlite3
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """CREATE TABLE documents (
+                document_key TEXT PRIMARY KEY, remote_name TEXT, guild_id INTEGER NOT NULL,
+                channel_id INTEGER, channel_name TEXT, festival INTEGER, source_type TEXT,
+                status TEXT, authority TEXT, source_url TEXT, start_at TEXT, end_at TEXT,
+                body TEXT NOT NULL, updated_at TEXT NOT NULL
+            )"""
+        )
+
+    store = RagStore(database)
+
+    with store._connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(documents)")}
+    assert "category" in columns
+
+
+@pytest.mark.asyncio
+async def test_curation_is_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", raising=False)
+
+    result = await curate_once(state_path=tmp_path / "state.json", limit=3)
+
+    assert result == {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}

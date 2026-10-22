@@ -12,6 +12,8 @@ import discord
 
 from bot.ai_models import fast_model, generation_config
 from bot.authorization import require_registered_member
+from bot.gdrive import load_meeting_material
+from bot.knowledge_intake import parse_drive_file_url
 from bot.voice import VoiceMode, get_session, join_voice, leave_voice
 
 log = logging.getLogger("yagapon.commands.voice")
@@ -28,7 +30,13 @@ def register(bot):
             discord.OptionChoice("おしゃべり (雑談モード)", "chat"),
         ],
     )
-    async def join_cmd(ctx: discord.ApplicationContext, mode: str):
+    @discord.option(
+        "document_url",
+        description="会議資料のGoogle Docs URL（drive_set配下・省略可）",
+        required=False,
+        default="",
+    )
+    async def join_cmd(ctx: discord.ApplicationContext, mode: str, document_url: str = ""):
         if not await require_registered_member(ctx, bot.config):
             return
         if get_session(ctx.guild_id):
@@ -42,12 +50,27 @@ def register(bot):
             await ctx.respond("先にボイスチャンネルに入ってほしいぽん！", ephemeral=True)
             return
 
-        await ctx.defer()
+        await ctx.defer(ephemeral=True if document_url else False)
+
+        material = None
+        if document_url.strip():
+            try:
+                file_id = parse_drive_file_url(document_url)
+                material = await load_meeting_material(bot.config, ctx.guild_id, file_id)
+            except Exception as exc:
+                log.warning("Meeting material could not be linked: %s", exc)
+                await ctx.followup.send(
+                    f"❌ 会議資料を紐付けられなかったぽん。{exc}",
+                    ephemeral=True,
+                )
+                return
 
         voice_mode = VoiceMode(mode)
         vc = member.voice.channel
 
         session = await join_voice(bot, ctx.guild_id, vc, voice_mode)
+        if material:
+            await session.add_meeting_material(material)
 
         mode_desc = {
             VoiceMode.LISTEN: "聞き専モード 🎧\n議事録を作成するぽん。音声も録音してるぽん！終わったら `/leave` で退出してねぽん！",
@@ -55,7 +78,11 @@ def register(bot):
             VoiceMode.CHAT: "おしゃべりモード 💬\nいっぱい喋るぽん！",
         }
 
-        await ctx.followup.send(f"🔊 {vc.name} に参加したぽん！\n{mode_desc[voice_mode]}", silent=True)
+        material_line = f"\n📎 会議資料: [{material.name}]({material.url})" if material else ""
+        await ctx.followup.send(
+            f"🔊 {vc.name} に参加したぽん！\n{mode_desc[voice_mode]}{material_line}",
+            silent=True,
+        )
 
         if voice_mode == VoiceMode.CHAT:
             await session.speak("こんにちはぽん！おしゃべりやがぽんだぽん！何でも話しかけてねぽん！")
@@ -75,6 +102,11 @@ def register(bot):
             await ctx.followup.send("退出と議事録作成はすでに進行中だぽん。完了通知を待ってねぽん！", silent=True)
             return
         channel_name = session.channel.name if session else "unknown"
+        category_name = (
+            getattr(getattr(session.channel, "category", None), "name", "")
+            if session
+            else ""
+        )
         has_audio = bool(session and session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING))
 
         if has_audio:
@@ -113,6 +145,7 @@ def register(bot):
                 guild_id=ctx.guild_id,
                 session_id=session.session_id,
                 channel_name=channel_name,
+                category_name=category_name,
                 started_at=session.started_at,
                 transcript=session.transcript_text,
                 transcript_url=transcript_url,
@@ -145,6 +178,7 @@ def register(bot):
             guild_id=ctx.guild_id,
             session_id=session.session_id,
             channel_name=channel_name,
+            category_name=category_name,
             started_at=session.started_at,
             transcript=session.transcript_text,
             minutes=minutes,

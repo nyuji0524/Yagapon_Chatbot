@@ -22,6 +22,7 @@ async def test_meeting_index_adds_date_festival_and_low_authority_metadata(tmp_p
         guild_id=123,
         session_id="20261009T093251Z-d030a069",
         channel_name="全体会議部屋",
+        category_name="03｜会議",
         started_at="2026-10-09T09:32:51Z",
         transcript="IT局へのフィードバックは準備を早めること。",
         transcript_url="https://docs.example/transcript",
@@ -41,6 +42,8 @@ async def test_meeting_index_adds_date_festival_and_low_authority_metadata(tmp_p
     assert metadata["status"] == "raw"
     assert metadata["authority"] == "conversation"
     assert metadata["source_url"] == "https://docs.example/transcript"
+    assert metadata["category"] == "03｜会議"
+    assert "カテゴリ: 03｜会議" in args[2]
 
 
 @pytest.mark.asyncio

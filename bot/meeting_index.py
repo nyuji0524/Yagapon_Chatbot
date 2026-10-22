@@ -35,6 +35,7 @@ def _meeting_body(
     content: str,
     session_id: str,
     channel_name: str,
+    category_name: str,
     started_at: datetime | str | None,
     artifact_type: str,
     source_url: str,
@@ -49,6 +50,7 @@ def _meeting_body(
     return (
         f"資料種別: {label}\n"
         f"会議名: {meeting_name(channel_name)}\n"
+        f"カテゴリ: {category_name or 'なし'}\n"
         f"開催日時: {local.isoformat(timespec='seconds')}\n"
         f"開催日: {local:%Y-%m-%d} ({local.month}/{local.day}, {local.month}月{local.day}日)\n"
         f"矢上祭年度: {festival_number(local)}th\n"
@@ -65,6 +67,7 @@ async def _replace_document(
     guild_id: int,
     session_id: str,
     channel_name: str,
+    category_name: str,
     started_at: datetime | str | None,
     artifact_type: str,
     content: str,
@@ -78,6 +81,7 @@ async def _replace_document(
         content=content,
         session_id=session_id,
         channel_name=channel_name,
+        category_name=category_name,
         started_at=local,
         artifact_type=artifact_type,
         source_url=source_url,
@@ -97,6 +101,7 @@ async def _replace_document(
         {"key": "schema", "string_value": MEETING_SCHEMA_VERSION},
         {"key": "guild_id", "string_value": str(guild_id)},
         {"key": "channel_name", "string_value": meeting_name(channel_name)[:500]},
+        {"key": "category", "string_value": category_name[:500]},
         {"key": "session_id", "string_value": session_id[:500]},
         {"key": "start_at", "string_value": local.isoformat()},
         {"key": "end_at", "string_value": local.isoformat()},
@@ -125,6 +130,7 @@ async def index_meeting_artifacts(
     guild_id: int,
     session_id: str,
     channel_name: str,
+    category_name: str = "",
     started_at: datetime | str | None,
     transcript: str,
     minutes: str | None = None,
@@ -138,6 +144,7 @@ async def index_meeting_artifacts(
         guild_id=guild_id,
         session_id=session_id,
         channel_name=channel_name,
+        category_name=category_name,
         started_at=started_at,
         artifact_type="transcript",
         content=transcript,
@@ -150,6 +157,7 @@ async def index_meeting_artifacts(
             guild_id=guild_id,
             session_id=session_id,
             channel_name=channel_name,
+            category_name=category_name,
             started_at=started_at,
             artifact_type="minutes",
             content=minutes,
