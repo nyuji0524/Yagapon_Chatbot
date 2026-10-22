@@ -13,6 +13,9 @@ _EXPLICIT_DATE_PATTERN = re.compile(
     r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(\d+)\s*"
     r"(?:月|[/.-])\s*(\d+)\s*日?(?!\d)"
 )
+_RANGE_SEPARATOR_PATTERN = re.compile(
+    r"(?:から|まで|[〜～~]|\.{2,}|[–—]|(?<=\s)-(?=\s))"
+)
 
 
 def festival_number(value: date | datetime) -> int:
@@ -182,10 +185,19 @@ def calendar_window_from_query(
 
     explicit_dates = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
     try:
-        for match in explicit_dates:
+        explicit_date_values = [
             date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            for match in explicit_dates
+        ]
     except ValueError:
         return None
+    if len(explicit_dates) > 1:
+        date_separator = normalized[explicit_dates[0].end():explicit_dates[-1].start()]
+        if (
+            _RANGE_SEPARATOR_PATTERN.search(date_separator)
+            and explicit_date_values[0] > explicit_date_values[-1]
+        ):
+            return None
 
     if (
         re.search(r"例年|毎年|過去", normalized)
@@ -220,7 +232,7 @@ def calendar_window_from_query(
         range_separator = normalized[
             explicit_matches[0].end():explicit_matches[-1].start()
         ]
-        if re.search(r"から|まで|[〜～~]", range_separator) and (
+        if _RANGE_SEPARATOR_PATTERN.search(range_separator) and (
             windows[0].starts_on > windows[-1].starts_on
         ):
             return None
@@ -289,7 +301,7 @@ def calendar_window_from_query(
         range_separator = normalized[
             mentioned_months[0].end():mentioned_months[-1].start()
         ]
-        if re.search(r"から|まで|[〜～~]", range_separator) and (
+        if _RANGE_SEPARATOR_PATTERN.search(range_separator) and (
             windows[0].starts_on > windows[-1].starts_on
         ):
             return None

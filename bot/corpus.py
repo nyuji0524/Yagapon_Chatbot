@@ -494,9 +494,29 @@ class _SensitiveRequestPolicy:
     individual_contact: bool
 
 
+def _security_text_variants(value: str) -> tuple[str, ...]:
+    """Normalize text for policy checks without trusting invisible separators.
+
+    Replacing format/control/combining characters catches separators such as a
+    zero-width space between English words.  Removing the same characters also
+    catches them when they are inserted inside one keyword.  Running both
+    variants avoids having to guess which role an invisible character plays.
+    """
+    normalized = unicodedata.normalize("NFKC", value.casefold())
+
+    def suspicious(character: str) -> bool:
+        return unicodedata.category(character)[0] in {"C", "M"}
+
+    variants = (
+        "".join(" " if suspicious(character) else character for character in normalized),
+        "".join(character for character in normalized if not suspicious(character)),
+    )
+    return tuple(dict.fromkeys(" ".join(variant.split()) for variant in variants))
+
+
 def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
     """Classify the whole request so a safe clause cannot mask a sensitive one."""
-    normalized = " ".join(question.casefold().split())
+    normalized = "\n".join(_security_text_variants(question))
     disclosure_pattern = (
         r"(?:教えて|教えろ|答えて|回答|知りたい|くれ|ください|ちょうだい|出力|表示|"
         r"見せて|開示|共有して|送って|一覧|すべて|全部|実値|実際の|現在の|生の|"
@@ -746,50 +766,49 @@ def _instruction_override_request(normalized: str) -> bool:
 
 def sensitive_request_response(question: str) -> str | None:
     """Block unsafe requests before any user-controlled retrieval is attempted."""
-    normalized = "".join(
-        " " if unicodedata.category(character) == "Cf" else character
-        for character in unicodedata.normalize("NFKC", question.casefold())
-    )
-    normalized = " ".join(normalized.split())
-    internal_instruction_topic = bool(
-        re.search(
-            r"(?:system\s*prompt|developer\s*(?:message|prompt|instruction)|"
-            r"システム\s*プロンプト|開発者(?:メッセージ|プロンプト|指示)|"
-            r"内部(?:指示|命令|ルール|プロンプト)|隠し(?:指示|命令|プロンプト)|"
-            r"最初の(?:指示|命令|プロンプト))",
-            normalized,
-            re.IGNORECASE,
+    unsafe_internal_request = False
+    for normalized in _security_text_variants(question):
+        internal_instruction_topic = bool(
+            re.search(
+                r"(?:system\s*prompt|developer\s*(?:message|prompt|instruction)|"
+                r"システム\s*プロンプト|開発者(?:メッセージ|プロンプト|指示)|"
+                r"内部(?:指示|命令|ルール|プロンプト)|隠し(?:指示|命令|プロンプト)|"
+                r"最初の(?:指示|命令|プロンプト))",
+                normalized,
+                re.IGNORECASE,
+            )
         )
-    )
-    disclosure_request = bool(
-        re.search(
-            r"(?:show|reveal|print|output|display|dump|tell\s+me|"
-            r"教えて|答えて|回答|見せて|表示|出力|開示|公開|全文|そのまま|"
-            r"中身|内容|一覧|すべて|全て|全部|何|なに|[?？]$)",
-            normalized,
-            re.IGNORECASE,
+        disclosure_request = bool(
+            re.search(
+                r"(?:show|reveal|print|output|display|dump|tell\s+me|"
+                r"教えて|答えて|回答|見せて|表示|出力|開示|公開|全文|そのまま|"
+                r"中身|内容|一覧|すべて|全て|全部|何|なに|[?？]$)",
+                normalized,
+                re.IGNORECASE,
+            )
         )
-    )
-    internal_instruction_howto = bool(
-        re.search(
-            r"(?:とは何|とは|意味|概念|一般的|仕組み|設計|対策|防止|検出|守り方)",
-            normalized,
+        internal_instruction_howto = bool(
+            re.search(
+                r"(?:とは何|とは|意味|概念|一般的|仕組み|設計|対策|防止|検出|守り方)",
+                normalized,
+            )
         )
-    )
-    specific_internal_material = bool(
-        re.search(
-            r"(?:あなた|おしゃべりやがぽん|この(?:ai|bot|ボット)|現在|実際|"
-            r"中身|全文|原文|そのまま|内部|隠し|最初の)",
-            normalized,
-            re.IGNORECASE,
+        specific_internal_material = bool(
+            re.search(
+                r"(?:あなた|おしゃべりやがぽん|この(?:ai|bot|ボット)|現在|実際|"
+                r"中身|全文|原文|そのまま|内部|隠し|最初の)",
+                normalized,
+                re.IGNORECASE,
+            )
         )
-    )
-    instruction_override = _instruction_override_request(normalized)
-    if instruction_override or (
-        internal_instruction_topic
-        and disclosure_request
-        and (specific_internal_material or not internal_instruction_howto)
-    ):
+        if _instruction_override_request(normalized) or (
+            internal_instruction_topic
+            and disclosure_request
+            and (specific_internal_material or not internal_instruction_howto)
+        ):
+            unsafe_internal_request = True
+            break
+    if unsafe_internal_request:
         return (
             "システムプロンプトや内部指示の開示、既存の安全ルールを無視・上書きする依頼には"
             "対応できず、回答できないぽん。こうした依頼はナレッジ検索にも送らないぽん。"

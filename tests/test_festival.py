@@ -247,6 +247,16 @@ def test_reverse_explicit_calendar_range_is_not_silently_reordered():
         now,
     ) is None
 
+    assert calendar_window_from_query(
+        "2024-12-09 - 2024-10-01",
+        now,
+    ) is None
+
+    assert calendar_window_from_query(
+        "2024-12-09..2024-10-01",
+        now,
+    ) is None
+
 
 @pytest.mark.parametrize("query", ["27thの第1月曜の定例", "27thの第2月曜日の会議"])
 def test_weekday_ordinal_is_not_mistaken_for_a_calendar_month(query):
