@@ -391,6 +391,41 @@ async def test_response_fields_must_be_a_subset_of_exact_mask(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_nested_field_mask_accepts_canonical_null_but_rejects_mixed_value(monkeypatch):
+    canonical_null = {
+        "name": _resource("demo-project", "festival/27/notifications/notice-1"),
+        "fields": {"action": {"nullValue": None}},
+    }
+    mixed_null = {
+        "name": _resource("demo-project", "festival/27/notifications/notice-2"),
+        "fields": {
+            "action": {
+                "nullValue": None,
+                "mapValue": {
+                    "fields": {"token": {"stringValue": "private-token"}}
+                },
+            }
+        },
+    }
+    recorder = _Recorder(
+        _FakeResponse(200, canonical_null),
+        _FakeResponse(200, mixed_null),
+    )
+    monkeypatch.setattr("bot.firestore_readonly.aiohttp.ClientSession", recorder.session)
+    client = FirestoreReadonlyClient(project_id="demo-project", backend="public")
+
+    assert await client.get_document(
+        "festival/27/notifications/notice-1",
+        ["action.url"],
+    ) == canonical_null
+    with pytest.raises(RuntimeError, match="outside the requested mask"):
+        await client.get_document(
+            "festival/27/notifications/notice-2",
+            ["action.url"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_response_cannot_exceed_requested_read_bounds(monkeypatch):
     documents = [
         {

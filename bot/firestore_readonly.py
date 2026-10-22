@@ -334,6 +334,11 @@ def _validate_masked_fields(fields: dict[str, Any], mask_tree: dict[str, Any]) -
             continue
         if not isinstance(encoded_value, dict):
             raise RuntimeError("Firestore returned an invalid nested field value")
+        if encoded_value == {"nullValue": None}:
+            # A projected nested field can legitimately have a null parent.
+            # Accept only the canonical single-key Firestore null encoding so
+            # a mixed value cannot use nullValue to bypass the exact mask.
+            continue
         map_value = encoded_value.get("mapValue")
         if not isinstance(map_value, dict):
             raise RuntimeError("Firestore returned a non-map value for a nested field mask")

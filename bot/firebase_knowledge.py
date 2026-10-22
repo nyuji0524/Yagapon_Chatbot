@@ -832,16 +832,21 @@ class FirebaseKnowledgeReader:
     @staticmethod
     def _safe_public_text(value: str) -> str | object:
         """Drop high-confidence credentials and private contacts before the LLM."""
-        # Inspect well beyond the returned boundary so an email or token split
-        # at character 500 cannot leak a recognizable prefix to the model.
-        inspected = value[:8_192]
+        # Remove formatting controls such as zero-width spaces before scanning
+        # so ordinary copied text survives while obfuscated secrets become
+        # detectable. Preserve ZWJ because it is part of emoji sequences.
+        inspected_characters: list[str] = []
+        for character in value:
+            category = unicodedata.category(character)
+            if category == "Cf" and character != "\u200d":
+                continue
+            if category[0] == "C" and character not in {"\n", "\r", "\t", "\u200d"}:
+                return _DROP
+            inspected_characters.append(character)
+            if len(inspected_characters) >= 8_192:
+                break
+        inspected = "".join(inspected_characters)
         normalized = unicodedata.normalize("NFKC", inspected)
-        if any(
-            unicodedata.category(character)[0] == "C"
-            and character not in {"\n", "\r", "\t", "\u200d"}
-            for character in normalized
-        ):
-            return _DROP
         variants = (
             normalized,
             "".join(
@@ -858,7 +863,7 @@ class FirebaseKnowledgeReader:
                 or any(pattern.search(candidate) for pattern in _OPAQUE_SECRET_PATTERNS)
             ):
                 return _DROP
-        return value[:500]
+        return inspected[:500]
 
     @staticmethod
     def _safe_public_url(value: Any) -> str | object:

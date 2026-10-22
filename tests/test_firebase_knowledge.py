@@ -151,7 +151,6 @@ def test_nested_projection_drops_unknown_children_and_sensitive_urls(monkeypatch
         "連絡先 private.person@example.com",
         "電話 090-1234-5678",
         "api_key=ActualSecretValue982734",
-        "安全な文\u200b字に見せた不可視文字",
     ],
 )
 def test_allowed_scalar_private_data_is_dropped_before_model(monkeypatch, private_body):
@@ -181,6 +180,23 @@ def test_allowed_scalar_private_data_is_dropped_before_model(monkeypatch, privat
     assert "安全な公開通知" in evidence[0].body
     assert private_body not in evidence[0].body
     assert '"body"' not in evidence[0].body
+
+
+def test_harmless_format_characters_are_removed_without_dropping_public_text():
+    value = "安全な文\u200b字と\ufeff告知"
+
+    assert FirebaseKnowledgeReader._safe_public_text(value) == "安全な文字と告知"
+
+
+@pytest.mark.parametrize(
+    "private_value",
+    [
+        "private\u200b@example.com",
+        "api_\u2060key=ActualSecretValue982734",
+    ],
+)
+def test_format_characters_cannot_obfuscate_private_data(private_value):
+    assert not isinstance(FirebaseKnowledgeReader._safe_public_text(private_value), str)
 
 
 @pytest.mark.parametrize(
