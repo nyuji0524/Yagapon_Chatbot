@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -745,7 +746,12 @@ def _instruction_override_request(normalized: str) -> bool:
 
 def sensitive_request_response(question: str) -> str | None:
     """Block unsafe requests before any user-controlled retrieval is attempted."""
-    normalized = " ".join(question.casefold().split())
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", question.casefold())
+        if unicodedata.category(character) != "Cf"
+    )
+    normalized = " ".join(normalized.split())
     internal_instruction_topic = bool(
         re.search(
             r"(?:system\s*prompt|developer\s*(?:message|prompt|instruction)|"

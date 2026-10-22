@@ -9,6 +9,10 @@ from zoneinfo import ZoneInfo
 JST = ZoneInfo("Asia/Tokyo")
 FESTIVAL_YEAR_OFFSET = 1998
 _MONTH_NAME_PATTERN = r"(?<![第\d])(1[0-2]|0?[1-9])\s*月(?!\s*[\d曜])"
+_EXPLICIT_DATE_PATTERN = re.compile(
+    r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(\d+)\s*"
+    r"(?:月|[/.-])\s*(\d+)\s*日?(?!\d)"
+)
 
 
 def festival_number(value: date | datetime) -> int:
@@ -59,7 +63,7 @@ def festival_from_query(query: str, now: datetime | None = None) -> int | None:
         return int(match.group(1))
 
     dated_matches = list(
-        re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?", normalized)
+        re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?(?!\d)", normalized)
     )
     if dated_matches:
         dated_festivals = {
@@ -99,21 +103,19 @@ def calendar_date_from_query(
     normalized = query.translate(
         str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
     )
-    explicit_matches = list(re.finditer(
-        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*"
-        r"(?:月|[/.-])\s*(3[01]|[12]\d|0?[1-9])\s*日?",
-        normalized,
-    ))
+    explicit_matches = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
     # A single-date filter must not silently discard evidence for comparison
     # questions containing two distinct dates.
     if len(explicit_matches) > 1:
         return None
     if explicit_matches:
         explicit = explicit_matches[0]
-        explicit_months = list(re.finditer(
-            r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])",
-            normalized,
-        ))
+        explicit_months = list(
+            re.finditer(
+                r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])(?!\d)",
+                normalized,
+            )
+        )
         additional_named_months = list(
             re.finditer(_MONTH_NAME_PATTERN, normalized)
         )
@@ -178,6 +180,13 @@ def calendar_window_from_query(
     )
     current = (now or datetime.now(JST)).astimezone(JST).date()
 
+    explicit_dates = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
+    try:
+        for match in explicit_dates:
+            date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
     if (
         re.search(r"例年|毎年|過去", normalized)
         and re.search(r"今頃|この時期|今月", normalized)
@@ -187,7 +196,7 @@ def calendar_window_from_query(
         return None
 
     explicit_matches = list(re.finditer(
-        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?",
+        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?(?!\d)",
         normalized,
     ))
     named_months = list(
