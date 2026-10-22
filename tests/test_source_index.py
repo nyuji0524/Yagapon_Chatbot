@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from source_index.__main__ import (
     metadata_digest_for,
     metadata_for,
     preflight_once,
+    redact_source_secrets,
     repository_manifest_digest,
     repository_state_is_current,
     safe_source_path,
@@ -185,6 +187,10 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         'api_key = "example-api-key-for-docs"',
         'password = SecretStr("example-password")',
         'password = SecretStr(value="example-password")',
+        'password = "replace-with-your-password"',
+        'client_secret = "not-a-real-secret"',
+        'api_key = "your_api_key_here"',
+        'token = "xxxxx"',
         (
             'password: SecretStr = SecretStr(os.getenv("DB_PASSWORD", ""))'
         ),
@@ -192,10 +198,388 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         "const dbPassword =\n  process.env.DB_PASSWORD;",
         "password = process.env.DB_PASSWORD || `example-password`",
         "token = access_token",
+        "reset_token = []",
+        "client_secret = {}",
     ),
 )
 def test_source_secret_scanner_allows_types_references_and_placeholders(assignment):
     assert not contains_secret(assignment)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "page_token = payload.nextPageToken",
+        "headers: {'idToken': idToken}",
+        "token: fcmToken,",
+        "const fcmToken = userSnapshot.data()?.fcmToken;",
+        'const geminiApiKey = defineSecret("GEMINI_API_KEY");',
+        '"google-api-key": re.compile(r"\\bAIza[0-9A-Za-z_-]{30,}\\b")',
+        (
+            "registerPushToken = onCall(\n"
+            '  {region: "asia-northeast1", timeoutSeconds: 30},\n'
+            "  runRegisterPushToken,\n"
+            ");"
+        ),
+        'token = os.environ.get("DISCORD_TOKEN", "")',
+        "if not token:\n    log.error('DISCORD_TOKEN is not set')",
+        "token == null ? 'missing' : 'available'",
+        "auth: {uid: 'visitor-1', token: {isAdmin: true}}",
+        "YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=${YAGAPON_FIREBASE_KNOWLEDGE_API_KEY:-}",
+    ),
+)
+def test_source_secret_scanner_allows_runtime_identifiers_and_definitions(source):
+    assert not contains_secret(source)
+
+
+@pytest.mark.parametrize("quote", ("", "'", '"'))
+def test_source_secret_scanner_allows_explicit_secret_manager_resource_name(quote):
+    source = (
+        f"YAGAPON_GOOGLE_OAUTH_SECRET={quote}"
+        f"projects/yagamiatlas/secrets/yagapon-google-drive-oauth/versions/latest{quote}"
+        "\r\n"
+    )
+
+    assert not contains_secret(source)
+    assert redact_source_secrets(source) == (source, 0)
+
+
+def test_source_secret_scanner_does_not_allow_concrete_shell_default():
+    assert contains_secret("API_KEY=${API_KEY:-ProdRealSecret123}")
+    assert contains_secret('token: {value: "ProdRealSecret123"}')
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        'password = re.compile("ProdRealSecret123")',
+        'password = re.compile("Actual[Prod]Secret{9}")',
+        'token = onCall("ProdRealSecret123")',
+        'getToken = onCall("ActualProdSecret982734")',
+        'token: {uid: "ProdRealSecret123"}',
+        'token = {"sub": "admin-real-prod-token"}',
+        "token: {sub: ActualProdValue982734}",
+        "token: {firebase: {uid: ActualProdValue982734}}",
+        'token: {uid: "secr3t"}',
+        'password = defineSecret("THIS_IS_THE_ACTUAL_PASSWORD")',
+        'geminiApiKey = defineSecret("ACTUAL_PROD_PASSWORD")',
+        'password = re.compile(r"\\bACTUALPRODPASSWORD[A-Z]{20}")',
+        '"google-api-key": re.compile("AIzaProdRealSecret982734")',
+        '"google-api-key": re.compile("AIza[Prod]RealSecret{20}")',
+        'const cfg = enabled ? {password: "ActualProdSecret982734"} : {}',
+        "API_KEY=ProdApiKeyValue982734",
+        "TOKEN=ACTUALPRODSECRET",
+        "export API_KEY=ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        (
+            "DB_PASSWORD_SECRET=actualpassword\n"
+            "DB_PASSWORD_FILE=/run/secrets/database-password"
+        ),
+        'token := "ProdRealSecret123"',
+        'token += "ProdRealSecret123"',
+        'token ??= "ProdRealSecret123"',
+        'token == "ProdRealSecret123"',
+        'authorization="Bearer eyJfixtureHeader.fixturePayload.fixtureSignature"',
+        'token = "Prod" + "Real" + "Secret"',
+        'token = "Prod" "Real" "Secret"',
+        'token = "a" * 40',
+        "token = bytes([80, 114, 111, 100, 83, 101, 99, 114, 101, 116])",
+        "token = bytes((80, 114, 111, 100))",
+        "token = bytes([80, 114]) + bytes([111, 100])",
+        "token = bytes([80, 114] + [111, 100])",
+        "token = bytes((80, 114) + (111, 100))",
+        "token = bytes(map(int, [80, 114, 111, 100]))",
+        'token = """ProdReal\nSecret123"""',
+        "token = `ProdReal\nSecret123`",
+        'token = {uid: request.auth.uid, ["roles"]: ["ProdRealSecret123"]}',
+        'token = {uid: request.auth.uid, ... ["ProdRealSecret123"]}',
+        'token = {uid: request.auth.uid, ...leak("ProdRealSecret123")}',
+        'token = get("ProdRealSecret123")',
+        'token = values["ProdRealSecret123"]',
+        'token = "abc123"',
+        "token=abc123",
+        "PASSWORD=abc123",
+        'token = "prod-available-secret"',
+        'password = "missing-real-password"',
+        'token = "live-example-token"',
+        'password = "actual-placeholder-password"',
+        'client_secret = "example-live-actual-secret"',
+        'token = "ProdReal\\\nSecret123"',
+        "token = `ProdReal\\\nSecret123`",
+        "TOKEN=ProdReal\\\nSecret123",
+        'token: "Prod\n  Secret123"',
+        'TOKEN="Prod\nSecret123"',
+        "TOKEN='Prod\nSecret123'",
+        'token /* credential */ = "ProdRealSecret123"',
+        'token /* credential\ncontinued */ = "ProdRealSecret123"',
+        'config["token"] = "ProdRealSecret123"',
+        'config [ "token" ] = "ProdRealSecret123"',
+        'config/* gap */[`token`]/* gap */="ProdRealSecret123"',
+        'token\n=\n"ProdRealSecret123"',
+        'token **= "ProdRealSecret123"',
+        'token //= "ProdRealSecret123"',
+        '$token = "ProdRealSecret123"',
+        'headers["Authorization"] = "Bearer ProdRealSecret123"',
+        (
+            "token = {uid: request.auth.uid, "
+            '/* unparsed */ roles: ["ProdRealSecret123"]}'
+        ),
+        'token = read_secret(value="ProdRealSecret123")',
+        'token = secret("ProdRealSecret123")',
+        'token = config.get("ProdRealSecret123")',
+        "https://example.invalid/path?token=ProdRealSecret123",
+        "https://user:ProdRealSecret123@example.invalid/path",
+        "postgresql://user:ProdRealSecret123@example.invalid/database",
+        "redis://:ProdRealSecret123@example.invalid/0",
+        'secret("ProdRealSecret123")',
+        'secret(value="ProdRealSecret123")',
+        'api_key(value="ProdRealSecret123")',
+        "<token>ProdRealSecret123</token>",
+        '<input name="password" value="ProdRealSecret123">',
+        '<input id="api_key" value="ProdRealSecret123">',
+        '<input type="password" value="ProdRealSecret123">',
+        '<meta name="api_key" content="ProdRealSecret123">',
+        '<config key="token" value="ProdRealSecret123"/>',
+        "<input name=password value=ProdRealSecret123>",
+        "<meta name=api_key content=ProdRealSecret123>",
+        "<config key=token value=ProdRealSecret123>",
+        'echo "${TOKEN:=ProdRealSecret123}"',
+    ),
+)
+def test_source_secret_scanner_blocks_adversarial_literal_contexts(source):
+    assert contains_secret(source)
+    diff = "\n".join(f"+{line}" for line in source.splitlines())
+    assert contains_history_secret(diff)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "token == null",
+        "token === undefined",
+        "token => token.length",
+        'token = "Bearer " + access_token',
+        'headers["Authorization"] = "Bearer " + access_token',
+        'headers["Authorization"] = f"Bearer {token}"',
+        'headers["Authorization"] = `Bearer ${token}`',
+        'token = read_secret("DISCORD_TOKEN")',
+        'token = config.get("DISCORD_TOKEN")',
+        "token = bytes(token_bytes)",
+        "https://example.invalid/path?token=${TOKEN}",
+        "https://user:${PASSWORD}@example.invalid/path",
+        "redis://:${PASSWORD}@example.invalid/0",
+        "<token>${TOKEN}</token>",
+        '<input name="password" value="${PASSWORD}">',
+        '<input id="api_key" value="${API_KEY}">',
+        '<input type="password" value="${PASSWORD}">',
+        '<meta name="api_key" content="replace-with-your-api-key">',
+        '<config key="token" value="${TOKEN}"/>',
+        '<config token="${TOKEN}"/>',
+        "<input name=password value=${PASSWORD}>",
+        'echo "${TOKEN:-}"',
+    ),
+)
+def test_source_secret_scanner_does_not_treat_comparisons_as_assignments(source):
+    assert not contains_secret(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "token: {uid: request.auth.uid, isAdmin: true, exp: 1234567890}",
+        "token: {firebase: {uid: request.auth.uid, isAdmin: false}}",
+        'token: {uid: "visitor-fixture", sign_in_provider: "password"}',
+        "token: {roles: roles, departments: user.departments}",
+    ),
+)
+def test_source_secret_scanner_allows_safe_claim_scalars(source):
+    assert not contains_secret(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        (
+            '"github-token": re.compile('
+            'r"\\bgithub_pat_[A-Za-z0-9_]{20,}\\b|'
+            '\\bgh[pousr]_[A-Za-z0-9]{30,}\\b")'
+        ),
+        (
+            '"discord-token": re.compile('
+            'r"\\bmfa\\.[A-Za-z0-9_-]{20,}\\b|'
+            '\\b[MN][A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{6}'
+            '\\.[A-Za-z0-9_-]{20,}\\b")'
+        ),
+        (
+            '"oauth-token": re.compile('
+            'r"\\b(?:ya29\\.[A-Za-z0-9_-]{20,}|1//[A-Za-z0-9_-]{20,})\\b")'
+        ),
+    ),
+)
+def test_source_secret_scanner_allows_exact_reviewed_scanner_definitions(source):
+    assert not contains_secret(source)
+
+
+def test_current_source_redacts_isolated_literal_but_keeps_safe_context():
+    source = "\n".join(
+        (
+            "def connect():",
+            '    password = "ProdRealSecret123"',
+            "    return client()",
+        )
+    )
+
+    sanitized = redact_source_secrets(source)
+
+    assert sanitized is not None
+    content, count = sanitized
+    assert count == 1
+    assert "ProdRealSecret123" not in content
+    assert "def connect():" in content
+    assert "return client()" in content
+    assert not contains_secret(content)
+
+
+def test_current_source_redacts_direct_embedded_secret_without_assignment():
+    source = "\n".join(
+        (
+            "# Connection example",
+            "https://example.invalid/path?token=ProdRealSecret123",
+            "# End example",
+        )
+    )
+
+    sanitized = redact_source_secrets(source)
+
+    assert sanitized is not None
+    content, count = sanitized
+    assert count == 1
+    assert "ProdRealSecret123" not in content
+    assert "# Connection example" in content
+    assert "# End example" in content
+    assert not contains_secret(content)
+
+
+@pytest.mark.parametrize(
+    "safe_assignment",
+    (
+        '    password = os.getenv(\n        "DB_PASSWORD",\n        ""\n    )',
+        (
+            "    const geminiApiKey = defineSecret(\n"
+            '        "GEMINI_API_KEY"\n'
+            "    );"
+        ),
+        (
+            "    registerPushToken = onCall(\n"
+            '        {region: "asia-northeast1", timeoutSeconds: 30},\n'
+            "        runRegisterPushToken,\n"
+            "    );"
+        ),
+        '    token = os.environ[\n        "DISCORD_TOKEN"\n    ]',
+    ),
+)
+def test_current_source_redaction_keeps_safe_multiline_assignment(
+    safe_assignment,
+):
+    source = "\n".join(
+        (
+            "def load():",
+            safe_assignment,
+            '    api_key = "ProdRealSecret123"',
+            "    return value",
+        )
+    )
+
+    sanitized = redact_source_secrets(source)
+
+    assert sanitized is not None
+    content, count = sanitized
+    assert count == 1
+    assert safe_assignment in content
+    assert "ProdRealSecret123" not in content
+    assert "return value" in content
+    assert not contains_secret(content)
+
+
+def test_current_source_redacts_bounded_multiline_but_fails_closed_for_private_key():
+    multiline = (
+        "def connect():\n"
+        '    password = SecretStr(\n        "ProdRealSecret123"\n    )\n'
+        "    return client()"
+    )
+    private_key = "-----BEGIN " + "PRIVATE KEY-----\nfixture-only\n"
+
+    sanitized = redact_source_secrets(multiline)
+    assert sanitized is not None
+    content, count = sanitized
+    assert count == 3
+    assert "ProdRealSecret123" not in content
+    assert "def connect():" in content
+    assert "return client()" in content
+    assert not contains_secret(content)
+    assert redact_source_secrets(private_key) is None
+
+
+@pytest.mark.parametrize("separator", ("\r", "\v", "\f", "\x85", "\u2028", "\u2029"))
+def test_current_source_fails_closed_for_unsupported_line_separators(separator):
+    source = (
+        f"def connect():{separator}"
+        f"    password = SecretStr({separator}"
+        f'        "ProdRealSecret123"{separator}'
+        f"    ){separator}"
+        f"    return client(){separator}"
+    )
+
+    assert redact_source_secrets(source) is None
+
+
+def test_current_source_keeps_non_secret_unicode_line_separator():
+    source = "first paragraph\u2028second paragraph"
+
+    assert redact_source_secrets(source) == (source, 0)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "token /*" + "x" * 119_990,
+        "<input name=password " + "x" * 119_978,
+    ),
+)
+def test_source_secret_scanner_handles_adversarial_prefixes_in_linear_time(source):
+    started = time.perf_counter()
+    detected = contains_secret(source)
+    scan_elapsed = time.perf_counter() - started
+
+    started = time.perf_counter()
+    sanitized = redact_source_secrets(source)
+    redact_elapsed = time.perf_counter() - started
+
+    assert not detected
+    assert sanitized == (source, 0)
+    assert scan_elapsed < 0.5
+    assert redact_elapsed < 0.5
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        ("token /* " * 15_000)[:120_000],
+        ('token="${TOKEN}"; ' * 8_000)[:120_000],
+    ),
+)
+def test_source_secret_scanner_fails_closed_for_dense_minified_lines(source):
+    started = time.perf_counter()
+    detected = contains_secret(source)
+    scan_elapsed = time.perf_counter() - started
+
+    started = time.perf_counter()
+    sanitized = redact_source_secrets(source)
+    redact_elapsed = time.perf_counter() - started
+
+    assert detected
+    assert sanitized is None
+    assert scan_elapsed < 0.5
+    assert redact_elapsed < 0.5
 
 
 def test_source_secret_scanner_fails_closed_when_assignment_rhs_exceeds_bound():
