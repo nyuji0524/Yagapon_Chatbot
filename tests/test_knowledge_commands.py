@@ -30,6 +30,32 @@ def test_curation_batch_limit_is_bounded(monkeypatch):
     assert _curation_batch_limit() == 3
 
 
+def test_registered_refresh_exposes_runtime_option_type_to_pycord():
+    """Pycord invokes ``issubclass`` on option annotations at command runtime."""
+
+    class Group:
+        def __init__(self):
+            self.callbacks = {}
+
+        def command(self, *_args, **kwargs):
+            def decorator(function):
+                self.callbacks[kwargs.get("name", function.__name__)] = function
+                return function
+
+            return decorator
+
+    group = Group()
+    bot = SimpleNamespace(
+        create_group=Mock(return_value=group),
+        knowledge_refresh_tasks=set(),
+    )
+
+    register(bot)
+
+    option = group.callbacks["refresh"].__annotations__["mode"]
+    assert option._raw_type is str
+
+
 @pytest.mark.asyncio
 async def test_registered_refresh_acknowledges_then_reports_to_channel(monkeypatch):
     class Group:
