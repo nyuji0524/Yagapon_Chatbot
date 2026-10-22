@@ -62,7 +62,67 @@ DOCUMENT_SESSION_GAP = timedelta(hours=6)
 DOCUMENT_MAX_MERGE_GAP = timedelta(hours=24)
 UPLOAD_POLL_SECONDS = 2
 UPLOAD_TIMEOUT_SECONDS = 180
+FILE_SEARCH_CUSTOM_METADATA_LIMIT = 20
 JST = ZoneInfo("Asia/Tokyo")
+
+# File Search accepts at most 20 custom metadata entries per document. Keep
+# fields used for access control, reconciliation, filtering, and citations at
+# the front of the selection order. The complete metadata set is still kept in
+# the local RagStore mirror, so informational fields omitted from the remote
+# request remain available to curation and exact-search paths.
+_FILE_SEARCH_METADATA_PRIORITY = (
+    "document_key",
+    "guild_id",
+    "access_scope",
+    "channel_id",
+    "source_type",
+    "schema",
+    "status",
+    "authority",
+    "festival",
+    "channel_name",
+    "category_name",
+    "parent_id",
+    "parent_name",
+    "category_id",
+    "start_at",
+    "end_at",
+    "start_epoch",
+    "end_epoch",
+    "source_url",
+    "content_sha256",
+    "repository",
+    "commit_sha",
+    "source_path",
+    "start_line",
+    "end_line",
+    "change_status",
+)
+_FILE_SEARCH_METADATA_PRIORITY_INDEX = {
+    key: index for index, key in enumerate(_FILE_SEARCH_METADATA_PRIORITY)
+}
+
+
+def _file_search_metadata(metadata: list[dict] | None) -> list[dict]:
+    """Return a meaning-preserving File Search metadata subset within its limit."""
+    items = list(metadata or ())
+    if len(items) <= FILE_SEARCH_CUSTOM_METADATA_LIMIT:
+        return items
+
+    ranked = sorted(
+        enumerate(items),
+        key=lambda indexed: (
+            _FILE_SEARCH_METADATA_PRIORITY_INDEX.get(
+                str(indexed[1].get("key") or ""),
+                len(_FILE_SEARCH_METADATA_PRIORITY),
+            ),
+            indexed[0],
+        ),
+    )
+    selected_indices = {
+        index for index, _item in ranked[:FILE_SEARCH_CUSTOM_METADATA_LIMIT]
+    }
+    return [item for index, item in enumerate(items) if index in selected_indices]
 
 # レート制限
 DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
@@ -1217,6 +1277,7 @@ class CorpusManager:
             try:
                 loop = asyncio.get_running_loop()
                 file_bytes = text.encode("utf-8")
+                remote_metadata = _file_search_metadata(metadata)
 
                 operation = await loop.run_in_executor(
                     None,
@@ -1226,7 +1287,7 @@ class CorpusManager:
                         config={
                             "display_name": display_name,
                             "mime_type": "text/plain",
-                            "custom_metadata": metadata or [],
+                            "custom_metadata": remote_metadata,
                             "chunking_config": {
                                 "white_space_config": {
                                     "max_tokens_per_chunk": 500,
