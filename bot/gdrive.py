@@ -270,7 +270,10 @@ def _render_markdown(
 
 class DriveWriter:
     def __init__(self):
-        credentials, self.credential_source = load_google_credentials([DRIVE_FILE_SCOPE, DOCS_SCOPE])
+        # ``drive.file`` alone cannot discover a pre-existing configured parent.
+        credentials, self.credential_source = load_google_credentials(
+            [READONLY_SCOPE, DRIVE_FILE_SCOPE, DOCS_SCOPE]
+        )
         self.drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
         self.docs = build("docs", "v1", credentials=credentials, cache_discovery=False)
 

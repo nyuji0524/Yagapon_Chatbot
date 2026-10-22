@@ -522,7 +522,18 @@ class CorpusManager:
             self.rag_store.document_references,
             guild_id,
         )
-        local_by_key = {str(item["document_key"]): str(item.get("remote_name") or "") for item in local_documents}
+        mirrored_local_documents = [
+            item
+            for item in local_documents
+            if not (
+                item.get("source_type") == BUILTIN_SOURCE_TYPE
+                and not item.get("remote_name")
+            )
+        ]
+        local_by_key = {
+            str(item["document_key"]): str(item.get("remote_name") or "")
+            for item in mirrored_local_documents
+        }
         remote_by_key: dict[str, list[str]] = {}
         for item in remote_documents:
             metadata = item["metadata"]
@@ -542,7 +553,7 @@ class CorpusManager:
         local_only = sorted(local_keys - remote_keys)
         remote_only = sorted(remote_keys - local_keys)
         return {
-            "local_documents": len(local_documents),
+            "local_documents": len(mirrored_local_documents),
             "remote_documents": sum(len(names) for names in remote_by_key.values()),
             "local_only": len(local_only),
             "remote_only": len(remote_only),

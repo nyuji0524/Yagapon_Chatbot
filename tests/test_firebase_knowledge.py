@@ -1,3 +1,5 @@
+import pytest
+
 from bot.firebase_knowledge import COLLECTIONS, FirebaseKnowledgeReader
 from bot.knowledge_authority import QuestionKind
 
@@ -83,6 +85,60 @@ async def test_public_backend_uses_rules_compatible_status_query(monkeypatch):
         "paused",
         "closed",
     ]
+
+
+async def test_non_config_collection_still_uses_collection_list_get(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    captured = {}
+
+    async def request(method, url, *, payload=None, headers=None):
+        captured.update(method=method, url=url, payload=payload, headers=headers)
+        return {"documents": []}
+
+    monkeypatch.setattr(reader._directory, "_request", request)
+
+    await reader._collection("events", "festival/28/events", ())
+
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/festival/28/events?pageSize=100")
+    assert captured["payload"] is None
+
+
+@pytest.mark.parametrize("festival", [27, 28])
+async def test_config_uses_known_standby_pass_document_get(monkeypatch, festival):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_API_KEY", "firebase-public-key")
+    reader = FirebaseKnowledgeReader()
+    captured = {}
+
+    async def request(method, url, *, payload=None, headers=None):
+        captured.update(method=method, url=url, payload=payload, headers=headers)
+        return {
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                f"yagamy/{festival}/config/standbyPass"
+            ),
+            "fields": {"isEnabled": {"booleanValue": True}},
+        }
+
+    monkeypatch.setattr(reader._directory, "_request", request)
+
+    documents = await reader._collection(
+        "config",
+        COLLECTIONS["config"]["path"].format(festival=festival),
+        (),
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith(f"/yagamy/{festival}/config/standbyPass")
+    assert captured["payload"] is None
+    assert captured["headers"] == {"X-Goog-Api-Key": "firebase-public-key"}
+    assert documents[0]["fields"]["isEnabled"] == {"booleanValue": True}
 
 
 async def test_one_firebase_collection_failure_keeps_other_evidence(monkeypatch):

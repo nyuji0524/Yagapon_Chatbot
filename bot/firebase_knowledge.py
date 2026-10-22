@@ -63,7 +63,8 @@ COLLECTIONS = {
     },
     "config": {
         "keywords": r"開催時間|終了時間|会期|当日設定|公開設定|config|設定値",
-        "path": "yagamy/{festival}/config",
+        # Rules expose this known public document, not a list of the config collection.
+        "path": "yagamy/{festival}/config/standbyPass",
         "fields": (
             "name", "status", "startAt", "endAt", "openingAt", "closingAt",
             "enabled", "isEnabled", "isActive", "festival", "day1StartOfDayAt",
@@ -157,7 +158,14 @@ class FirebaseKnowledgeReader:
             cached = self._cache.get(cache_key)
             if cached and now - cached[0] < self.cache_seconds:
                 return cached[1]
-        if public_statuses:
+        if name == "config":
+            payload = await self._directory._request(
+                "GET",
+                self._directory._documents_url(f"/{path}"),
+                headers=self._public_headers(),
+            )
+            documents = [payload] if payload else []
+        elif public_statuses:
             parent, collection_id = path.rsplit("/", 1)
             if len(public_statuses) == 1:
                 value = {"stringValue": public_statuses[0]}
