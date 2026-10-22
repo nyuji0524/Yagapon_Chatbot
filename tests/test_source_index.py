@@ -81,16 +81,46 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert contains_secret('{"client_secret": "1234567890abcdefghijklmnop"}')
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        "password: " + "production-value-" * 2,
+        "api_key=" + "0123456789abcdef" * 2,
+        "client_secret: " + "runtime-credential-" * 2,
+        "export ACCESS_TOKEN=" + "service-token-value-" * 2,
+    ),
+)
+def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
+    assert contains_secret(assignment)
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        "token: SecretStr",
+        "token: str",
+        "token = os.environ['GITHUB_TOKEN']",
+        "api_key: ${API_KEY}",
+        'client_secret: read_secret("CLIENT_SECRET")',
+        "password: replace-with-your-password",
+        'api_key = "example-api-key-for-docs"',
+        "token = access_token",
+    ),
+)
+def test_source_secret_scanner_allows_types_references_and_placeholders(assignment):
+    assert not contains_secret(assignment)
+
+
 def test_history_secret_scanner_fails_closed_for_removed_credentials():
     # Assemble unmistakably synthetic values at runtime so the repository does
     # not itself contain a contiguous token/private-key fixture.
-    unquoted = "+client_secret: " + "fixture-value-" * 2
+    unquoted = "+client_secret: " + "runtime-value-" * 2
     jwt = "+authorization: Bearer " + ".".join(
         ("eyJfixtureHeader", "fixturePayload", "fixtureSignature")
     )
     pem = "+-----BEGIN " + "PRIVATE KEY-----\nfixture-only"
 
-    assert not contains_secret(unquoted)
+    assert contains_secret(unquoted)
     assert contains_history_secret(unquoted)
     assert contains_history_secret(jwt)
     assert contains_history_secret(pem)

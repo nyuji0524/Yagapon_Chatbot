@@ -104,16 +104,37 @@ SOURCE_SECRET_PATTERNS = {
     for key, value in SENSITIVE_PATTERNS.items()
     if key != "credential-assignment"
 }
-SOURCE_SECRET_PATTERNS["literal-secret"] = re.compile(
-    r"(?i)['\"]?(?:password|passwd|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=]\s*"
-    r"['\"][^'\"\n]{16,}['\"]"
+SOURCE_SECRET_ASSIGNMENT = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"['\"]?(?P<key>password|passwd|client[_ -]?secret|secret|api[_ -]?key|"
+    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?"
+    r"\s*(?P<operator>[:=])\s*"
+    r'(?:"(?P<double>[^"\r\n]{8,})"|'
+    r"'(?P<single>[^'\r\n]{8,})'|"
+    r"(?P<unquoted>[^\s'\"`,;#}\]]{8,}))"
+)
+SOURCE_SECRET_PLACEHOLDER = re.compile(
+    r"(?i)(?:^|[-_./<>{}\s])"
+    r"(?:example|sample|placeholder|changeme|change-me|replace|redacted|"
+    r"fixture|dummy|fake|not-a-real|your|xxxxx+|todo|goes-here)"
+    r"(?:$|[-_./<>{}\s])"
+)
+SOURCE_SECRET_TYPES = frozenset(
+    {
+        "any",
+        "bytes",
+        "optional",
+        "secretstr",
+        "str",
+        "string",
+    }
 )
 # Historical diffs are a substantially riskier source than a current checkout:
 # deleting a leaked credential from ``main`` leaves the value in the commit that
 # introduced it.  Use a deliberately fail-closed policy for history even though
-# the current-source scanner stays narrower to avoid dropping ordinary source
-# files whose variables happen to be named ``token``.
+# the current-source scanner recognizes concrete assignments but filters obvious
+# placeholders, type annotations, and runtime secret references. History stays
+# stricter because a removed assignment has less surrounding context.
 HISTORY_SECRET_PATTERNS = {
     **SOURCE_SECRET_PATTERNS,
     "sensitive-assignment": re.compile(
@@ -1038,8 +1059,63 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
     )
 
 
+def _concrete_source_secret(match: re.Match[str]) -> bool:
+    """Separate credential literals from types, placeholders, and references."""
+    value = next(
+        candidate
+        for candidate in (
+            match.group("double"),
+            match.group("single"),
+            match.group("unquoted"),
+        )
+        if candidate is not None
+    ).strip()
+    normalized = value.casefold()
+    if SOURCE_SECRET_PLACEHOLDER.search(normalized):
+        return False
+    if normalized in SOURCE_SECRET_TYPES or normalized in {
+        "false",
+        "none",
+        "null",
+        "required",
+        "true",
+        "undefined",
+    }:
+        return False
+    if value.startswith(("$", "%", "<", "{{", "*", "&", "!")):
+        return False
+    if any(character in value for character in "()[]{}"):
+        return False
+    if re.match(
+        r"(?i)(?:os\.(?:environ|environ\.get|getenv)|process\.env|"
+        r"(?:read_)?secret|settings\.|config\.|self\.|this\.|"
+        r"request\.|response\.|credentials\.|vault\.)",
+        value,
+    ):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
+        return False
+    if match.group("operator") == ":" and re.fullmatch(
+        r"[A-Z][A-Za-z0-9_]*(?:\[[^\]]+\])?",
+        value,
+    ):
+        return False
+    if re.fullmatch(
+        r"(?i)(?:[a-z][a-z0-9]*_)*(?:api_key|access_token|refresh_token|"
+        r"client_secret|token|secret|password|passwd)(?:_value)?",
+        value,
+    ):
+        return False
+    return True
+
+
 def contains_secret(text: str) -> bool:
-    return any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values())
+    if any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values()):
+        return True
+    return any(
+        _concrete_source_secret(match)
+        for match in SOURCE_SECRET_ASSIGNMENT.finditer(text)
+    )
 
 
 def contains_history_secret(text: str) -> bool:
