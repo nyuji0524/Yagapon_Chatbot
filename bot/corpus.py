@@ -1018,25 +1018,29 @@ class CorpusManager:
             channel = metadata.get("channel_name")
             start = str(metadata.get("start_at") or "")[:10]
             festival = metadata.get("festival")
+            status = str(metadata.get("status") or "")
+            authority = str(metadata.get("authority") or "")
+            source_type = str(metadata.get("source_type") or "")
             if expected_festival is not None:
                 try:
                     source_festival = int(float(festival))
                 except (TypeError, ValueError):
-                    # An unlabelled legacy document cannot safely support a
-                    # festival-specific answer.
-                    continue
-                if source_festival != expected_festival:
+                    source_festival = None
+                timeless_trusted = (
+                    source_festival is None
+                    and source_type in {"builtin_reference", "knowledge_repository"}
+                    and authority in {"canonical", "curated", "reviewed_record"}
+                    and status in {"active", "historical", "approved", "verified", "current"}
+                )
+                if source_festival != expected_festival and not timeless_trusted:
                     continue
             if expected_date is not None and start != expected_date:
                 continue
-            status = metadata.get("status")
-            authority = str(metadata.get("authority") or "")
-            source_type = str(metadata.get("source_type") or "")
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)
             label = (
                 str(channel)
-                if channel and source_type == "source_code"
+                if channel and source_type in {"source_code", "knowledge_repository"}
                 else f"#{channel}" if channel
                 else (title or "ナレッジ")
             )

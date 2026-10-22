@@ -464,6 +464,40 @@ def test_response_sources_keep_only_the_expected_festival(corpus_manager):
     assert corpus_manager._response_sources(response, expected_festival=28) == ["#記録 [28th]"]
 
 
+def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):
+    def chunk(*, authority, status, source_type):
+        return SimpleNamespace(
+            retrieved_context=SimpleNamespace(
+                title="運用仕様",
+                uri="https://github.example/knowledge/retry.md",
+                custom_metadata=[
+                    {"key": "channel_name", "string_value": "knowledge/operations/retry.md"},
+                    {"key": "authority", "string_value": authority},
+                    {"key": "status", "string_value": status},
+                    {"key": "source_type", "string_value": source_type},
+                ],
+            )
+        )
+
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[
+                        chunk(authority="conversation", status="raw", source_type="discord_conversation"),
+                        chunk(authority="curated", status="active", source_type="knowledge_repository"),
+                    ]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response, expected_festival=28) == [
+        "[確定仕様: knowledge/operations/retry.md [active]]"
+        "(https://github.example/knowledge/retry.md)"
+    ]
+
+
 def test_response_sources_keep_only_the_expected_calendar_date(corpus_manager):
     def chunk(day):
         return SimpleNamespace(

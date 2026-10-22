@@ -113,7 +113,7 @@ docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yaga
 data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
 data_path=${data_path:-/var/lib/yagapon}
 install -d -o 10001 -g 10001 -m 0750 "$data_path/releases"
-docker run --rm \
+timeout --signal=TERM --kill-after=30s 420s docker run --rm \
   --env-file /etc/yagapon/yagapon.env \
   --volume "$data_path:/data" \
   "$image" python -m bot.preflight

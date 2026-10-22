@@ -295,10 +295,13 @@ class RagStore:
         conditions = ["(guild_id = ? OR guild_id = 0)"]
         params: list[object] = [guild_id]
         if festival is not None:
-            # A built-in reference with no festival is an explicitly reviewed,
-            # year-independent contract. Guild documents with missing festival
-            # remain excluded from year-specific questions.
-            conditions.append("(festival = ? OR (guild_id = 0 AND festival IS NULL))")
+            # Explicitly reviewed/curated documents with no festival are
+            # year-independent contracts. Raw unlabelled guild documents stay
+            # excluded from year-specific questions.
+            conditions.append(
+                "(festival = ? OR (festival IS NULL AND authority IN "
+                "('canonical', 'curated', 'reviewed_record')))"
+            )
             params.append(festival)
         if target_date is not None:
             conditions.append("substr(start_at, 1, 10) = ?")

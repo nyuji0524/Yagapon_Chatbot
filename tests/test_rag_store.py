@@ -134,6 +134,25 @@ def test_year_filter_still_excludes_unlabelled_guild_documents(tmp_path):
     assert store.search_exact(1, ["文字起こし"], festival=28) == []
 
 
+def test_year_filter_includes_timeless_curated_repository_document(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "knowledge://retry",
+        "PR作成に失敗した草案は次回の再試行まで保存する",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "knowledge:retry"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "active"},
+            {"key": "source_type", "string_value": "knowledge_repository"},
+        ],
+    )
+
+    hits = store.search_exact(1, ["再試行"], festival=28)
+
+    assert [hit.document_key for hit in hits] == ["knowledge:retry"]
+
+
 def test_curated_global_document_survives_sql_candidate_limit(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     store.upsert_document(

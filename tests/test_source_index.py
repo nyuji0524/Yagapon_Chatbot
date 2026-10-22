@@ -18,6 +18,7 @@ def curated_repository() -> Repository:
         name="YagamiFes-IT/YagamiFes-IT-Knowledge",
         ref="main",
         include=("knowledge/",),
+        source_type="knowledge_repository",
         authority="curated",
         status="current",
         front_matter_statuses=("active", "historical"),
@@ -101,6 +102,31 @@ def test_chunks_use_front_matter_festival_override():
     assert chunk.festival == 26
 
 
+def test_curated_timeless_document_is_not_mislabelled_as_current_year(monkeypatch):
+    monkeypatch.setattr("source_index.__main__.current_festival", lambda: 28)
+    chunk = chunks_for(
+        "YagamiFes-IT/YagamiFes-IT-Knowledge",
+        "a" * 40,
+        "knowledge/operations/retry.md",
+        "再試行できるように保存する",
+        authority="curated",
+        status="active",
+        festival=None,
+        source_type="knowledge_repository",
+        infer_missing_festival=False,
+    )[0]
+    values = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in metadata_for(chunk, 123, "b" * 64)
+    }
+
+    assert chunk.festival is None
+    assert values["source_type"] == "knowledge_repository"
+    assert "festival" not in values
+    assert "KNOWLEDGE REPOSITORY DATA" in chunk.text
+    assert "SOURCE CODE DATA" not in chunk.text
+
+
 def test_gcs_snapshot_validates_repository_and_commit(monkeypatch):
     class FakeGCS:
         def __init__(self, bucket):
@@ -175,6 +201,12 @@ def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
         "nyuji0524/Yagapon_Chatbot",
         "YagamiFes-IT/yagamifes-firebase",
     }
+    knowledge = next(
+        repository
+        for repository in repositories
+        if repository.name == "YagamiFes-IT/YagamiFes-IT-Knowledge"
+    )
+    assert knowledge.source_type == "knowledge_repository"
 
 
 def test_unreadable_release_metadata_is_non_fatal(tmp_path, monkeypatch):

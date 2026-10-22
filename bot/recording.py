@@ -40,6 +40,10 @@ TERMINAL_STATUSES = {
     "recovered",
     "recovery_dead_letter",
 }
+REPLAY_AUDIO_DELETION_STATUSES = {
+    "delivered_recording_retained",
+    "recovery_dead_letter",
+}
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,61 @@ def save_external_transcript(
     temporary.write_text(document, encoding="utf-8")
     os.replace(temporary, destination)
     return destination
+
+
+def finalize_recording_replay(
+    *,
+    guild_id: int,
+    session_id: str,
+    session_dir: Path,
+    channel_name: str,
+    transcript: str,
+    replay_job_id: str,
+) -> int:
+    """Archive a successful replay transcript, then remove its source PCM.
+
+    Only sessions explicitly retained after a failed transcription (or moved to
+    the recovery dead letter queue) are eligible. This prevents a replay racing
+    with an active recording from deleting audio.
+    """
+    expected_dir = (recording_root() / str(guild_id) / session_id).resolve()
+    resolved_dir = session_dir.resolve()
+    if resolved_dir != expected_dir:
+        raise ValueError("recording replay source is outside the recording archive")
+    metadata_path = resolved_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if str(metadata.get("status") or "") not in REPLAY_AUDIO_DELETION_STATUSES:
+        return 0
+    archived = save_external_transcript(
+        guild_id,
+        session_id,
+        channel_name,
+        transcript,
+        mode="recording-replay-finalized",
+    )
+    if archived is None or not archived.is_file() or archived.stat().st_size <= 0:
+        raise RuntimeError("replay transcript could not be archived before audio deletion")
+    deleted = 0
+    for path in resolved_dir.glob("user-*.pcm"):
+        try:
+            path.unlink()
+            deleted += 1
+        except FileNotFoundError:
+            continue
+    metadata.update(
+        {
+            "status": "delivered_audio_deleted",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "transcript_path": str(archived),
+            "replay_job_id": replay_job_id,
+            "raw_audio_deleted_after_replay": True,
+            "deleted_pcm_files": deleted,
+        }
+    )
+    temporary = metadata_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, metadata_path)
+    return deleted
 
 
 class RecordingLimitExceeded(RuntimeError):
