@@ -14,11 +14,24 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bot.knowledge_authority import is_history_narrative_source
+
 SQLITE_CONNECT_TIMEOUT_SECONDS = 5.0
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_WRITE_ATTEMPTS = 3
 SQLITE_RETRY_BASE_SECONDS = 0.05
 
+_LOW_INFORMATION_QUERY_TERMS = {
+    "あった内容",
+    "なった点",
+    "会議内容",
+    "内容",
+    "運用",
+    "記録",
+    "問題",
+    "問題点",
+    "課題",
+}
 
 def default_rag_db_path() -> Path:
     configured = os.environ.get("YAGAPON_RAG_DB_PATH")
@@ -513,6 +526,7 @@ class RagStore:
             "施設概要",
             "概要",
             "意味",
+            *_LOW_INFORMATION_QUERY_TERMS,
         }
         for segment in segments:
             segment = re.sub(
@@ -531,7 +545,11 @@ class RagStore:
                     segment,
                 )
                 if compound:
-                    terms.extend(compound.groups())
+                    # Keep the concrete subject and the compound itself.  A
+                    # suffix such as ``運用`` occurs in almost every internal
+                    # document and lets large source families crowd out the
+                    # actual meeting/conversation evidence.
+                    terms.append(compound.group(1))
         # Preserve short, information-bearing domain cues that the generic
         # Japanese particle splitter would otherwise drop or glue together.
         # These are vocabulary classes rather than answers; they only improve
@@ -560,6 +578,9 @@ class RagStore:
         unique = []
         seen = set()
         for term in terms:
+            term = term.strip()
+            if term in _LOW_INFORMATION_QUERY_TERMS:
+                continue
             normalized_term = term.casefold()
             if term and normalized_term not in seen:
                 seen.add(normalized_term)
@@ -578,6 +599,7 @@ class RagStore:
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
         source_types: tuple[str, ...] | list[str] | set[str] | None = None,
+        question_kind: str | None = None,
         limit: int = 4,
     ) -> list[LexicalHit]:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
@@ -654,17 +676,62 @@ class RagStore:
                 term_conditions.append("instr(lower(body), lower(?)) > 0")
                 params.append(term)
             conditions.append("(" + " OR ".join(term_conditions) + ")")
-        params.append(limit * 4)
-        sql = (
-            "SELECT * FROM documents WHERE " + " AND ".join(conditions)
-            + " ORDER BY CASE authority "
+        # Rank lexical relevance in SQLite *before* applying LIMIT.  The old
+        # query first selected ``limit * 4`` recent/authoritative rows and only
+        # then scored them in Python.  Repositories with many history chunks
+        # could therefore starve a much more relevant Discord or meeting
+        # record before it was ever considered.
+        relevance_parts = []
+        relevance_params: list[object] = []
+        for term in clean_terms:
+            weight = 100 + min(len(term), 24) * 4
+            relevance_parts.append(
+                f"CASE WHEN instr(lower(body), lower(?)) > 0 THEN {weight} ELSE 0 END"
+            )
+            relevance_params.append(term)
+        # Bare ``ORDER BY 0`` is parsed as a result-column ordinal by SQLite.
+        relevance_sql = (
+            " + ".join(relevance_parts) if relevance_parts else "CAST(0 AS INTEGER)"
+        )
+        order_sql = (
+            f" ORDER BY ({relevance_sql}) DESC, CASE authority "
             + "WHEN 'canonical' THEN 3 WHEN 'curated' THEN 2 "
             + "WHEN 'reviewed_record' THEN 1 ELSE 0 END DESC, "
             + "CASE WHEN status IN ('active', 'historical', 'approved', 'verified', 'current') "
             + "THEN 1 ELSE 0 END DESC, end_at DESC LIMIT ?"
         )
+        candidate_limit = max(64, min(limit * 8, 2_048))
+
+        def fetch_rows(
+            extra_condition: str = "",
+            extra_params: tuple[object, ...] = (),
+            *,
+            row_limit: int = candidate_limit,
+        ):
+            where = list(conditions)
+            if extra_condition:
+                where.append(extra_condition)
+            sql = "SELECT * FROM documents WHERE " + " AND ".join(where) + order_sql
+            query_params = [
+                *params,
+                *extra_params,
+                *relevance_params,
+                row_limit,
+            ]
+            return connection.execute(sql, query_params).fetchall()
+
         with self._lock, self._connect() as connection:
-            rows = connection.execute(sql, params).fetchall()
+            rows = list(fetch_rows())
+            if str(question_kind or "").casefold() == "history" and limit >= 2:
+                record_rows = fetch_rows(
+                    "(source_type = ? OR substr(source_type, 1, 8) = 'meeting_')",
+                    ("discord_conversation",),
+                    row_limit=max(8, limit * 2),
+                )
+                known_keys = {row["document_key"] for row in rows}
+                rows.extend(
+                    row for row in record_rows if row["document_key"] not in known_keys
+                )
         hits = []
         for row in rows:
             body = row["body"]
@@ -673,7 +740,9 @@ class RagStore:
             start = max(0, (min(positions) if positions else 0) - 220)
             excerpt = body[start:start + 900].strip()
             matched_terms = sum(
-                1 for term in clean_terms if term.casefold() in body.casefold()
+                100 + min(len(term), 24) * 4
+                for term in clean_terms
+                if term.casefold() in body.casefold()
             )
             authority_bonus = {
                 "canonical": 30,
@@ -689,7 +758,7 @@ class RagStore:
                 festival=row["festival"],
                 source_url=row["source_url"] or "",
                 excerpt=excerpt,
-                score=matched_terms * 100 + authority_bonus + status_bonus,
+                score=matched_terms + authority_bonus + status_bonus,
                 authority=row["authority"] or "",
                 status=row["status"] or "",
                 source_type=row["source_type"] or "",
@@ -700,7 +769,25 @@ class RagStore:
                 content_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             ))
         hits.sort(key=lambda hit: hit.score, reverse=True)
-        return hits[:limit]
+        if str(question_kind or "").casefold() != "history" or limit < 2:
+            return hits[:limit]
+
+        # A HISTORY answer normally needs both the implementation change and
+        # the discussion/meeting that explains why it happened. Reserve a
+        # bounded share for the latter without weakening ACL, festival, date,
+        # or term predicates used by both SQL queries above.
+        record_hits = [
+            hit for hit in hits if is_history_narrative_source(hit.source_type)
+        ]
+        reserve = min(len(record_hits), max(1, limit // 4))
+        selected = record_hits[:reserve]
+        selected_keys = {hit.document_key for hit in selected}
+        selected.extend(
+            hit
+            for hit in hits
+            if hit.document_key not in selected_keys
+        )
+        return selected[:limit]
 
     def find_approved_topic(self, topic_id: str, *, festival: int) -> dict | None:
         """Find a reviewed Knowledge article that reconciles an open topic draft."""

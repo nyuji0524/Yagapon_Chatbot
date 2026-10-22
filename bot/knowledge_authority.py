@@ -31,6 +31,18 @@ AUTHORITY_LABELS = {
 CURRENT_STATUSES = {"deployed", "current", "active", "approved", "verified"}
 
 
+def is_history_narrative_source(source_type: str) -> bool:
+    """Return whether a source can explain the human context of a change.
+
+    Repository history proves what changed, but Discord and meeting artifacts
+    are normally where requests, feedback, and reasons are recorded.  Keep the
+    distinction explicit so retrieval can reserve both evidence families
+    without treating an unreviewed conversation as a higher authority.
+    """
+    normalized = str(source_type or "").strip().casefold()
+    return normalized == "discord_conversation" or normalized.startswith("meeting_")
+
+
 QUESTION_KIND_RULES = (
     (
         QuestionKind.AUTHORIZATION,
