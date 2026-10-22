@@ -10,6 +10,7 @@ than reading a half-updated corpus.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -21,10 +22,11 @@ from bot.corpus import (
     calculate_resumable_incremental_after,
     run_backfill_channels,
 )
+from bot.knowledge_policy import protected_channel
 
 log = logging.getLogger("yagapon.scheduled_backfill")
 
-DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_INTERVAL_SECONDS = 6 * 60 * 60
 MIN_INTERVAL_SECONDS = 6 * 60 * 60
 DEFAULT_INITIAL_DELAY_SECONDS = 5 * 60
 
@@ -59,10 +61,8 @@ def configured_channel_ids() -> frozenset[int]:
 
 
 def scheduler_enabled() -> bool:
-    return (
-        os.environ.get("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false").lower()
-        == "true"
-        and bool(configured_guild_ids())
+    return os.environ.get("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "false").lower() == "true" and bool(
+        configured_guild_ids()
     )
 
 
@@ -74,6 +74,81 @@ def _write_state(path: Path, payload: dict) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _channel_parent(channel, parents_by_id: dict[int, object]):
+    parent = getattr(channel, "parent", None)
+    if parent is not None:
+        return parent
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id is None:
+        return None
+    try:
+        return parents_by_id.get(int(parent_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def _readable_channel(config, guild_id: int, channel, member, *, parent=None) -> bool:
+    """Apply one fail-closed admission check to text channels and threads."""
+    channel_id = getattr(channel, "id", None)
+    parent_id = getattr(channel, "parent_id", None) or getattr(parent, "id", None)
+    if channel_id is None or member is None:
+        return False
+    try:
+        if config.is_ignored(guild_id, int(channel_id)):
+            return False
+        if parent_id is not None and config.is_ignored(guild_id, int(parent_id)):
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    category = getattr(channel, "category", None) or getattr(parent, "category", None)
+    if protected_channel(channel, parent=parent, category=category):
+        return False
+
+    permissions_for = getattr(channel, "permissions_for", None)
+    if not callable(permissions_for):
+        return False
+    try:
+        permissions = permissions_for(member)
+        can_view = bool(
+            getattr(
+                permissions,
+                "view_channel",
+                getattr(permissions, "read_messages", False),
+            )
+        )
+        can_read_history = bool(getattr(permissions, "read_message_history", False))
+    except Exception:
+        return False
+    return can_view and can_read_history
+
+
+async def _materialize_threads(value) -> list[object]:
+    """Normalize Pycord coroutine/async-iterator thread APIs for testability."""
+    if inspect.isawaitable(value):
+        value = await value
+    if hasattr(value, "__aiter__"):
+        return [thread async for thread in value]
+    return list(value or ())
+
+
+def _private_thread(thread) -> bool:
+    """Treat an unresolved thread privacy type as private (fail closed)."""
+    is_private = getattr(thread, "is_private", None)
+    if callable(is_private):
+        try:
+            return bool(is_private())
+        except Exception:
+            return True
+    channel_type = getattr(thread, "type", None)
+    type_name = str(getattr(channel_type, "name", channel_type) or "").casefold()
+    if type_name:
+        return "private" in type_name
+    # Pycord Thread instances always expose is_private(). Test doubles or an
+    # unknown future channel type must not inherit a forum parent's authority.
+    return True
 
 
 class ScheduledBackfillManager:
@@ -88,6 +163,9 @@ class ScheduledBackfillManager:
             )
         )
         self._task: asyncio.Task | None = None
+        # The scheduled loop and an administrator-triggered refresh share this
+        # manager. Only one of them may own the durable checkpoint at a time.
+        self._run_lock = asyncio.Lock()
 
     @property
     def running(self) -> bool:
@@ -162,6 +240,25 @@ class ScheduledBackfillManager:
             await asyncio.sleep(interval)
 
     async def run_once(self) -> dict:
+        if self._run_lock.locked():
+            now = datetime.now(timezone.utc).isoformat()
+            return {
+                "schema_version": 1,
+                "started_at": now,
+                "completed_at": now,
+                "status": "deferred",
+                "reason": "backfill-already-running",
+                "configured_guild_ids": [str(value) for value in configured_guild_ids()],
+                "configured_channel_ids": [str(value) for value in sorted(configured_channel_ids())],
+                "discovered_channel_ids": [],
+                "eligible_channel_ids": [],
+                "missing_channel_ids": [],
+                "guilds": {},
+            }
+        async with self._run_lock:
+            return await self._run_once_locked()
+
+    async def _run_once_locked(self) -> dict:
         started_at = datetime.now(timezone.utc).isoformat()
         guild_ids = configured_guild_ids()
         selected_channel_ids = configured_channel_ids()
@@ -188,15 +285,9 @@ class ScheduledBackfillManager:
                 result["guilds"][str(guild_id)] = await self._refresh_guild(guild_id)
 
             discovered = {
-                value
-                for item in result["guilds"].values()
-                for value in item.get("discovered_channel_ids", [])
+                value for item in result["guilds"].values() for value in item.get("discovered_channel_ids", [])
             }
-            eligible = {
-                value
-                for item in result["guilds"].values()
-                for value in item.get("eligible_channel_ids", [])
-            }
+            eligible = {value for item in result["guilds"].values() for value in item.get("eligible_channel_ids", [])}
             configured = {str(value) for value in selected_channel_ids}
             result["discovered_channel_ids"] = sorted(discovered, key=int)
             result["eligible_channel_ids"] = sorted(eligible, key=int)
@@ -298,20 +389,173 @@ class ScheduledBackfillManager:
                     summary["channels_completed"] += 1
 
         try:
-            discovered_channels = list(guild.text_channels)
-            discovered_ids = {int(channel.id) for channel in discovered_channels}
-            readable_channels = [
+            text_channels = list(getattr(guild, "text_channels", ()) or ())
+            forum_channels = list(getattr(guild, "forum_channels", ()) or ())
+            if not forum_channels:
+                # Keep compatibility with test doubles and older Pycord guild
+                # caches where ``forum_channels`` is not exposed separately.
+                forum_channels = [
+                    channel
+                    for channel in (getattr(guild, "channels", ()) or ())
+                    if callable(getattr(channel, "archived_threads", None))
+                    and not callable(getattr(channel, "history", None))
+                ]
+            forums_by_id = {
+                int(channel.id): channel for channel in forum_channels if getattr(channel, "id", None) is not None
+            }
+            discovered_ids = {
+                int(channel.id)
+                for channel in [*text_channels, *forum_channels]
+                if getattr(channel, "id", None) is not None
+            }
+            readable_text = [
                 channel
-                for channel in discovered_channels
-                if channel.permissions_for(guild.me).read_message_history
-                and not self.bot.config.is_ignored(guild_id, channel.id)
+                for channel in text_channels
+                if _readable_channel(
+                    self.bot.config,
+                    guild_id,
+                    channel,
+                    guild.me,
+                )
             ]
-            channels = [
-                channel
-                for channel in readable_channels
-                if not selected_ids or channel.id in selected_ids
-            ]
-            eligible_ids = {int(channel.id) for channel in channels}
+            readable_forums = {
+                channel_id: channel
+                for channel_id, channel in forums_by_id.items()
+                if _readable_channel(
+                    self.bot.config,
+                    guild_id,
+                    channel,
+                    guild.me,
+                )
+            }
+            channels_by_id = {
+                int(channel.id): channel
+                for channel in readable_text
+                if not selected_ids or int(channel.id) in selected_ids
+            }
+            # A forum has no message history of its own. Mark its immutable ID
+            # eligible, then expand it into independently scoped thread targets.
+            eligible_ids = set(channels_by_id)
+            requested_forum_ids = selected_ids & set(readable_forums)
+            eligible_ids.update(readable_forums if not selected_ids else requested_forum_ids)
+
+            undiscovered_selected_ids = selected_ids - discovered_ids
+            discover_threads = bool(readable_forums) and (
+                not selected_ids or bool(requested_forum_ids) or bool(undiscovered_selected_ids)
+            )
+            active_threads: list[object] = []
+            if discover_threads:
+                active_threads_method = getattr(guild, "active_threads", None)
+                if callable(active_threads_method):
+                    try:
+                        active_threads = await _materialize_threads(active_threads_method())
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        summary["failures"].append(
+                            {
+                                "channel_id": None,
+                                "stage": "active-thread-discovery",
+                                "error_type": type(exc).__name__,
+                            }
+                        )
+                        log.exception(
+                            "Scheduled backfill could not list active threads guild=%s",
+                            guild_id,
+                        )
+                else:
+                    summary["failures"].append(
+                        {
+                            "channel_id": None,
+                            "stage": "active-thread-discovery",
+                            "error_type": "UnsupportedOperation",
+                        }
+                    )
+
+            def admit_thread(thread, parent) -> None:
+                thread_id = getattr(thread, "id", None)
+                if thread_id is None or parent is None:
+                    return
+                thread_id = int(thread_id)
+                parent_id = int(getattr(parent, "id", 0) or 0)
+                if _private_thread(thread) and thread_id not in selected_ids:
+                    # A bot with Administrator can enumerate private threads,
+                    # but a parent forum ID must never authorize their import.
+                    return
+                discovered_ids.add(thread_id)
+                if parent_id not in readable_forums:
+                    return
+                if not _readable_channel(
+                    self.bot.config,
+                    guild_id,
+                    thread,
+                    guild.me,
+                    parent=parent,
+                ):
+                    return
+                if selected_ids and thread_id not in selected_ids and parent_id not in selected_ids:
+                    return
+                channels_by_id[thread_id] = thread
+                eligible_ids.add(thread_id)
+
+            for thread in active_threads:
+                parent = _channel_parent(thread, forums_by_id)
+                if parent is not None:
+                    admit_thread(thread, parent)
+
+            undiscovered_selected_ids = selected_ids - discovered_ids
+            if not selected_ids:
+                archive_forum_ids = set(readable_forums)
+            else:
+                archive_forum_ids = set(requested_forum_ids)
+                # An explicitly allowlisted archived thread cannot be resolved
+                # from Guild.active_threads(). Search readable forum parents,
+                # while still admitting only the exact requested thread ID.
+                if undiscovered_selected_ids:
+                    archive_forum_ids.update(readable_forums)
+
+            for forum_id in sorted(archive_forum_ids):
+                forum = readable_forums[forum_id]
+                for private, joined, stage in (
+                    (False, False, "archived-public-thread-discovery"),
+                    (True, True, "archived-private-thread-discovery"),
+                ):
+                    if private and not (selected_ids - discovered_ids):
+                        # Enumerate joined private archives only to resolve an
+                        # explicitly configured thread ID that remains unknown.
+                        continue
+                    try:
+                        archived = await _materialize_threads(
+                            forum.archived_threads(
+                                private=private,
+                                joined=joined,
+                                limit=None,
+                            )
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        summary["failures"].append(
+                            {
+                                "channel_id": str(forum_id),
+                                "stage": stage,
+                                "error_type": type(exc).__name__,
+                            }
+                        )
+                        log.exception(
+                            "Scheduled backfill could not list archived threads guild=%s forum=%s stage=%s",
+                            guild_id,
+                            forum_id,
+                            stage,
+                        )
+                        continue
+                    for thread in archived:
+                        parent = _channel_parent(thread, forums_by_id)
+                        if int(getattr(parent, "id", 0) or 0) != forum_id:
+                            continue
+                        admit_thread(thread, parent)
+
+            channels = list(channels_by_id.values())
             local_configured = selected_ids & discovered_ids
             local_missing = local_configured - eligible_ids
             summary.update(
@@ -324,13 +568,17 @@ class ScheduledBackfillManager:
                     "channels_total": len(channels),
                 }
             )
-            if not channels:
-                summary["status"] = "failed"
-                summary["reason"] = "no-eligible-channels"
-                return summary
             if local_missing:
                 summary["status"] = "failed"
                 summary["reason"] = "configured-channels-not-readable"
+                return summary
+            if not channels:
+                if eligible_ids and not summary["failures"]:
+                    # A readable but empty forum is a valid completed refresh.
+                    summary["status"] = "completed"
+                    return summary
+                summary["status"] = "failed"
+                summary["reason"] = "thread-discovery-failed" if summary["failures"] else "no-eligible-channels"
                 return summary
             session = await self.bot.corpus.prepare_backfill(
                 guild_id,
@@ -369,11 +617,7 @@ class ScheduledBackfillManager:
                         "scheduled_refresh",
                         summary["status"],
                         guild_id=guild_id,
-                        details={
-                            key: value
-                            for key, value in summary.items()
-                            if key not in {"failures", "reason"}
-                        }
+                        details={key: value for key, value in summary.items() if key not in {"failures", "reason"}}
                         | {"failure_count": len(summary["failures"])},
                     )
                 except Exception:
