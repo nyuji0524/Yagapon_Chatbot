@@ -79,6 +79,7 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert not contains_secret('token = os.environ.get("GITHUB_TOKEN", "")')
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')
     assert contains_secret('{"client_secret": "1234567890abcdefghijklmnop"}')
+    assert contains_secret('password = "Prod(Real)Secret123!"')
 
 
 @pytest.mark.parametrize(
@@ -101,6 +102,7 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         "token: str",
         "token = os.environ['GITHUB_TOKEN']",
         "api_key: ${API_KEY}",
+        'api_key: "${API_KEY}"',
         'client_secret: read_secret("CLIENT_SECRET")',
         "password: replace-with-your-password",
         'api_key = "example-api-key-for-docs"',

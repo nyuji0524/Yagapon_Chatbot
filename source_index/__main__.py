@@ -1061,6 +1061,7 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
 
 def _concrete_source_secret(match: re.Match[str]) -> bool:
     """Separate credential literals from types, placeholders, and references."""
+    quoted = match.group("double") is not None or match.group("single") is not None
     value = next(
         candidate
         for candidate in (
@@ -1073,6 +1074,10 @@ def _concrete_source_secret(match: re.Match[str]) -> bool:
     normalized = value.casefold()
     if SOURCE_SECRET_PLACEHOLDER.search(normalized):
         return False
+    if value.startswith(("$", "%", "<", "{{", "*", "&", "!")):
+        return False
+    if quoted:
+        return True
     if normalized in SOURCE_SECRET_TYPES or normalized in {
         "false",
         "none",
@@ -1081,8 +1086,6 @@ def _concrete_source_secret(match: re.Match[str]) -> bool:
         "true",
         "undefined",
     }:
-        return False
-    if value.startswith(("$", "%", "<", "{{", "*", "&", "!")):
         return False
     if any(character in value for character in "()[]{}"):
         return False
