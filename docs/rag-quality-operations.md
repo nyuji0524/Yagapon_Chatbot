@@ -74,6 +74,16 @@ SHAが一致したものだけ`deployed_implementation/deployed`、それ以外�
 `repository_context/current`とする。Functions、Rules、サーバー実装、主要クライアント実装、
 スキーマ、migration、テスト、CI/CDを対象にする。
 
+過去の実装経緯はGitHubのcommit履歴から直接取得する。各履歴文書はcommit日時、完全なSHA、message、
+変更pathとstatus、allowlist内のpatch、commit URLを持ち、`source_code_history`、
+`repository_history/historical`として登録する。GitHubがpatchを省略または切断した場合だけ、
+対象SHAの小さい変更ファイルを補助取得する。履歴は「その時点で何を変更したか」の根拠であり、
+現在のmainや本番デプロイ済み状態の根拠としては使わない。
+
+private repositoryはread-only GitHub Appで読む。Appは対象repositoryを限定し、
+`Contents: Read-only`と`Metadata: Read-only`以外の権限を持たせない。private keyはSecret Managerから
+0600のファイルとして渡し、1時間のinstallation tokenをメモリ上で更新する。個人PATは本番の標準経路にしない。
+
 Knowledgeリポジトリも同じ常駐同期へ含めるが、front matterのstatus allowlistを必須とし、
 承認済み文書だけを文書自身のstatusと`curated`/`reviewed_record` authorityで登録する。
 
@@ -84,6 +94,10 @@ credentialらしい本文を検出したファイルもファイル単位で除�
 python -m source_index --dry-run
 python -m source_index
 ```
+
+履歴backfillは2024-10-01を既定の開始点とし、全repository合計で1周期あたり最大100 commitを処理する。
+新着commitを先に取り込み、残りは永続cursorから徐々に遡る。rate limitの安全余力を下回った場合や、
+一つでも世代生成・uploadに失敗した場合は、その周期で古い完全な索引を置き換えない。
 
 ## Firebase現在値
 
@@ -160,8 +174,9 @@ GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のとき�
 - Google Drive: change tokenとSHA-256で変更文書だけdraftへ変換する。
 - Knowledge: Git上のMarkdownのSHA-256とremote document名を状態ファイルへ保存し、
   承認済み文書の変更・削除だけをFile Searchへ反映する。
+- ソース履歴: GitHub commit SHAを処理済み集合として保存し、新着優先のcursorで差分追加する。
 
-常駐同期を使う場合は、対象Guild ID、署名済みKnowledge snapshot bucketの読み取り権限、
+常駐同期を使う場合は、対象Guild ID、read-only GitHub Appのrepository選択、
 Driveの読み取り権限を確認してから有効にする。承認済みKnowledgeをFile Searchへ登録する
 経路はACL・日付・年度をfail-closedで付与する`source-index-watch`だけとし、ローカルcloneを
 直接読む旧Knowledge indexerは使用しない。

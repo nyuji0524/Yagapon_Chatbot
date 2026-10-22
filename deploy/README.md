@@ -36,8 +36,12 @@ YAGAPON_GCP_PROJECT_ID=PROJECT
 YAGAPON_GOOGLE_OAUTH_SECRET=yagapon-google-drive-oauth
 YAGAPON_GOOGLE_OAUTH_FILE=/data/google-drive-oauth.json
 YAGAPON_KNOWLEDGE_GCS_BUCKET=PROJECT-yagapon-knowledge-intake
-YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET=PROJECT-yagapon-knowledge-approved
-YAGAPON_SOURCE_REPOSITORIES=YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_SOURCE_GITHUB_APP_ID=123456
+YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=78901234
+YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=yagapon-github-app-private-key
+YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=/data/github-app-private-key.pem
+YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025,YagamiFes-IT/YagamiFes-IT-Knowledge
+YAGAPON_SOURCE_HISTORY_SINCE=2024-10-01T00:00:00+09:00
 YAGAPON_SOURCE_INDEX_ENABLED=true
 EOF
 sudo chown -R 10001:10001 /var/lib/yagapon
@@ -110,10 +114,29 @@ authorized-user JSONはリポジトリやGitHub Secretsへ置かず、Secret Man
 OAuth同意画面がTestingの間はrefresh tokenが7日で失効するため、常設運用前にProductionへ
 変更する。認証情報の失効時は新しいSecret versionを追加して再デプロイする。
 
+## GitHubソース・履歴の読み取り
+
+ソースコードの正本は複製snapshotではなくGitHubとする。組織所有の専用GitHub Appを作成し、
+webhookを無効、Repository permissionsは`Contents: Read-only`（`Metadata: Read-only`は自動）だけ、
+Repository accessは上の4 private repositoryだけに限定してインストールする。個人PATや書き込み権限を
+本番Botへ渡さない。
+
+GitHub Appのprivate key PEMはSecret Managerの`yagapon-github-app-private-key`へ保存する。
+VMサービスアカウントにはこのSecretだけの`roles/secretmanager.secretAccessor`を付与する。
+デプロイ時に`/var/lib/yagapon/github-app-private-key.pem`へUID 10001、mode `0600`で展開される。
+App IDとinstallation IDは秘密ではないため`deploy.env`に置く。BotはPEMから短命なinstallation tokenを
+発行し、有効期限前に更新する。発行されたtokenはログ、状態ファイル、File Searchへ保存しない。
+
+`source-index-watch`は各repositoryの現在のmainに加え、commit日時、SHA、message、変更path、diffを
+`source_code_history/repository_history/historical`として登録する。patchが省略・切断された場合だけ、
+allowlist内の小さいファイルをそのSHAで補助取得する。初回履歴は1周期あたり最大100 commitずつ、
+新着を優先して永続cursorから遡る。GitHub rate limit、認証、アップロードのどれかに失敗した場合、
+直前の完全な索引世代を保持する。
+
 ## Knowledge登録キュー
 
 BotはGitHub tokenを持たず、専用GCS bucketへ機密検査済み候補をcreate-onlyで登録する。
 KnowledgeリポジトリのGitHub Actionsだけが候補を読み、専用branchとDraft PRを作成する。
-mainへマージされた承認済み文書は別のread-only snapshot bucketへ公開され、
-`source-index-watch`が差分同期する。VMサービスアカウントへはintake bucketのObject Creatorと
-snapshot bucketのObject Viewerだけを付与する。
+mainへマージされた承認済み文書は、read-only GitHub App経由で`source-index-watch`が差分同期する。
+VMサービスアカウントへはintake bucketのObject CreatorとGitHub App private-key SecretのAccessorだけを
+付与する。GitHub Appは読み取り専用であり、KnowledgeのDraft PR作成・更新には使わない。

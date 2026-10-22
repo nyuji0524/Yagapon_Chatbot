@@ -147,6 +147,39 @@ if not required_scopes.issubset(scopes):
   oauth_tmp=
 fi
 
+# The GitHub App private key stays in Secret Manager and is materialized only
+# as a root-managed, container-readable file.  App/installation IDs are not
+# secrets and remain ordinary deploy configuration; the PEM must never be put
+# in an environment variable or copied through GitHub Actions.
+github_app_key_secret=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=//p' "$deploy_env" | tail -1)
+github_app_id=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_ID=//p' "$deploy_env" | tail -1)
+github_app_installation_id=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=//p' "$deploy_env" | tail -1)
+github_app_key_file=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=//p' "$deploy_env" | tail -1)
+if [[ -n "$github_app_key_secret$github_app_id$github_app_installation_id$github_app_key_file" ]]; then
+  if [[ -z "$oauth_project" \
+    || ! "$github_app_key_secret" =~ ^[a-zA-Z0-9_-]+$ \
+    || ! "$github_app_id" =~ ^[a-zA-Z0-9]+$ \
+    || ! "$github_app_installation_id" =~ ^[0-9]+$ \
+    || "$github_app_installation_id" == 0 \
+    || "$github_app_key_file" != /data/github-app-private-key.pem ]]; then
+    echo "Invalid GitHub App Secret Manager configuration" >&2
+    false
+  fi
+  github_app_key_tmp=$(mktemp /var/lib/yagapon/github-app-private-key.pem.XXXXXX)
+  trap '[[ -z "${github_app_key_tmp:-}" ]] || rm -f "$github_app_key_tmp"' EXIT
+  gcloud secrets versions access latest \
+    --project "$oauth_project" \
+    --secret "$github_app_key_secret" > "$github_app_key_tmp"
+  if ! openssl rsa -in "$github_app_key_tmp" -check -noout >/dev/null 2>&1; then
+    echo "GitHub App secret must contain a valid RSA private key" >&2
+    false
+  fi
+  install -o 10001 -g 10001 -m 0600 \
+    "$github_app_key_tmp" /var/lib/yagapon/github-app-private-key.pem
+  rm -f "$github_app_key_tmp"
+  github_app_key_tmp=
+fi
+
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" config --quiet
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon
 data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
