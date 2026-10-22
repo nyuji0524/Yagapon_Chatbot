@@ -6,6 +6,7 @@ staging_dir="${2:-/tmp}"
 staging_dir="${staging_dir%/}"
 app_dir=/opt/yagapon
 deploy_env=/etc/yagapon/deploy.env
+runtime_env=/etc/yagapon/yagapon.env
 compose_source="$staging_dir/compose.yaml"
 compose_target="$app_dir/compose.yaml"
 unit_source="$staging_dir/yagapon.service"
@@ -40,8 +41,53 @@ fi
   echo "RAG evaluation cases were not copied to the staging directory" >&2
   exit 2
 }
-if [[ ! -f /etc/yagapon/yagapon.env ]]; then
-  echo "Missing /etc/yagapon/yagapon.env" >&2
+if [[ ! -f "$runtime_env" ]]; then
+  echo "Missing $runtime_env" >&2
+  exit 2
+fi
+
+# Production uses a Secret Manager PEM mounted only into source-index-watch.
+# Reject legacy direct values before changing any deployment state: env_file
+# would otherwise inject them into every service and direct values take
+# precedence over *_FILE readers. The scanner deliberately emits no values.
+if ! python3 - "$runtime_env" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+forbidden = {
+    "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY",
+    "YAGAPON_SOURCE_GITHUB_TOKEN",
+}
+
+
+def has_forbidden_value(raw_line: str) -> bool:
+    line = raw_line.lstrip("\ufeff").strip()
+    if not line or line.startswith("#"):
+        return False
+    export_prefix = re.match(r"export[ \t]+", line)
+    if export_prefix:
+        line = line[export_prefix.end():]
+    key, separator, raw_value = line.partition("=")
+    if not separator or key.strip() not in forbidden:
+        return False
+    value = raw_value.strip()
+    if not value:
+        return False
+    # Docker Compose treats quoted whitespace and an unquoted value followed
+    # by a whitespace-separated comment as empty after read_secret().strip().
+    if re.fullmatch(r'''(?:"[ \t]*"|'[ \t]*')(?:[ \t]+#.*)?''', value):
+        return False
+    effective = re.split(r"[ \t]+#", raw_value, maxsplit=1)[0].strip()
+    return bool(effective)
+
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+raise SystemExit(1 if any(has_forbidden_value(line) for line in lines) else 0)
+PY
+then
+  echo "Direct GitHub source credentials are forbidden in $runtime_env" >&2
+  echo "Remove the direct private-key/token entries; configure the GitHub App IDs and Secret Manager PEM mount in deploy.env" >&2
   exit 2
 fi
 
