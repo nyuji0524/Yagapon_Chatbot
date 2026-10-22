@@ -23,6 +23,25 @@ async def rag_queries(
     return {"entries": entries, "total": len(entries)}
 
 
+@router.get("/admin/rag/mirror", dependencies=[Depends(require_api_token)])
+async def rag_mirror(request: Request, guild_id: int):
+    bot = request.app.state.bot
+    store_name = bot.config.get_corpus(guild_id)
+    if not store_name:
+        return {
+            "configured": False,
+            "local_documents": 0,
+            "remote_documents": 0,
+            "local_only": 0,
+            "remote_only": 0,
+            "remote_duplicates": 0,
+            "remote_name_mismatches": 0,
+            "examples": {},
+        }
+    result = await bot.corpus.audit_remote_mirror(store_name, guild_id)
+    return {"configured": True, **result}
+
+
 @router.get("/admin/rag-ui", response_class=HTMLResponse)
 async def rag_dashboard():
     return HTMLResponse(DASHBOARD_HTML)

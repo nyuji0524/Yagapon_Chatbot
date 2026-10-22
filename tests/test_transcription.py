@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -224,3 +225,49 @@ async def test_successful_voiceprint_upload_is_deleted_when_sibling_upload_fails
 
     deleted = {call.kwargs["name"] for call in client.files.delete.call_args_list}
     assert deleted == {"files/meeting", "files/reference"}
+
+
+@pytest.mark.asyncio
+async def test_late_voiceprint_upload_is_deleted_after_sibling_fails(tmp_path, monkeypatch):
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+    first.write_bytes(b"RIFF" + b"first" * 300)
+    second.write_bytes(b"RIFF" + b"second" * 300)
+    meeting = SimpleNamespace(name="files/meeting", uri="gs://test/meeting.wav")
+    late_reference = SimpleNamespace(
+        name="files/late-reference", uri="gs://test/late-reference.wav"
+    )
+    voiceprint_calls = 0
+
+    async def retry(operation, *, operation_name, **_kwargs):
+        nonlocal voiceprint_calls
+        if operation_name == "transcription_upload":
+            return meeting
+        assert operation_name == "voiceprint_upload"
+        voiceprint_calls += 1
+        if voiceprint_calls == 1:
+            await asyncio.sleep(0.02)
+            return late_reference
+        raise ValueError("upload failed")
+
+    monkeypatch.setattr("bot.transcription.retry_rate_limit", retry)
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=AsyncMock()),
+            models=SimpleNamespace(generate_content=AsyncMock()),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="upload failed"):
+        await transcribe_audio(
+            client,
+            b"RIFFmeeting",
+            mime_type="audio/wav",
+            display_name="meeting.wav",
+            diarization=True,
+            voiceprint_paths={"一人目": str(first), "二人目": str(second)},
+        )
+
+    deleted = {call.kwargs["name"] for call in client.files.delete.call_args_list}
+    assert deleted == {"files/meeting", "files/late-reference"}

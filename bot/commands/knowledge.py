@@ -20,6 +20,12 @@ from bot.knowledge_intake import (
     parse_discord_message_url,
     parse_drive_file_url,
 )
+from bot.knowledge_policy import (
+    knowledge_guild_allowed as _knowledge_guild_allowed,
+)
+from bot.knowledge_policy import (
+    protected_channel as _protected_channel,
+)
 from bot.knowledge_publish import (
     KnowledgePublishResult,
     get_knowledge_delivery,
@@ -63,60 +69,6 @@ def _result_message(result: KnowledgePublishResult) -> str:
         "まだDraft PRにはなっていないぽん。\n"
         f"申請ID: `{result.session_id}`\n"
         "設定後に `/knowledge retry` で再送できるぽん。"
-    )
-
-
-def _knowledge_guild_allowed(guild_id: int) -> bool:
-    configured = os.environ.get("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "").strip()
-    if not configured:
-        configured = os.environ.get("YAGAPON_KNOWLEDGE_GUILD_ID", "").strip()
-    if not configured:
-        return False
-    allowed = {value.strip() for value in configured.split(",") if value.strip()}
-    return str(guild_id) in allowed
-
-
-def _protected_channel(channel, *, parent=None, category=None) -> bool:
-    channel_ids = {
-        value.strip()
-        for value in os.environ.get("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "").split(",")
-        if value.strip()
-    }
-    parent = parent or getattr(channel, "parent", None)
-    category = (
-        category
-        or getattr(channel, "category", None)
-        or getattr(parent, "category", None)
-    )
-    related = [
-        channel,
-        parent,
-        category,
-    ]
-    related_ids = {
-        str(value)
-        for value in (
-            getattr(channel, "id", None),
-            getattr(channel, "parent_id", None),
-            getattr(channel, "category_id", None),
-            getattr(parent, "id", None),
-            getattr(parent, "category_id", None),
-            getattr(category, "id", None),
-        )
-        if value is not None
-    }
-    if related_ids & channel_ids:
-        return True
-    protected_terms = {
-        value.strip().casefold()
-        for value in os.environ.get("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考").split(",")
-        if value.strip()
-    }
-    return any(
-        term in str(getattr(item, "name", "")).casefold()
-        for item in related
-        if item
-        for term in protected_terms
     )
 
 

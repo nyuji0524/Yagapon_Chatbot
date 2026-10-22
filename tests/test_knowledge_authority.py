@@ -1,9 +1,11 @@
 from bot.knowledge_authority import (
     QuestionKind,
+    allows_unreviewed_evidence,
     authority_instruction,
     authority_score,
     can_answer_directly,
     classify_question,
+    direct_authorities,
 )
 
 
@@ -40,3 +42,18 @@ def test_conflict_instruction_requires_both_policy_and_implementation():
 def test_history_does_not_short_circuit_on_current_source_code():
     assert not can_answer_directly(QuestionKind.HISTORY, "repository_context", "current")
     assert can_answer_directly(QuestionKind.HISTORY, "reviewed_record", "approved")
+
+
+def test_raw_evidence_is_not_sufficient_for_people_or_authorization():
+    assert allows_unreviewed_evidence(QuestionKind.HISTORY)
+    assert allows_unreviewed_evidence(QuestionKind.GENERAL)
+    assert not allows_unreviewed_evidence(QuestionKind.PEOPLE)
+    assert not allows_unreviewed_evidence(QuestionKind.AUTHORIZATION)
+
+
+def test_direct_authorities_are_stable_and_exclude_conversation():
+    authorities = direct_authorities(QuestionKind.AUTHORIZATION)
+
+    assert authorities == tuple(sorted(authorities))
+    assert "deployed_implementation" in authorities
+    assert "conversation" not in authorities

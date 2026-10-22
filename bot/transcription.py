@@ -190,12 +190,32 @@ async def transcribe_audio(
                     uploaded_voiceprints.append(sample)
                     return index, name, sample
 
-            results = await asyncio.gather(
+            # Wait for every upload before propagating a sibling failure.  A
+            # regular ``gather`` fails fast, while the remaining executor jobs
+            # keep running and can create Files API resources after our outer
+            # cleanup has already taken its snapshot.
+            upload_batch = asyncio.gather(
                 *(
                     upload_voiceprint(index, name, path)
                     for index, (name, path) in enumerate(valid_voiceprints, start=1)
-                )
+                ),
+                return_exceptions=True,
             )
+            try:
+                # Do not cancel in-flight blocking uploads on shutdown: Python
+                # cannot stop their executor threads.  Let them finish so every
+                # successfully created remote file is registered for cleanup.
+                results = await asyncio.shield(upload_batch)
+            except asyncio.CancelledError:
+                await upload_batch
+                raise
+
+            upload_error = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+            if upload_error is not None:
+                raise upload_error
             for index, name, sample in results:
                 reference_voiceprints.append(sample)
                 voiceprint_labels[index] = name

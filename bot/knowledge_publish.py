@@ -102,9 +102,7 @@ class GitHubKnowledgePublisher:
                     "encoding": "base64",
                 },
             )
-            tree_items.append(
-                {"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]}
-            )
+            tree_items.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
 
         tree = self._request(
             "POST",
@@ -180,10 +178,13 @@ def _meeting_front_matter(
     guild_id: int,
     session_id: str,
     channel_name: str,
+    channel_id: int | None,
     tags: str,
     source_kind: str = "discord-voice",
     source_ref: str | None = None,
 ) -> str:
+    access_scope = "channel" if channel_id and channel_id > 0 else "restricted"
+    channel_fields = f"channel_id: {channel_id}\n" if access_scope == "channel" else ""
     return (
         "---\n"
         f"title: {_yaml_string(title)}\n"
@@ -192,6 +193,8 @@ def _meeting_front_matter(
         f"date: {_yaml_string(date)}\n"
         f"last_updated: {_yaml_string(datetime.now(JST).date().isoformat())}\n"
         "status: draft\n"
+        f"access_scope: {access_scope}\n"
+        f"{channel_fields}"
         "contributors: []\n"
         f"tags: [{tags}]\n"
         "sources:\n"
@@ -216,6 +219,7 @@ def build_meeting_bundle(
     *,
     session_id: str,
     guild_id: int,
+    channel_id: int | None = None,
     channel_name: str,
     mode: str,
     transcript: str,
@@ -239,6 +243,7 @@ def build_meeting_bundle(
         guild_id=guild_id,
         session_id=session_id,
         channel_name=channel_name,
+        channel_id=channel_id,
         tags="meeting, transcript, yagapon, needs-human-review",
     )
     transcript_document = (
@@ -258,7 +263,7 @@ def build_meeting_bundle(
     if summary and summary.strip():
         summary_title = f"AI要約（要確認）: {date} {channel_name}"
         files[f"{root}/summary.md"] = (
-            f"{_meeting_front_matter(title=summary_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, tags='meeting, summary, yagapon, needs-human-review')}\n"
+            f"{_meeting_front_matter(title=summary_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, channel_id=channel_id, tags='meeting, summary, yagapon, needs-human-review')}\n"
             f"# {summary_title}\n\n"
             "> 生文字起こしから自動生成した参考資料です。事実・決定・担当・期限は"
             "transcript.mdと人間の確認を優先してください。\n\n"
@@ -267,7 +272,7 @@ def build_meeting_bundle(
     if include_minutes and minutes and minutes.strip():
         minutes_title = f"AI議事録（要確認）: {date} {channel_name}"
         files[f"{root}/minutes.md"] = (
-            f"{_meeting_front_matter(title=minutes_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, tags='meeting, minutes, yagapon, needs-human-review')}\n"
+            f"{_meeting_front_matter(title=minutes_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, channel_id=channel_id, tags='meeting, minutes, yagapon, needs-human-review')}\n"
             f"# {minutes_title}\n\n"
             "> 生文字起こしから自動生成した詳細議事録です。未確認のdraftです。\n\n"
             f"{minutes.strip()}\n"
@@ -283,7 +288,7 @@ def build_meeting_bundle(
         material_title = f"会議資料（要確認）: {name}"
         path = f"material-{index:02d}.md"
         files[f"{root}/{path}"] = (
-            f"{_meeting_front_matter(title=material_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, tags='meeting, material, google-drive, needs-human-review', source_kind='document', source_ref=url)}\n"
+            f"{_meeting_front_matter(title=material_title, festival=festival, date=date, guild_id=guild_id, session_id=session_id, channel_name=channel_name, channel_id=channel_id, tags='meeting, material, google-drive, needs-human-review', source_kind='document', source_ref=url)}\n"
             f"# {material_title}\n\n"
             "> `/join`で明示的に紐付けられた会議資料の取得時点スナップショットです。"
             "会議での最終決定は文字起こし・議事録と照合してください。\n\n"
@@ -312,6 +317,8 @@ def build_meeting_bundle(
         "festival": festival,
         "sessionId": session_id,
         "guildId": str(guild_id),
+        "channelId": str(channel_id) if channel_id else None,
+        "accessScope": "channel" if channel_id else "restricted",
         "channelName": channel_name,
         "mode": mode,
         "startedAt": started_at.isoformat(),
@@ -322,11 +329,7 @@ def build_meeting_bundle(
             "humanReviewed": False,
         },
         "summary": {"path": "summary.md", "humanReviewed": False} if summary else None,
-        "minutes": (
-            {"path": "minutes.md", "humanReviewed": False}
-            if include_minutes and minutes
-            else None
-        ),
+        "minutes": ({"path": "minutes.md", "humanReviewed": False} if include_minutes and minutes else None),
         "materials": material_entries,
         "rawAudio": {"published": False, "retention": "deleted-after-durable-transcript"},
     }
@@ -384,12 +387,14 @@ def _write_outbox(
         if path.is_absolute() or ".." in path.parts or not path.parts:
             raise ValueError(f"Invalid Knowledge repository path: {repository_path}")
     root = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTBOX", "/data/knowledge-outbox")) / bundle_id
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    root.chmod(0o700)
     for repository_path, content in files.items():
         destination = root / repository_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         temporary = destination.with_suffix(destination.suffix + ".tmp")
         temporary.write_text(content, encoding="utf-8")
+        temporary.chmod(0o600)
         os.replace(temporary, destination)
     delivery = root / "delivery.json"
     delivery.write_text(
@@ -409,6 +414,7 @@ def _write_outbox(
         + "\n",
         encoding="utf-8",
     )
+    delivery.chmod(0o600)
     return root
 
 
@@ -419,6 +425,7 @@ def _write_delivery(outbox_dir: Path, payload: dict) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    temporary.chmod(0o600)
     os.replace(temporary, destination)
 
 
@@ -432,9 +439,7 @@ def _outbox_files(outbox_dir: Path, repository_root: str) -> dict[str, str]:
     return {
         path.relative_to(outbox_dir).as_posix(): path.read_text(encoding="utf-8")
         for path in root.rglob("*")
-        if path.is_file()
-        and not path.name.startswith(".")
-        and not path.name.endswith((".tmp", ".bak", "~"))
+        if path.is_file() and not path.name.startswith(".") and not path.name.endswith((".tmp", ".bak", "~"))
     }
 
 
@@ -548,15 +553,8 @@ async def publish_knowledge_bundle(
             status="queued",
         )
 
-    direct_github_enabled = (
-        os.environ.get("YAGAPON_KNOWLEDGE_DIRECT_GITHUB_ENABLED", "false").lower()
-        == "true"
-    )
-    token = (
-        read_secret("YAGAPON_KNOWLEDGE_GITHUB_TOKEN")
-        if direct_github_enabled
-        else ""
-    )
+    direct_github_enabled = os.environ.get("YAGAPON_KNOWLEDGE_DIRECT_GITHUB_ENABLED", "false").lower() == "true"
+    token = read_secret("YAGAPON_KNOWLEDGE_GITHUB_TOKEN") if direct_github_enabled else ""
     if not token:
         log.warning("Knowledge delivery is not configured; bundle retained at %s", outbox_dir)
         return KnowledgePublishResult(session_id=bundle_id, outbox_dir=outbox_dir)
@@ -673,6 +671,7 @@ async def publish_meeting_knowledge(
     *,
     session_id: str,
     guild_id: int,
+    channel_id: int | None = None,
     channel_name: str,
     mode: str,
     transcript: str,
@@ -687,6 +686,7 @@ async def publish_meeting_knowledge(
     repository_root, files, manifest = build_meeting_bundle(
         session_id=session_id,
         guild_id=guild_id,
+        channel_id=channel_id,
         channel_name=channel_name,
         mode=mode,
         transcript=transcript,

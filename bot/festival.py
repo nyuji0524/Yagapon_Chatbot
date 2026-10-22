@@ -48,9 +48,19 @@ def festival_from_query(query: str, now: datetime | None = None) -> int | None:
     if match:
         return int(match.group(1))
 
-    dated = re.search(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?", normalized)
-    if dated:
-        return festival_number(date(int(dated.group(1)), int(dated.group(2)), 1))
+    dated_matches = list(
+        re.finditer(r"(20\d{2})[年/.-](1[0-2]|0?[1-9])(?:月)?", normalized)
+    )
+    if dated_matches:
+        dated_festivals = {
+            festival_number(date(int(match.group(1)), int(match.group(2)), 1))
+            for match in dated_matches
+        }
+        # A comparison across the September/October boundary intentionally
+        # spans two operating years and must not be narrowed to the first date.
+        if len(dated_festivals) > 1:
+            return None
+        return dated_festivals.pop()
 
     current = current_festival(now)
     if re.search(r"今年度|今年|今期|現在|今の|今回", normalized):
@@ -79,12 +89,17 @@ def calendar_date_from_query(
     normalized = query.translate(
         str.maketrans("０１２３４５６７８９／．－", "0123456789/.-")
     )
-    explicit = re.search(
+    explicit_matches = list(re.finditer(
         r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*"
         r"(?:月|[/.-])\s*(3[01]|[12]\d|0?[1-9])\s*日?",
         normalized,
-    )
-    if explicit:
+    ))
+    # A single-date filter must not silently discard evidence for comparison
+    # questions containing two distinct dates.
+    if len(explicit_matches) > 1:
+        return None
+    if explicit_matches:
+        explicit = explicit_matches[0]
         try:
             return date(int(explicit.group(1)), int(explicit.group(2)), int(explicit.group(3)))
         except ValueError:

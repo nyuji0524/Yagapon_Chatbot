@@ -95,6 +95,8 @@ def _discord_document(
         "date": date,
         "last_updated": datetime.now(JST).date().isoformat(),
         "status": "draft",
+        "access_scope": "channel",
+        "channel_id": channel_id,
         "contributors": [],
         "related_roles": [],
         "systems": [],

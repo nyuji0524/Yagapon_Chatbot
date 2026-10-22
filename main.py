@@ -79,6 +79,11 @@ async def shutdown(bot, server):
     # Stop accepting API work before closing Discord. ``bot.close`` owns all
     # bot resources (including the corpus) so each resource is flushed once.
     server.should_exit = True
+    app = getattr(getattr(server, "config", None), "app", None)
+    if app is not None:
+        from api.server import shutdown_backfill_tasks
+
+        await shutdown_backfill_tasks(app)
     log.info("Closing bot...")
     await bot.close()
 

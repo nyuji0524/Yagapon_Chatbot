@@ -82,6 +82,9 @@ async def ask(request: Request, body: AskRequest):
         members_info=bot._build_members_info(body.guild_id),
         glossary_text=bot.config.get_glossary_text(body.guild_id),
         glossary=bot.config.get_glossary(body.guild_id),
+        # This route is protected by the operator API token. Callers cannot
+        # self-declare this bypass in the request body.
+        allow_unrestricted_conversations=True,
     )
     return AskResponse(
         query=body.query,
@@ -107,6 +110,8 @@ async def evaluate_rag(request: Request, body: EvaluateRagRequest):
 @router.post("/backfill", dependencies=[Depends(require_api_token)])
 async def backfill(request: Request, body: BackfillRequest):
     bot = request.app.state.bot
+    if not request.app.state.accepting_backfills:
+        raise HTTPException(503, "API is shutting down")
     corpus = bot.config.get_corpus(body.guild_id)
     if not corpus:
         raise HTTPException(404, "Guild not configured")
@@ -192,7 +197,16 @@ async def backfill(request: Request, body: BackfillRequest):
                     job["channels_completed"] += 1
                     progress = {**job, "failures": list(job["failures"])}
                 if hasattr(bot.operations, "update_job"):
-                    bot.operations.update_job(job_id, "running", progress)
+                    try:
+                        bot.operations.update_job(job_id, "running", progress)
+                    except Exception:
+                        # Progress telemetry must not orphan channel workers or
+                        # turn a valid backfill into detached background work.
+                        log.exception(
+                            "Could not persist API backfill progress job=%s channel=%s",
+                            job_id,
+                            ch.id,
+                        )
 
         try:
             await run_backfill_channels(channels, process_channel, concurrency=concurrency)
@@ -206,11 +220,14 @@ async def backfill(request: Request, body: BackfillRequest):
             log.exception("API backfill job failed: %s", job_id)
         finally:
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
-            if hasattr(bot.operations, "update_job"):
-                bot.operations.update_job(job_id, job["status"], job)
             bot.corpus.finish_backfill(body.guild_id)
+            if hasattr(bot.operations, "update_job"):
+                try:
+                    bot.operations.update_job(job_id, job["status"], job)
+                except Exception:
+                    log.exception("Could not persist terminal API backfill job %s", job_id)
 
-    task = asyncio.create_task(run())
+    task = asyncio.create_task(run(), name=f"api-backfill-{job_id}")
     request.app.state.backfill_tasks.add(task)
     task.add_done_callback(request.app.state.backfill_tasks.discard)
 

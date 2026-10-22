@@ -154,6 +154,5 @@
   expected_all: ["27th", "28th"]
   reference_facts: ["2026年9月30日は27th", "2026年10月1日は28th", "年度は10月1日に切り替わる"]
   expected_source_any: ["矢上祭の年度区分"]
-  expected_festival: 27
   must_cite: true
   min_sources: 1

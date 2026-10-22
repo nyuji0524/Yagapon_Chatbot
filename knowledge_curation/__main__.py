@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import new_genai_client, retry_rate_limit
+from bot.knowledge_policy import knowledge_guild_allowed
 from bot.knowledge_publish import JST, publish_knowledge_bundle
 from bot.rag_store import RagStore
 
@@ -102,6 +103,33 @@ def curation_lock(state_path: Path):
 
 def _digest(document: dict) -> str:
     return hashlib.sha256(str(document.get("body") or "").encode()).hexdigest()
+
+
+def configured_curation_channel_ids() -> set[int]:
+    """Return immutable Discord channel IDs explicitly approved for export."""
+    result: set[int] = set()
+    for raw in os.environ.get("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "").split(","):
+        value = raw.strip()
+        if value.isdecimal() and int(value) > 0:
+            result.add(int(value))
+    return result
+
+
+def curation_document_allowed(document: dict) -> bool:
+    """Apply the positive guild/channel export allowlist to one source."""
+    try:
+        guild_id = int(document.get("guild_id") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not knowledge_guild_allowed(guild_id):
+        return False
+    if document.get("access_scope") == "guild":
+        return True
+    try:
+        channel_id = int(document.get("channel_id") or 0)
+    except (TypeError, ValueError):
+        return False
+    return document.get("access_scope") == "channel" and channel_id in configured_curation_channel_ids()
 
 
 def _safe_slug(value: str, fallback: str) -> str:
@@ -279,6 +307,9 @@ def render_decision(document: dict, candidate: DecisionDraft, related: list[dict
         "date": date,
         "last_updated": datetime.now(JST).date().isoformat(),
         "status": "draft",
+        "access_scope": (
+            str(document.get("access_scope")) if document.get("access_scope") in {"guild", "channel"} else "restricted"
+        ),
         "bureau": bureau_slug,
         "contributors": [],
         "related_roles": candidate.related_roles,
@@ -288,6 +319,8 @@ def render_decision(document: dict, candidate: DecisionDraft, related: list[dict
         "related": [],
         "sources": source_entries,
     }
+    if metadata["access_scope"] == "channel" and document.get("channel_id"):
+        metadata["channel_id"] = int(document["channel_id"])
     front_matter = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False).strip()
     related_keys = ", ".join(f"`{item['document_key']}`" for item in related) or "なし"
     sections = [
@@ -372,12 +405,24 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
         return {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}
     state = load_state(state_path)
     store = RagStore()
-    candidates = store.list_curation_documents(limit=10_000)
+    all_candidates = store.list_curation_documents(limit=10_000)
+    # The central private repository cannot reproduce Discord's live ACLs.
+    # Guild-wide material is safe for an allowlisted guild; channel-scoped
+    # material requires a second positive allowlist of immutable channel IDs.
+    candidates = [item for item in all_candidates if curation_document_allowed(item)]
     pending = [
-        item
-        for item in candidates
-        if state["documents"].get(item["document_key"], {}).get("sha256") != _digest(item)
+        item for item in candidates if state["documents"].get(item["document_key"], {}).get("sha256") != _digest(item)
     ][: max(1, min(limit, 10))]
+    if not pending:
+        return {
+            "enabled": True,
+            "eligible": len(candidates),
+            "policy_excluded": len(all_candidates) - len(candidates),
+            "processed": 0,
+            "queued": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     processed = queued = skipped = failed = 0
     for document in pending:
@@ -425,6 +470,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
     return {
         "enabled": True,
         "eligible": len(candidates),
+        "policy_excluded": len(all_candidates) - len(candidates),
         "processed": processed,
         "queued": queued,
         "skipped": skipped,

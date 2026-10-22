@@ -7,28 +7,57 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   evaluate:
-    if: vars.YAGAPON_RAG_EVAL_ENABLED == 'true'
+    if: vars.YAGAPON_RAG_EVAL_ENABLED == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCE_INSTANCE: ${{ vars.GCE_INSTANCE }}
+      GCE_ZONE: ${{ vars.GCE_ZONE }}
+      EVAL_GUILD_ID: ${{ vars.YAGAPON_RAG_EVAL_GUILD_ID }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: pip install --requirement requirements-dev.txt
-      - name: Run representative queries
-        env:
-          YAGAPON_API_TOKEN: ${{ secrets.YAGAPON_RAG_EVAL_API_TOKEN }}
+      - name: Validate evaluation configuration
         run: |
-          python -m rag_eval \
-            --base-url "${{ vars.YAGAPON_RAG_EVAL_BASE_URL }}" \
-            --guild-id "${{ vars.YAGAPON_RAG_EVAL_GUILD_ID }}" \
-            --cases docs/rag-eval-cases.yaml \
-            --min-pass-rate 0.8 \
-            --output rag-eval-report.json
+          set -eu
+          test -n "$GCP_PROJECT_ID"
+          test -n "$GCE_INSTANCE"
+          test -n "$GCE_ZONE"
+          case "$EVAL_GUILD_ID" in
+            *[!0-9]*|'') echo 'YAGAPON_RAG_EVAL_GUILD_ID must be numeric' >&2; exit 2 ;;
+          esac
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          version: ">= 506.0.0"
+      - name: Run representative queries inside production
+        run: |
+          quoted_guild=$(printf '%q' "$EVAL_GUILD_ID")
+          gcloud compute ssh "$GCE_INSTANCE" \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            --command "sudo /bin/bash /opt/yagapon/deploy/rag-eval-control.sh $quoted_guild 0.8"
+      - name: Download evaluation report
+        if: always()
+        run: |
+          gcloud compute scp \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            "$GCE_INSTANCE:/tmp/rag-eval-report.json" \
+            rag-eval-report.json || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

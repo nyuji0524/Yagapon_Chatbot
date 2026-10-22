@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -30,6 +31,9 @@ DEFAULT_MINUTES_IMAGE_URL = (
     "https://raw.githubusercontent.com/nyuji0524/Yagapon_Chatbot/main/assets/yagapon_minutes.png"
 )
 MAX_MEETING_MATERIAL_CHARS = 120_000
+DRIVE_ARTIFACT_KEY_PROPERTY = "yagaponArtifactKey"
+DRIVE_SESSION_ID_PROPERTY = "yagaponSessionId"
+DRIVE_ARTIFACT_TYPE_PROPERTY = "yagaponArtifactType"
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,16 @@ class MeetingMaterial:
     url: str
     modified_time: str
     text: str
+
+
+def _artifact_key(session_id: str, artifact_type: str) -> str:
+    """Return a Drive-safe stable key for one session artifact."""
+    canonical = f"{session_id.strip()}\0{artifact_type.strip()}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _escape_drive_query_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _extract_folder_id(url: str) -> str | None:
@@ -309,6 +323,57 @@ class DriveWriter:
         )
         return created["id"]
 
+    def _find_artifact_document(
+        self,
+        folder_id: str,
+        idempotency_key: str,
+    ) -> dict | None:
+        escaped_folder = _escape_drive_query_value(folder_id)
+        escaped_key = _escape_drive_query_value(idempotency_key)
+        query = (
+            f"'{escaped_folder}' in parents and trashed = false and "
+            f"mimeType = '{GOOGLE_DOC_MIME_TYPE}' and "
+            "appProperties has { "
+            f"key='{DRIVE_ARTIFACT_KEY_PROPERTY}' and value='{escaped_key}'"
+            " }"
+        )
+        response = (
+            self.drive.files()
+            .list(
+                q=query,
+                spaces="drive",
+                corpora="allDrives",
+                fields="files(id,name,webViewLink,modifiedTime,appProperties)",
+                orderBy="modifiedTime desc",
+                pageSize=10,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute(num_retries=3)
+        )
+        matches = response.get("files", [])
+        if len(matches) > 1:
+            log.warning(
+                "Multiple Drive artifacts share idempotency key=%s folder=%s; reusing newest",
+                idempotency_key,
+                folder_id,
+            )
+        return matches[0] if matches else None
+
+    def _document_end_index(self, document_id: str) -> int:
+        document = (
+            self.docs.documents()
+            .get(documentId=document_id, fields="body.content.endIndex")
+            .execute(num_retries=3)
+        )
+        return max(
+            (
+                int(item.get("endIndex") or 1)
+                for item in document.get("body", {}).get("content", [])
+            ),
+            default=1,
+        )
+
     def create_document(
         self,
         folder_id: str,
@@ -316,36 +381,89 @@ class DriveWriter:
         content: str,
         *,
         minutes_document: bool = False,
+        idempotency_key: str | None = None,
+        session_id: str | None = None,
+        artifact_type: str | None = None,
     ) -> str:
-        created = (
-            self.drive.files()
-            .create(
-                body={"name": filename, "mimeType": GOOGLE_DOC_MIME_TYPE, "parents": [folder_id]},
-                fields="id,webViewLink",
-                supportsAllDrives=True,
+        app_properties = None
+        existing = None
+        if idempotency_key:
+            app_properties = {
+                DRIVE_ARTIFACT_KEY_PROPERTY: idempotency_key,
+                DRIVE_SESSION_ID_PROPERTY: str(session_id or "")[:120],
+                DRIVE_ARTIFACT_TYPE_PROPERTY: str(artifact_type or "")[:120],
+            }
+            existing = self._find_artifact_document(folder_id, idempotency_key)
+
+        created_new = existing is None
+        if existing:
+            document_id = existing["id"]
+            updated = (
+                self.drive.files()
+                .update(
+                    fileId=document_id,
+                    body={"name": filename, "appProperties": app_properties},
+                    fields="id,webViewLink",
+                    supportsAllDrives=True,
+                )
+                .execute(num_retries=3)
             )
-            .execute(num_retries=3)
-        )
-        document_id = created["id"]
+            file_info = {**existing, **(updated or {})}
+        else:
+            body = {
+                "name": filename,
+                "mimeType": GOOGLE_DOC_MIME_TYPE,
+                "parents": [folder_id],
+            }
+            if app_properties:
+                body["appProperties"] = app_properties
+            file_info = (
+                self.drive.files()
+                .create(
+                    body=body,
+                    fields="id,webViewLink",
+                    supportsAllDrives=True,
+                )
+                .execute(num_retries=3)
+            )
+            document_id = file_info["id"]
+
         text, style_requests, image_index = _render_markdown(
             content,
             minutes_document=minutes_document,
         )
+        replace_requests = []
+        if not created_new:
+            end_index = self._document_end_index(document_id)
+            if end_index > 2:
+                replace_requests.append(
+                    {
+                        "deleteContentRange": {
+                            "range": {"startIndex": 1, "endIndex": end_index - 1}
+                        }
+                    }
+                )
         try:
             self.docs.documents().batchUpdate(
                 documentId=document_id,
                 body={
                     "requests": [
+                        *replace_requests,
                         {"insertText": {"location": {"index": 1}, "text": text}},
                         *style_requests,
                     ]
                 },
             ).execute(num_retries=3)
         except Exception:
-            try:
-                self.drive.files().delete(fileId=document_id, supportsAllDrives=True).execute(num_retries=3)
-            except Exception:
-                log.exception("Failed to remove an empty Google Doc after content insertion failed")
+            if created_new:
+                try:
+                    self.drive.files().delete(
+                        fileId=document_id, supportsAllDrives=True
+                    ).execute(num_retries=3)
+                except Exception:
+                    log.exception(
+                        "Failed to remove an empty Google Doc after content insertion failed"
+                    )
             raise
         if minutes_document and image_index is not None:
             image_url = os.environ.get("YAGAPON_MINUTES_IMAGE_URL", DEFAULT_MINUTES_IMAGE_URL).strip()
@@ -376,7 +494,7 @@ class DriveWriter:
                     ).execute(num_retries=3)
                 except Exception:
                     log.exception("Failed to insert the YagaPon image; keeping the styled minutes document")
-        return created.get("webViewLink") or f"https://docs.google.com/document/d/{document_id}/edit"
+        return file_info.get("webViewLink") or f"https://docs.google.com/document/d/{document_id}/edit"
 
 
 async def diagnose_drive(folder_url: str) -> dict:
@@ -394,6 +512,8 @@ async def upload_to_drive(
     *,
     subfolder_name: str | None = None,
     minutes_document: bool = False,
+    session_id: str | None = None,
+    artifact_type: str | None = None,
 ) -> str | None:
     """Create a styled Google Doc with ADC/service-account credentials."""
     folder_id = _extract_folder_id(folder_url)
@@ -404,12 +524,20 @@ async def upload_to_drive(
         writer = await asyncio.to_thread(DriveWriter)
         if subfolder_name:
             folder_id = await asyncio.to_thread(writer.get_or_create_folder, folder_id, subfolder_name)
+        idempotency_key = (
+            _artifact_key(session_id, artifact_type)
+            if session_id and artifact_type
+            else None
+        )
         return await asyncio.to_thread(
             writer.create_document,
             folder_id,
             filename,
             content,
             minutes_document=minutes_document,
+            idempotency_key=idempotency_key,
+            session_id=session_id,
+            artifact_type=artifact_type,
         )
     except Exception:
         log.exception("Direct Google Drive upload failed")
@@ -423,16 +551,22 @@ async def upload_minutes(
     channel_name: str,
     *,
     meeting_at: datetime | str | None = None,
+    session_id: str | None = None,
 ) -> str | None:
     folder_url = config.get_drive_folder(guild_id)
     if not folder_url:
         return None
-    return await upload_to_drive(
+    url = await upload_to_drive(
         folder_url,
         document_name(channel_name, meeting_at),
         minutes,
         minutes_document=True,
+        session_id=session_id,
+        artifact_type="minutes" if session_id else None,
     )
+    if not url:
+        raise RuntimeError("Configured Google Drive minutes upload failed")
+    return url
 
 
 async def upload_transcript(
@@ -442,6 +576,7 @@ async def upload_transcript(
     channel_name: str,
     *,
     meeting_at: datetime | str | None = None,
+    session_id: str | None = None,
 ) -> str | None:
     """Store the verbatim transcript in the Drive ``文字起こし`` subfolder."""
     if not transcript.strip():
@@ -449,12 +584,17 @@ async def upload_transcript(
     folder_url = config.get_drive_folder(guild_id)
     if not folder_url:
         return None
-    return await upload_to_drive(
+    url = await upload_to_drive(
         folder_url,
         document_name(channel_name, meeting_at),
         transcript,
         subfolder_name=TRANSCRIPT_FOLDER_NAME,
+        session_id=session_id,
+        artifact_type="transcript" if session_id else None,
     )
+    if not url:
+        raise RuntimeError("Configured Google Drive transcript upload failed")
+    return url
 
 
 async def upload_report(config, guild_id: int, report: str, report_type: str) -> str | None:

@@ -1,4 +1,5 @@
 import json
+import stat
 from datetime import datetime, timezone
 
 import pytest
@@ -38,10 +39,28 @@ def test_meeting_bundle_requires_transcript_and_keeps_minutes_optional():
     assert f"{root}/summary.md" in files
     assert f"{root}/minutes.md" not in files
     assert "status: draft" in files[f"{root}/transcript.md"]
+    assert "access_scope: restricted" in files[f"{root}/transcript.md"]
     assert "status: draft" in files[f"{root}/summary.md"]
     assert "[Speaker 1]: 提案します" in files[f"{root}/transcript.md"]
     assert manifest["festival"] == 28
     assert manifest["rawAudio"]["published"] is False
+
+
+def test_meeting_bundle_preserves_origin_channel_visibility():
+    root, files, manifest = build_meeting_bundle(
+        session_id="20261010T075451Z-private",
+        guild_id=123,
+        channel_id=456,
+        channel_name="役員会",
+        mode="listen",
+        transcript="[Speaker 1]: 非公開会議",
+    )
+
+    transcript = files[f"{root}/transcript.md"]
+    assert "access_scope: channel" in transcript
+    assert "channel_id: 456" in transcript
+    assert manifest["accessScope"] == "channel"
+    assert manifest["channelId"] == "456"
 
 
 def test_meeting_bundle_marks_optional_minutes_as_draft():
@@ -107,9 +126,7 @@ async def test_publish_without_token_retains_complete_outbox(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_legacy_github_token_is_ignored_without_explicit_compatibility_flag(
-    tmp_path, monkeypatch
-):
+async def test_legacy_github_token_is_ignored_without_explicit_compatibility_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_OUTBOX", str(tmp_path))
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_GITHUB_TOKEN", "must-not-be-used")
     monkeypatch.delenv("YAGAPON_KNOWLEDGE_DIRECT_GITHUB_ENABLED", raising=False)
@@ -160,6 +177,9 @@ async def test_publish_queues_bundle_without_github_token(tmp_path, monkeypatch)
     delivery = json.loads((result.outbox_dir / "delivery.json").read_text())
     assert delivery["status"] == "queued"
     assert delivery["queueObject"] == "pending/discord-queued.json"
+    assert stat.S_IMODE(result.outbox_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((result.outbox_dir / "delivery.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((result.outbox_dir / root / "source.md").stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio
@@ -388,9 +408,12 @@ def test_github_publisher_reuses_existing_pull_request():
 
     publisher = ExistingPublisher("token", "owner/repo")
 
-    assert publisher.publish(
-        branch="yagapon/meeting-session",
-        title="source: meeting",
-        body="review",
-        files={"path/transcript.md": "text"},
-    ) == "https://github.example/pr/existing"
+    assert (
+        publisher.publish(
+            branch="yagapon/meeting-session",
+            title="source: meeting",
+            body="review",
+            files={"path/transcript.md": "text"},
+        )
+        == "https://github.example/pr/existing"
+    )

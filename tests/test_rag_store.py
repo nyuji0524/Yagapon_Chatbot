@@ -1,5 +1,8 @@
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from bot.rag_store import RagStore
 
@@ -9,11 +12,58 @@ def metadata(festival: int = 27):
         {"key": "guild_id", "string_value": "1"},
         {"key": "channel_id", "string_value": "2"},
         {"key": "channel_name", "string_value": "開発"},
+        {"key": "access_scope", "string_value": "guild"},
         {"key": "festival", "numeric_value": festival},
         {"key": "document_key", "string_value": f"doc-{festival}"},
         {"key": "source_url", "string_value": "https://discord.example/message"},
         {"key": "end_at", "string_value": "2026-09-01T00:00:00+09:00"},
     ]
+
+
+def test_connection_sets_busy_timeout(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+
+    with store._connect() as connection:
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert busy_timeout == 5_000
+
+
+def test_mirror_write_retries_only_lock_contention(tmp_path, monkeypatch):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    real_connect = store._connect
+    attempts = 0
+
+    def intermittently_locked():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect()
+
+    monkeypatch.setattr(store, "_connect", intermittently_locked)
+    monkeypatch.setattr("bot.rag_store.time.sleep", lambda _seconds: None)
+
+    store.delete_source_documents("source_code")
+
+    assert attempts == 3
+
+
+def test_mirror_write_does_not_retry_non_lock_errors(tmp_path, monkeypatch):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    attempts = 0
+
+    def broken_database():
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store, "_connect", broken_database)
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        store.delete_source_documents("source_code")
+
+    assert attempts == 1
 
 
 def test_exact_search_honors_festival_filter(tmp_path):
@@ -25,6 +75,68 @@ def test_exact_search_honors_festival_filter(tmp_path):
 
     assert [hit.document_key for hit in hits] == ["doc-27"]
     assert "担当を確認" in hits[0].excerpt
+
+
+def test_exact_search_enforces_channel_visibility(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    for channel_id in (10, 20):
+        store.upsert_document(
+            f"documents/{channel_id}",
+            "非公開チャンネルの決定事項",
+            [
+                {"key": "guild_id", "string_value": "1"},
+                {"key": "channel_id", "string_value": str(channel_id)},
+                {"key": "document_key", "string_value": f"private-{channel_id}"},
+                {"key": "access_scope", "string_value": "channel"},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "status", "string_value": "raw"},
+            ],
+        )
+
+    hits = store.search_exact(
+        1,
+        ["決定事項"],
+        allowed_channel_ids=(10,),
+    )
+
+    assert [hit.document_key for hit in hits] == ["private-10"]
+
+
+def test_document_references_include_guild_and_global_records(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document("documents/guild", "guild", metadata(28))
+    global_metadata = metadata(28)
+    for item in global_metadata:
+        if item["key"] == "guild_id":
+            item["string_value"] = "0"
+        if item["key"] == "document_key":
+            item["string_value"] = "global"
+    store.upsert_document("documents/global", "global", global_metadata)
+
+    references = store.document_references(1)
+
+    assert {item["document_key"] for item in references} == {"doc-28", "global"}
+
+
+def test_restore_document_snapshots_replaces_partial_generation_atomically(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    old_metadata = metadata(27)
+    store.upsert_document("documents/old", "old body", old_metadata)
+    old_snapshot = store.get_document("doc-27")
+
+    store.upsert_document("documents/new", "new body", old_metadata)
+    new_only_metadata = metadata(28)
+    store.upsert_document("documents/new-only", "partial body", new_only_metadata)
+
+    store.restore_document_snapshots(
+        ["doc-27", "doc-28"],
+        [old_snapshot],
+    )
+
+    restored = store.get_document("doc-27")
+    assert restored["remote_name"] == "documents/old"
+    assert restored["body"] == "old body"
+    assert store.get_document("doc-28") is None
 
 
 def test_exact_search_honors_calendar_date_filter(tmp_path):
@@ -133,6 +245,7 @@ def test_exact_search_includes_global_trusted_documents(tmp_path):
         {"key": "authority", "string_value": "curated"},
         {"key": "status", "string_value": "current"},
         {"key": "source_type", "string_value": "builtin_reference"},
+        {"key": "access_scope", "string_value": "guild"},
     ]
     store.upsert_document("builtin://drive", "文字起こしは専用フォルダへ保存する", global_metadata)
 
@@ -166,6 +279,7 @@ def test_year_filter_includes_timeless_curated_repository_document(tmp_path):
             {"key": "authority", "string_value": "curated"},
             {"key": "status", "string_value": "active"},
             {"key": "source_type", "string_value": "knowledge_repository"},
+            {"key": "access_scope", "string_value": "guild"},
         ],
     )
 
@@ -219,6 +333,7 @@ def test_curated_global_document_survives_sql_candidate_limit(tmp_path):
             {"key": "festival", "numeric_value": 27},
             {"key": "authority", "string_value": "curated"},
             {"key": "status", "string_value": "verified"},
+            {"key": "access_scope", "string_value": "guild"},
         ],
     )
     for index in range(20):
@@ -259,6 +374,14 @@ def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert RagStore.query_terms("今日はこれについて教えてください") == []
 
 
+def test_query_terms_split_common_operational_compounds():
+    terms = RagStore.query_terms("27thの整理券運用で問題になった点は何ですか？")
+
+    assert "整理券運用" in terms
+    assert "整理券" in terms
+    assert "運用" in terms
+
+
 def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     knowledge_path = Path(__file__).parents[1] / "bot" / "trusted_knowledge.json"
@@ -271,6 +394,7 @@ def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path)
             {"key": "authority", "string_value": "curated"},
             {"key": "status", "string_value": record["status"]},
             {"key": "source_type", "string_value": "builtin_reference"},
+            {"key": "access_scope", "string_value": "guild"},
             {"key": "source_url", "string_value": record["source_url"]},
         ]
         if record.get("festival") is not None:

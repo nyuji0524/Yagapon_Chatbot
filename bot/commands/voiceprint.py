@@ -20,6 +20,7 @@ log = logging.getLogger("yagapon.voiceprint")
 
 VOICEPRINT_DIR = os.environ.get("YAGAPON_VOICEPRINT_DIR", "voiceprints")
 RECORD_DURATION = 10  # 秒
+_active_registrations: set[int] = set()
 
 
 async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
@@ -48,13 +49,14 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
                 "- quality: good=声紋登録に十分な音質, poor=ノイズが多い/声が小さい, silent=無音\n"
                 "- description: 声の特徴を1行で褒めてください！語尾は「ぽん」で。\n"
                 "  例: 「落ち着いたダンディーな声だぽん！」「明るくてハキハキした素敵な声だぽん！」「優しくて聞き心地の良い声だぽん！」\n"
-                "JSONのみ返してください。"
+                "JSONのみ返してください。",
             ],
             config=generation_config(model, thinking_level="low", max_output_tokens=256),
         )
         log_usage(log, "voice_sample_validation", model, response)
 
         import json
+
         text = response.text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -85,8 +87,18 @@ async def _validate_voice(audio_bytes: bytes, speaker_name: str) -> dict:
 
 def _get_voiceprint_path(guild_id: int, user_id: int) -> str:
     guild_dir = os.path.join(VOICEPRINT_DIR, str(guild_id))
-    os.makedirs(guild_dir, exist_ok=True)
+    os.makedirs(guild_dir, mode=0o700, exist_ok=True)
+    os.chmod(guild_dir, 0o700)
     return os.path.join(guild_dir, f"{user_id}.wav")
+
+
+def _save_voiceprint(path: str, audio_bytes: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(audio_bytes)
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(path, 0o600)
 
 
 def get_voiceprints_with_names(config, guild_id: int) -> dict[str, str]:
@@ -114,22 +126,38 @@ def register(bot):
     group = bot.create_group("voiceprint", "声紋登録だぽん！")
 
     @group.command(name="register", description="声紋を登録するぽん！（VCで10秒間録音）")
-    @discord.option("user", description="他のメンバーの声紋を登録する場合（省略で自分）", type=discord.Member, required=False, default=None)
+    @discord.option(
+        "user",
+        description="他のメンバーの声紋を登録する場合（省略で自分）",
+        type=discord.Member,
+        required=False,
+        default=None,
+    )
     async def voiceprint_register(ctx: discord.ApplicationContext, user: discord.Member = None):
         target = user or ctx.author
         if not can_manage_member(ctx, target):
             await ctx.respond("他のメンバーの音声サンプルは管理者のみ登録できるぽん。", ephemeral=True)
             return
+        from bot.voice import get_session
+
+        if get_session(ctx.guild_id):
+            await ctx.respond(
+                "会議の録音中は声紋登録を開始できないぽん。`/leave` の保存完了後に試してねぽん。",
+                ephemeral=True,
+            )
+            return
+        if ctx.guild_id in _active_registrations:
+            await ctx.respond(
+                "このサーバーでは別の声紋登録が進行中だぽん。完了後に試してねぽん。",
+                ephemeral=True,
+            )
+            return
         member = ctx.guild.get_member(target.id)
         if not member or not member.voice or not member.voice.channel:
             if user:
-                await ctx.respond(
-                    f"**{target.display_name}** がボイスチャンネルにいないぽん！", ephemeral=True
-                )
+                await ctx.respond(f"**{target.display_name}** がボイスチャンネルにいないぽん！", ephemeral=True)
             else:
-                await ctx.respond(
-                    "先にボイスチャンネルに入ってほしいぽん！", ephemeral=True
-                )
+                await ctx.respond("先にボイスチャンネルに入ってほしいぽん！", ephemeral=True)
             return
 
         # メンバー登録されているか確認
@@ -143,27 +171,44 @@ def register(bot):
             )
             return
 
-        await ctx.defer()
+        _active_registrations.add(ctx.guild_id)
+        await ctx.defer(ephemeral=True)
         vc_channel = member.voice.channel
 
         # VC接続
         voice_client = None
+        created_voice_client = False
+        registration_recording = False
         try:
             for vc in bot.voice_clients:
                 if vc.guild == ctx.guild:
-                    voice_client = vc
+                    is_recording = getattr(vc, "is_recording", lambda: False)
+                    is_playing = getattr(vc, "is_playing", lambda: False)
+                    if is_recording() or is_playing():
+                        await ctx.followup.send(
+                            "やがぽんが別の音声処理を使用中だぽん。完了後に試してねぽん。",
+                            ephemeral=True,
+                        )
+                        return
                     if vc.channel != vc_channel:
-                        await vc.move_to(vc_channel)
+                        await ctx.followup.send(
+                            "やがぽんが別のボイスチャンネルに接続中だぽん。切断後に試してねぽん。",
+                            ephemeral=True,
+                        )
+                        return
+                    voice_client = vc
                     break
 
             if voice_client is None:
                 voice_client = await vc_channel.connect()
+                created_voice_client = True
 
             await asyncio.sleep(1)
 
             # 録音開始
             sink = discord.sinks.WaveSink()
             voice_client.start_recording(sink, lambda err: None)
+            registration_recording = True
 
             display_name = members[uid].get("nickname") or members[uid].get("name") or target.display_name
             await ctx.followup.send(
@@ -175,18 +220,15 @@ def register(bot):
             await asyncio.sleep(RECORD_DURATION)
 
             # 録音停止 → sinkからデータ取得
-            recording_sink = None
-            if hasattr(voice_client, '_reader') and voice_client._reader:
-                recording_sink = voice_client._reader.sink
-
             voice_client.stop_recording()
+            registration_recording = False
             await asyncio.sleep(0.5)
 
-            if recording_sink:
-                audio_data = getattr(recording_sink, 'audio_data', {})
+            if sink:
+                audio_data = getattr(sink, "audio_data", {})
                 user_audio = audio_data.get(target.id)
 
-                if user_audio and hasattr(user_audio, 'file'):
+                if user_audio and hasattr(user_audio, "file"):
                     user_audio.file.seek(0)
                     audio_bytes = user_audio.file.read()
 
@@ -204,8 +246,7 @@ def register(bot):
                             )
                         else:
                             path = _get_voiceprint_path(ctx.guild_id, target.id)
-                            with open(path, 'wb') as f:
-                                f.write(audio_bytes)
+                            _save_voiceprint(path, audio_bytes)
 
                             # メンバー情報に声紋登録済みフラグを追加
                             members[uid]["voiceprint"] = True
@@ -232,24 +273,32 @@ def register(bot):
             else:
                 await ctx.followup.send("録音データが取得できなかったぽん...", silent=True)
 
-            # 他のセッションが使っていなければ切断
-            from bot.voice import get_session
-            if not get_session(ctx.guild_id):
-                await voice_client.disconnect()
-
         except Exception as e:
             log.error(f"Voiceprint registration error: {e}")
-            await ctx.followup.send(f"エラーが出ちゃったぽん...: {e}", silent=True)
-            if voice_client and voice_client.is_connected():
-                from bot.voice import get_session
-                if not get_session(ctx.guild_id):
+            await ctx.followup.send(
+                "声紋登録中にエラーが出ちゃったぽん。少し待ってからもう一度試してねぽん。",
+                ephemeral=True,
+            )
+        finally:
+            _active_registrations.discard(ctx.guild_id)
+            if registration_recording and voice_client:
+                try:
+                    voice_client.stop_recording()
+                except Exception:
+                    log.exception("Could not stop failed voiceprint recording")
+            if created_voice_client and voice_client:
+                try:
                     await voice_client.disconnect()
+                except Exception:
+                    log.exception("Could not disconnect voiceprint client")
 
     @group.command(name="list", description="登録済みの声紋一覧を表示するぽん！")
     async def voiceprint_list(ctx: discord.ApplicationContext):
         voiceprints = get_voiceprints_with_names(bot.config, ctx.guild_id)
         if not voiceprints:
-            await ctx.respond("まだ誰も声紋を登録してないぽん！\n`/voiceprint register` で登録してねぽん。", silent=True)
+            await ctx.respond(
+                "まだ誰も声紋を登録してないぽん！\n`/voiceprint register` で登録してねぽん。", silent=True
+            )
             return
 
         embed = discord.Embed(title="🎙️ 声紋登録済みメンバー", color=discord.Color.blue())
@@ -260,7 +309,13 @@ def register(bot):
         await ctx.respond(embed=embed, silent=True)
 
     @group.command(name="delete", description="声紋を削除するぽん")
-    @discord.option("user", description="他のメンバーの声紋を削除する場合（省略で自分）", type=discord.Member, required=False, default=None)
+    @discord.option(
+        "user",
+        description="他のメンバーの声紋を削除する場合（省略で自分）",
+        type=discord.Member,
+        required=False,
+        default=None,
+    )
     async def voiceprint_delete(ctx: discord.ApplicationContext, user: discord.Member = None):
         target = user or ctx.author
         if not can_manage_member(ctx, target):

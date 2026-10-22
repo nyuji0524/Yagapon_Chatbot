@@ -40,7 +40,7 @@ def test_evaluation_rejects_forbidden_hallucination():
     })
 
     assert result["passed"] is False
-    assert "forbidden:テーマは青" in result["failures"]
+    assert "forbidden" in result["failures"]
 
 
 def test_forbidden_phrase_in_explicit_correction_is_not_a_false_positive():
@@ -71,7 +71,7 @@ def test_exact_forbidden_and_irrelevant_source_remain_hard_failures():
     })
 
     assert result["passed"] is False
-    assert "forbidden:@keio.jp" in result["failures"]
+    assert "forbidden" in result["failures"]
     assert "source_relevance" in result["failures"]
     assert result["scores"]["safety"] == 0
 
@@ -98,6 +98,50 @@ def test_semantic_judge_is_an_independent_gate_and_scores_are_reported():
     assert result["passed"] is False
     assert "semantic_judge" in result["failures"]
     assert result["scores"]["semantic"] == 3.4
+
+
+def test_production_result_excludes_answers_sources_and_judge_prose():
+    case = EvalCase(
+        id="private-evidence",
+        question="非公開会議の内容",
+        forbidden=["内部固有名"],
+        must_cite=True,
+    )
+    judgment = {
+        "factual_accuracy": 1,
+        "completeness": 1,
+        "directness": 4,
+        "citation_relevance": 4,
+        "safety": 4,
+        "passed": False,
+        "issues": ["内部固有名を含む回答だった"],
+        "rationale": "非公開会議で山田さんが述べた内容と一致した",
+    }
+
+    result = evaluate_answer(
+        case,
+        {
+            "response": "内部固有名と山田さんの発言",
+            "sources": ["役員専用チャンネル"],
+            "festival": 28,
+            "no_answer": False,
+            "query_id": "private-query-id",
+            "latency_ms": 123,
+        },
+        judgment,
+    )
+
+    assert set(result) == {"id", "passed", "failures", "scores"}
+    assert result["failures"] == ["forbidden", "semantic_judge"]
+    rendered = str(result)
+    for private_value in (
+        "内部固有名",
+        "山田さん",
+        "役員専用チャンネル",
+        "private-query-id",
+        "非公開会議",
+    ):
+        assert private_value not in rendered
 
 
 def test_production_evaluation_cases_are_valid_and_unique():

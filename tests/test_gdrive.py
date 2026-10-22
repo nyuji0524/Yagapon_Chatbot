@@ -6,6 +6,7 @@ import pytest
 
 from bot.gdrive import (
     DriveWriter,
+    _artifact_key,
     _extract_folder_id,
     _render_markdown,
     read_meeting_material,
@@ -100,6 +101,7 @@ async def test_transcript_is_uploaded_as_a_separate_document():
             "[Speaker 1]: 発言",
             "全体会議",
             meeting_at="2026-10-12T00:00:00+09:00",
+            session_id="session-123",
         )
 
     assert result == "https://docs.example/transcript"
@@ -108,6 +110,27 @@ async def test_transcript_is_uploaded_as_a_separate_document():
     assert args[1] == "261012全体会議"
     assert args[2] == "[Speaker 1]: 発言"
     assert uploader.await_args.kwargs["subfolder_name"] == "文字起こし"
+    assert uploader.await_args.kwargs["session_id"] == "session-123"
+    assert uploader.await_args.kwargs["artifact_type"] == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_configured_transcript_upload_failure_is_not_silently_optional():
+    config = MagicMock()
+    config.get_drive_folder.return_value = "https://drive.google.com/drive/folders/folder_123"
+
+    with patch("bot.gdrive.upload_to_drive", AsyncMock(return_value=None)):
+        with pytest.raises(RuntimeError, match="transcript upload failed"):
+            await upload_transcript(config, 1, "発言", "全体会議")
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_drive_remains_optional():
+    config = MagicMock()
+    config.get_drive_folder.return_value = None
+
+    assert await upload_transcript(config, 1, "発言", "全体会議") is None
+    assert await upload_minutes(config, 1, "議事録", "全体会議") is None
 
 
 def test_drive_writer_creates_document_and_inserts_content():
@@ -127,6 +150,75 @@ def test_drive_writer_creates_document_and_inserts_content():
     update = writer.docs.documents().batchUpdate.call_args.kwargs
     assert update["body"]["requests"][0]["insertText"]["text"] == "本文\n"
     assert any("updateTextStyle" in request for request in update["body"]["requests"])
+
+
+def test_drive_writer_retry_reuses_and_updates_stable_session_artifact():
+    writer = DriveWriter.__new__(DriveWriter)
+    writer.drive = MagicMock()
+    writer.docs = MagicMock()
+    stable_key = _artifact_key("session-123", "transcript")
+    writer.drive.files().list.side_effect = [
+        execute_result({"files": []}),
+        execute_result(
+            {
+                "files": [
+                    {
+                        "id": "doc-1",
+                        "webViewLink": "https://docs.example/doc-1",
+                        "modifiedTime": "2026-10-22T00:00:00Z",
+                    }
+                ]
+            }
+        ),
+    ]
+    writer.drive.files().create.return_value = execute_result(
+        {"id": "doc-1", "webViewLink": "https://docs.example/doc-1"}
+    )
+    writer.drive.files().update.return_value = execute_result(
+        {"id": "doc-1", "webViewLink": "https://docs.example/doc-1"}
+    )
+    writer.docs.documents().get.return_value = execute_result(
+        {"body": {"content": [{"endIndex": 15}]}}
+    )
+    writer.docs.documents().batchUpdate.return_value = execute_result({})
+
+    first = writer.create_document(
+        "folder-1",
+        "文字起こし",
+        "最初の本文",
+        idempotency_key=stable_key,
+        session_id="session-123",
+        artifact_type="transcript",
+    )
+    # Simulate a process crash before the caller checkpoints ``first``. The
+    # next process sees the appProperty and updates the same Doc.
+    second = writer.create_document(
+        "folder-1",
+        "文字起こし",
+        "再試行後の本文",
+        idempotency_key=stable_key,
+        session_id="session-123",
+        artifact_type="transcript",
+    )
+
+    assert first == second == "https://docs.example/doc-1"
+    writer.drive.files().create.assert_called_once()
+    create_body = writer.drive.files().create.call_args.kwargs["body"]
+    assert create_body["appProperties"] == {
+        "yagaponArtifactKey": stable_key,
+        "yagaponSessionId": "session-123",
+        "yagaponArtifactType": "transcript",
+    }
+    query = writer.drive.files().list.call_args_list[-1].kwargs["q"]
+    assert stable_key in query
+    writer.drive.files().update.assert_called_once()
+    retry_requests = writer.docs.documents().batchUpdate.call_args_list[-1].kwargs[
+        "body"
+    ]["requests"]
+    assert retry_requests[0] == {
+        "deleteContentRange": {"range": {"startIndex": 1, "endIndex": 14}}
+    }
+    assert retry_requests[1]["insertText"]["text"] == "再試行後の本文\n"
 
 
 def test_minutes_document_matches_reference_style_and_inserts_yagapon_image():
@@ -193,10 +285,28 @@ async def test_minutes_upload_selects_minutes_document_style():
     uploader = AsyncMock(return_value="https://docs.example/minutes")
 
     with patch("bot.gdrive.upload_to_drive", uploader):
-        result = await upload_minutes(config, 1, "# 議事録", "全体会議")
+        result = await upload_minutes(
+            config,
+            1,
+            "# 議事録",
+            "全体会議",
+            session_id="session-123",
+        )
 
     assert result == "https://docs.example/minutes"
     assert uploader.await_args.kwargs["minutes_document"] is True
+    assert uploader.await_args.kwargs["session_id"] == "session-123"
+    assert uploader.await_args.kwargs["artifact_type"] == "minutes"
+
+
+@pytest.mark.asyncio
+async def test_configured_minutes_upload_failure_is_not_silently_optional():
+    config = MagicMock()
+    config.get_drive_folder.return_value = "https://drive.google.com/drive/folders/folder_123"
+
+    with patch("bot.gdrive.upload_to_drive", AsyncMock(return_value=None)):
+        with pytest.raises(RuntimeError, match="minutes upload failed"):
+            await upload_minutes(config, 1, "議事録", "全体会議")
 
 
 def test_drive_writer_reuses_transcript_folder():

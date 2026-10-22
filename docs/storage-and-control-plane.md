@@ -13,7 +13,6 @@ GCEでは永続ディスクの `/var/lib/yagapon` をコンテナの `/data` に
 | 運用状態 | `/data/operations.sqlite3` | ジョブ、エラー、デッドレター（本文は保存しない） |
 | Knowledge送信待ち | `/data/knowledge-outbox/<bundle-id>` | 会議・Discord・Driveから作った再送可能なdraft、manifest、配信状態 |
 | Drive同期状態 | `/data/drive-sync-state.json` | change token、ハッシュ、削除状態 |
-| Knowledge索引状態 | `/data/knowledge-index-state.json` | GitHub文書とFile Search文書の対応 |
 | ソース索引状態 | `/data/source-index-state.json` | リポジトリcommit・コードチャンクとFile Search文書の対応 |
 
 秘密情報は `/etc/yagapon/yagapon.env` と Google Secret Manager に置き、上記データや

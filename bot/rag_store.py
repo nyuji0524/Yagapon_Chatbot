@@ -8,10 +8,16 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+SQLITE_CONNECT_TIMEOUT_SECONDS = 5.0
+SQLITE_BUSY_TIMEOUT_MS = 5_000
+SQLITE_WRITE_ATTEMPTS = 3
+SQLITE_RETRY_BASE_SECONDS = 0.05
 
 
 def default_rag_db_path() -> Path:
@@ -54,12 +60,33 @@ class RagStore:
 
     def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(
+            self.path,
+            timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
+        )
         connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         return connection
 
+    @staticmethod
+    def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
+        message = str(exc).casefold()
+        return "locked" in message or "busy" in message
+
+    def _write(self, operation):
+        """Run one SQLite transaction with bounded retries for lock contention."""
+        for attempt in range(SQLITE_WRITE_ATTEMPTS):
+            try:
+                with self._lock, self._connect() as connection:
+                    return operation(connection)
+            except sqlite3.OperationalError as exc:
+                if not self._is_busy_error(exc) or attempt == SQLITE_WRITE_ATTEMPTS - 1:
+                    raise
+                time.sleep(SQLITE_RETRY_BASE_SECONDS * (2**attempt))
+        raise AssertionError("unreachable")
+
     def _initialize(self):
-        with self._lock, self._connect() as connection:
+        def initialize(connection):
             connection.executescript(
                 """
                 PRAGMA journal_mode=WAL;
@@ -74,6 +101,8 @@ class RagStore:
                     source_type TEXT,
                     status TEXT,
                     authority TEXT,
+                    access_scope TEXT,
+                    schema TEXT,
                     source_url TEXT,
                     start_at TEXT,
                     end_at TEXT,
@@ -116,6 +145,13 @@ class RagStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(query_id, user_id)
                 );
+                CREATE TABLE IF NOT EXISTS pending_document_deletions (
+                    remote_name TEXT PRIMARY KEY,
+                    document_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS pending_deletions_document
+                    ON pending_document_deletions(document_key);
                 """
             )
             columns = {
@@ -124,19 +160,47 @@ class RagStore:
             }
             if "category" not in columns:
                 connection.execute("ALTER TABLE documents ADD COLUMN category TEXT")
+            if "access_scope" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN access_scope TEXT")
+            if "schema" not in columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN schema TEXT")
 
-    def upsert_document(self, remote_name: str, text: str, metadata: list[dict] | None):
+        self._write(initialize)
+
+    def upsert_document(
+        self,
+        remote_name: str,
+        text: str,
+        metadata: list[dict] | None,
+        *,
+        superseded_remote_names: list[str] | tuple[str, ...] = (),
+    ):
+        """Persist a remote document and its replacement cleanup intent atomically.
+
+        File Search upload happens before this local commit.  Recording the new
+        mirror row and every superseded remote in one SQLite transaction means a
+        process crash cannot leave the new row durable without also leaving the
+        old remote queued for deletion.
+        """
         values = _metadata_map(metadata)
         document_key = str(values.get("document_key") or hashlib.sha256(text.encode()).hexdigest()[:24])
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with self._lock, self._connect() as connection:
+        pending = tuple(
+            dict.fromkeys(
+                str(name)
+                for name in superseded_remote_names
+                if name and str(name) != remote_name
+            )
+        )
+
+        def upsert(connection):
             connection.execute(
                 """
                 INSERT INTO documents (
                     document_key, remote_name, guild_id, channel_id, channel_name,
                     category, festival, source_type, status, authority, source_url,
-                    start_at, end_at, body, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    access_scope, schema, start_at, end_at, body, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_key) DO UPDATE SET
                     remote_name=excluded.remote_name,
                     guild_id=excluded.guild_id,
@@ -147,6 +211,8 @@ class RagStore:
                     source_type=excluded.source_type,
                     status=excluded.status,
                     authority=excluded.authority,
+                    access_scope=excluded.access_scope,
+                    schema=excluded.schema,
                     source_url=excluded.source_url,
                     start_at=excluded.start_at,
                     end_at=excluded.end_at,
@@ -165,27 +231,93 @@ class RagStore:
                     str(values.get("status") or "raw"),
                     str(values.get("authority") or "unknown"),
                     str(values.get("source_url") or ""),
+                    str(values.get("access_scope") or ""),
+                    str(values.get("schema") or ""),
                     str(values.get("start_at") or ""),
                     str(values.get("end_at") or ""),
                     text,
                     now,
                 ),
             )
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO pending_document_deletions
+                    (remote_name, document_key, created_at)
+                VALUES (?, ?, ?)
+                """,
+                ((name, document_key, now) for name in pending),
+            )
+
+        self._write(upsert)
 
     def delete_remote_documents(self, remote_names: list[str]):
         if not remote_names:
             return
         placeholders = ",".join("?" for _ in remote_names)
-        with self._lock, self._connect() as connection:
+
+        def delete(connection):
             connection.execute(
                 f"DELETE FROM documents WHERE remote_name IN ({placeholders})",  # noqa: S608
                 remote_names,
             )
 
+        self._write(delete)
+
     def delete_source_documents(self, source_type: str):
         """Replace a code-shipped source without touching synced Knowledge documents."""
-        with self._lock, self._connect() as connection:
+        def delete(connection):
             connection.execute("DELETE FROM documents WHERE source_type = ?", (source_type,))
+
+        self._write(delete)
+
+    def queue_document_deletion(self, document_key: str, remote_name: str) -> None:
+        """Remember a superseded File Search document until deletion succeeds."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        def queue(connection):
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO pending_document_deletions
+                    (remote_name, document_key, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (remote_name, document_key, now),
+            )
+
+        self._write(queue)
+
+    def pending_document_deletions(self, document_key: str | None = None) -> list[str]:
+        with self._lock, self._connect() as connection:
+            if document_key is None:
+                rows = connection.execute(
+                    """
+                    SELECT remote_name FROM pending_document_deletions
+                    ORDER BY created_at, remote_name
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT remote_name FROM pending_document_deletions
+                    WHERE document_key = ? ORDER BY created_at, remote_name
+                    """,
+                    (document_key,),
+                ).fetchall()
+        return [str(row["remote_name"]) for row in rows]
+
+    def resolve_document_deletions(self, remote_names: list[str]) -> None:
+        if not remote_names:
+            return
+        placeholders = ",".join("?" for _ in remote_names)
+
+        def resolve(connection):
+            connection.execute(
+                f"DELETE FROM pending_document_deletions "  # noqa: S608
+                f"WHERE remote_name IN ({placeholders})",
+                remote_names,
+            )
+
+        self._write(resolve)
 
     def get_document(self, document_key: str) -> dict | None:
         """Return the local mirror row used to make remote replacement idempotent."""
@@ -194,6 +326,76 @@ class RagStore:
                 "SELECT * FROM documents WHERE document_key = ?", (document_key,)
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def restore_document_snapshots(
+        self,
+        document_keys: list[str] | tuple[str, ...],
+        snapshots: list[dict] | tuple[dict, ...],
+    ) -> None:
+        """Atomically restore mirror rows after a failed remote generation.
+
+        Uploading a source generation updates the exact-match mirror one document
+        at a time.  If a later upload fails, removing the successful new remotes
+        would otherwise leave those document keys missing locally.  Replacing the
+        affected key set and its pre-upload snapshots in one transaction restores
+        the complete previous generation without exposing a partially restored
+        mirror to readers.
+        """
+        keys = tuple(dict.fromkeys(str(key) for key in document_keys if key))
+        if not keys:
+            return
+        allowed_keys = set(keys)
+        rows = tuple(snapshot for snapshot in snapshots if snapshot is not None)
+        if any(str(row.get("document_key") or "") not in allowed_keys for row in rows):
+            raise ValueError("Snapshot document key is outside the restore set")
+
+        placeholders = ",".join("?" for _ in keys)
+        columns = (
+            "document_key",
+            "remote_name",
+            "guild_id",
+            "channel_id",
+            "channel_name",
+            "category",
+            "festival",
+            "source_type",
+            "status",
+            "authority",
+            "access_scope",
+            "schema",
+            "source_url",
+            "start_at",
+            "end_at",
+            "body",
+            "updated_at",
+        )
+        value_placeholders = ",".join("?" for _ in columns)
+
+        def restore(connection):
+            connection.execute(
+                f"DELETE FROM documents WHERE document_key IN ({placeholders})",  # noqa: S608
+                keys,
+            )
+            connection.executemany(
+                f"INSERT INTO documents ({','.join(columns)}) "  # noqa: S608
+                f"VALUES ({value_placeholders})",
+                (tuple(row.get(column) for column in columns) for row in rows),
+            )
+
+        self._write(restore)
+
+    def document_references(self, guild_id: int) -> list[dict]:
+        """Return the minimal local mirror identity needed for drift audits."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_key, remote_name, guild_id, source_type
+                FROM documents WHERE guild_id IN (?, 0)
+                ORDER BY document_key
+                """,
+                (guild_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_curation_documents(self, *, limit: int = 1000) -> list[dict]:
         """Return raw, locally mirrored source documents eligible for draft curation."""
@@ -254,6 +456,15 @@ class RagStore:
             )
             if 3 <= len(segment) <= 24 and segment not in stop_terms:
                 terms.append(segment)
+                # Preserve a compound for precision, but also expose its
+                # subject when a common operational suffix would otherwise
+                # hide exact matches such as ``整理券`` inside ``整理券運用``.
+                compound = re.fullmatch(
+                    r"(.{2,})(運用|問題点|課題|保存先|開催状況)",
+                    segment,
+                )
+                if compound:
+                    terms.extend(compound.groups())
         # The festival number already drives the metadata filter in the RAG
         # pipeline.  Treating ``27th`` itself as an exact-search subject makes
         # the operating-year reference appear beside unrelated 27th topics.
@@ -285,6 +496,8 @@ class RagStore:
         *,
         festival: int | None = None,
         target_date: str | None = None,
+        allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
+        allow_unrestricted_conversations: bool = False,
         limit: int = 4,
     ) -> list[LexicalHit]:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
@@ -294,6 +507,18 @@ class RagStore:
         # Those records are safe to share across configured guilds.
         conditions = ["(guild_id = ? OR guild_id = 0)"]
         params: list[object] = [guild_id]
+        if not allow_unrestricted_conversations:
+            from bot.discord_visibility import normalized_channel_ids
+
+            channel_ids = normalized_channel_ids(allowed_channel_ids)
+            visibility = ["access_scope = 'guild'"]
+            if channel_ids:
+                placeholders = ",".join("?" for _ in channel_ids)
+                visibility.append(
+                    f"(access_scope = 'channel' AND channel_id IN ({placeholders}))"
+                )
+                params.extend(channel_ids)
+            conditions.append("(" + " OR ".join(visibility) + ")")
         if festival is not None:
             # Explicitly reviewed/curated documents with no festival are
             # year-independent contracts. Raw unlabelled guild documents stay

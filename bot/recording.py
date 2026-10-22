@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +22,9 @@ PCM_SAMPLE_WIDTH = 2
 DEFAULT_MAX_RECORDING_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_FREE_SPACE_RESERVE_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 7
+TIMELINE_MANIFEST_NAME = "timeline.jsonl"
+TIMELINE_SCHEMA_VERSION = 1
+DEFAULT_TIMELINE_TURN_GAP_SECONDS = 1.25
 RECOVERABLE_STATUSES = {
     "processing",
     "recording",
@@ -29,6 +34,14 @@ RECOVERABLE_STATUSES = {
     "automatic_leave_failed",
     "transcription_failed",
     "minutes_generation_failed",
+    "minutes_generated",
+    "manual_delivery_pending",
+    "delivery_in_progress",
+    "automatic_leave_failed",
+    "final_reprocess_processing",
+    "final_reprocess_deferred",
+    "final_reprocess_empty",
+    "final_reprocess_completed",
     "recovery_retry",
     "recovery_processing",
 }
@@ -39,6 +52,10 @@ TERMINAL_STATUSES = {
     "completed_without_minutes",
     "recovered",
     "recovery_dead_letter",
+    "start_failed",
+    "recording_truncated",
+    "storage_limit_reached",
+    "capture_interrupted",
 }
 REPLAY_AUDIO_DELETION_STATUSES = {
     "delivered_recording_retained",
@@ -50,6 +67,150 @@ REPLAY_AUDIO_DELETION_STATUSES = {
 class RecoverableRecording:
     session_dir: Path
     metadata: dict
+
+
+@dataclass(frozen=True)
+class RecordingTimelineSegment:
+    """A chronological utterance slice referencing one user's durable PCM."""
+
+    sequence: int
+    user_id: int
+    start: int
+    end: int
+    received_at_ns: int
+    ended_at_ns: int
+
+
+log = logging.getLogger("yagapon.recording")
+
+
+def _pcm_file_sizes(session_dir: Path) -> dict[int, int]:
+    sizes: dict[int, int] = {}
+    for path in session_dir.glob("user-*.pcm"):
+        try:
+            user_id = int(path.stem.removeprefix("user-"))
+            sizes[user_id] = path.stat().st_size
+        except (OSError, ValueError):
+            continue
+    return sizes
+
+
+def load_recording_timeline_segments(
+    session_dir: Path,
+    *,
+    max_bytes: int,
+    gap_seconds: float = DEFAULT_TIMELINE_TURN_GAP_SECONDS,
+) -> list[RecordingTimelineSegment] | None:
+    """Load a complete receive-order manifest and coalesce it into utterances.
+
+    ``None`` deliberately means "use the legacy per-user fallback". A timeline
+    is used only when it covers every byte in every PCM file exactly; this keeps
+    a missing/truncated manifest from silently dropping old or crash-tail audio.
+    """
+    manifest = session_dir / TIMELINE_MANIFEST_NAME
+    sizes = _pcm_file_sizes(session_dir)
+    if not manifest.is_file():
+        return None
+    if not sizes:
+        return []
+
+    expected_offsets: dict[int, int] = {}
+    completed: list[RecordingTimelineSegment] = []
+    current: RecordingTimelineSegment | None = None
+    previous_sequence = -1
+    gap_ns = max(0, int(gap_seconds * 1_000_000_000))
+
+    try:
+        with manifest.open("rb") as source:
+            for raw_line in source:
+                if not raw_line.strip():
+                    continue
+                item = json.loads(raw_line)
+                if int(item.get("v", 0)) != TIMELINE_SCHEMA_VERSION:
+                    return None
+                sequence = int(item["sequence"])
+                user_id = int(item["user_id"])
+                start = int(item["start"])
+                end = int(item["end"])
+                received_at_ns = int(item["received_at_ns"])
+                if (
+                    sequence != previous_sequence + 1
+                    or user_id not in sizes
+                    or start != expected_offsets.get(user_id, 0)
+                    or end <= start
+                    or end > sizes[user_id]
+                    or received_at_ns <= 0
+                ):
+                    return None
+                previous_sequence = sequence
+                expected_offsets[user_id] = end
+
+                if (
+                    current is not None
+                    and user_id == current.user_id
+                    and start == current.end
+                    and 0 <= received_at_ns - current.ended_at_ns <= gap_ns
+                ):
+                    current = RecordingTimelineSegment(
+                        sequence=current.sequence,
+                        user_id=user_id,
+                        start=current.start,
+                        end=end,
+                        received_at_ns=current.received_at_ns,
+                        ended_at_ns=received_at_ns,
+                    )
+                else:
+                    if current is not None:
+                        completed.append(current)
+                    current = RecordingTimelineSegment(
+                        sequence=sequence,
+                        user_id=user_id,
+                        start=start,
+                        end=end,
+                        received_at_ns=received_at_ns,
+                        ended_at_ns=received_at_ns,
+                    )
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+    if previous_sequence < 0 or any(expected_offsets.get(user_id, 0) != size for user_id, size in sizes.items()):
+        return None
+
+    if current is not None:
+        completed.append(current)
+    bounded_size = max(1, int(max_bytes))
+    result: list[RecordingTimelineSegment] = []
+    for segment in completed:
+        start = segment.start
+        while start < segment.end:
+            end = min(segment.end, start + bounded_size)
+            result.append(
+                RecordingTimelineSegment(
+                    sequence=segment.sequence,
+                    user_id=segment.user_id,
+                    start=start,
+                    end=end,
+                    received_at_ns=segment.received_at_ns,
+                    ended_at_ns=segment.ended_at_ns,
+                )
+            )
+            start = end
+    return result
+
+
+def read_recording_timeline_audio(
+    session_dir: Path,
+    segment: RecordingTimelineSegment,
+) -> bytes:
+    """Read one validated timeline slice, failing closed if PCM changed."""
+    path = session_dir / f"user-{segment.user_id}.pcm"
+    expected = segment.end - segment.start
+    with path.open("rb") as source:
+        source.seek(segment.start)
+        data = source.read(expected)
+    if len(data) != expected:
+        raise OSError("recording timeline references incomplete PCM")
+    return data
 
 
 def recording_root() -> Path:
@@ -83,7 +244,8 @@ def save_external_transcript(
         return None
     safe_session_id = re.sub(r"[^A-Za-z0-9_.-]", "-", session_id)[:120]
     destination = transcript_root() / str(guild_id) / f"{safe_session_id}.md"
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    destination.parent.chmod(0o700)
     document = (
         f"# 文字起こし - {channel_name}\n\n"
         f"- セッション: `{safe_session_id}`\n"
@@ -93,6 +255,7 @@ def save_external_transcript(
     )
     temporary = destination.with_suffix(".md.tmp")
     temporary.write_text(document, encoding="utf-8")
+    temporary.chmod(0o600)
     os.replace(temporary, destination)
     return destination
 
@@ -136,6 +299,10 @@ def finalize_recording_replay(
             deleted += 1
         except FileNotFoundError:
             continue
+    try:
+        (resolved_dir / TIMELINE_MANIFEST_NAME).unlink()
+    except FileNotFoundError:
+        pass
     metadata.update(
         {
             "status": "delivered_audio_deleted",
@@ -170,6 +337,9 @@ class PersistentPCMSink(Sink):
         channel_name: str,
         mode: str,
         *,
+        channel_id: int | None = None,
+        category_id: int | None = None,
+        category_name: str = "",
         session_dir: Path | None = None,
         max_bytes: int | None = None,
         resume: bool = False,
@@ -194,9 +364,28 @@ class PersistentPCMSink(Sink):
         self.max_bytes = min(configured_max, available_for_recording)
         self._lock = threading.RLock()
         self._files: dict[int, object] = {}
-        self._total_bytes = sum(path.stat().st_size for path in self.session_dir.glob("user-*.pcm"))
+        self._user_bytes = _pcm_file_sizes(self.session_dir)
+        self._total_bytes = sum(self._user_bytes.values())
+        self._timeline_path = self.session_dir / TIMELINE_MANIFEST_NAME
+        self._timeline_file = None
+        self._timeline_sequence = 0
+        self._timeline_complete = self._prepare_timeline_for_append()
         existing_metadata = self.read_metadata() if resume else {}
-        self._limit_reached = bool(existing_metadata.get("storage_limit_reached"))
+        stored_channel_id = channel_id or existing_metadata.get("channel_id")
+        try:
+            self.channel_id = int(stored_channel_id) if stored_channel_id else None
+        except (TypeError, ValueError):
+            self.channel_id = None
+        stored_category_id = category_id or existing_metadata.get("category_id")
+        try:
+            self.category_id = int(stored_category_id) if stored_category_id else None
+        except (TypeError, ValueError):
+            self.category_id = None
+        self.category_name = str(category_name or existing_metadata.get("category_name") or "")
+        self.channel_lineage_recorded = bool(not resume or existing_metadata.get("channel_lineage_recorded"))
+        self._limit_reached = bool(existing_metadata.get("storage_limit_reached")) or (
+            str(existing_metadata.get("status") or "") == "storage_limit_reached"
+        )
         self._closed = False
         if resume:
             self._write_metadata(
@@ -205,6 +394,57 @@ class PersistentPCMSink(Sink):
             )
         else:
             self._write_metadata("recording", started_at=started_at.isoformat())
+
+    def _prepare_timeline_for_append(self) -> bool:
+        """Recover the next event id and trim only a crash-truncated tail."""
+        if not self._timeline_path.exists():
+            return self._total_bytes == 0
+        expected_offsets: dict[int, int] = {}
+        previous_sequence = -1
+        valid_end = 0
+        needs_newline = False
+        complete = True
+        try:
+            with self._timeline_path.open("rb+") as source:
+                while True:
+                    line_start = source.tell()
+                    raw_line = source.readline()
+                    if not raw_line:
+                        break
+                    if not raw_line.strip():
+                        valid_end = source.tell()
+                        continue
+                    try:
+                        item = json.loads(raw_line)
+                        sequence = int(item["sequence"])
+                        user_id = int(item["user_id"])
+                        start = int(item["start"])
+                        end = int(item["end"])
+                        if (
+                            int(item.get("v", 0)) != TIMELINE_SCHEMA_VERSION
+                            or sequence != previous_sequence + 1
+                            or start != expected_offsets.get(user_id, 0)
+                            or end <= start
+                        ):
+                            raise ValueError("invalid recording timeline event")
+                    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                        complete = False
+                        source.truncate(line_start)
+                        break
+                    previous_sequence = sequence
+                    expected_offsets[user_id] = end
+                    valid_end = source.tell()
+                    needs_newline = not raw_line.endswith(b"\n")
+                source.truncate(valid_end)
+                if needs_newline:
+                    source.seek(0, os.SEEK_END)
+                    source.write(b"\n")
+        except OSError:
+            return False
+        self._timeline_sequence = previous_sequence + 1
+        if any(expected_offsets.get(user_id, 0) != size for user_id, size in self._user_bytes.items()):
+            complete = False
+        return complete
 
     @staticmethod
     def _user_id(user) -> int | None:
@@ -225,21 +465,29 @@ class PersistentPCMSink(Sink):
                 current = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 current = {}
-        current.update(
-            {
-                "guild_id": str(self.guild_id),
-                "channel_name": self.channel_name,
-                "mode": self.mode,
-                "status": status,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "pcm_format": {
-                    "channels": PCM_CHANNELS,
-                    "sample_rate": PCM_SAMPLE_RATE,
-                    "sample_width": PCM_SAMPLE_WIDTH,
-                },
-                **extra,
-            }
-        )
+        metadata = {
+            "guild_id": str(self.guild_id),
+            "channel_name": self.channel_name,
+            "mode": self.mode,
+            "status": status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "pcm_format": {
+                "channels": PCM_CHANNELS,
+                "sample_rate": PCM_SAMPLE_RATE,
+                "sample_width": PCM_SAMPLE_WIDTH,
+            },
+            **extra,
+        }
+        if self.channel_id is not None:
+            metadata["channel_id"] = str(self.channel_id)
+        if self.category_id is not None:
+            metadata["category_id"] = str(self.category_id)
+        metadata["category_name"] = self.category_name
+        metadata["channel_lineage_recorded"] = self.channel_lineage_recorded
+        metadata["timeline_manifest"] = TIMELINE_MANIFEST_NAME
+        metadata["timeline_schema"] = TIMELINE_SCHEMA_VERSION
+        metadata["timeline_complete"] = self._timeline_complete
+        current.update(metadata)
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, path)
@@ -266,7 +514,11 @@ class PersistentPCMSink(Sink):
             remaining = self.max_bytes - self._total_bytes
             if remaining <= 0:
                 self._limit_reached = True
-                self._write_metadata("storage_limit_reached", total_bytes=self._total_bytes)
+                self._write_metadata(
+                    "storage_limit_reached",
+                    total_bytes=self._total_bytes,
+                    storage_limit_reached=True,
+                )
                 return
             chunk = bytes(pcm_data[:remaining])
             file = self._files.get(user_id)
@@ -276,11 +528,38 @@ class PersistentPCMSink(Sink):
                 # transcription and cleanup fsyncs it before closing.
                 file = self._pcm_path(user_id).open("ab", buffering=256 * 1024)
                 self._files[user_id] = file
+            start = self._user_bytes.get(user_id, 0)
             file.write(chunk)
+            end = start + len(chunk)
+            self._user_bytes[user_id] = end
             self._total_bytes += len(chunk)
+            try:
+                if self._timeline_file is None:
+                    self._timeline_file = self._timeline_path.open("ab", buffering=256 * 1024)
+                event = {
+                    "v": TIMELINE_SCHEMA_VERSION,
+                    "sequence": self._timeline_sequence,
+                    "user_id": user_id,
+                    "start": start,
+                    "end": end,
+                    "received_at_ns": time.time_ns(),
+                }
+                self._timeline_file.write(
+                    json.dumps(event, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+                )
+                self._timeline_sequence += 1
+            except OSError:
+                # PCM remains the source of truth. The coverage validator will
+                # select the lossless legacy fallback rather than omit this range.
+                self._timeline_complete = False
+                log.exception("Could not persist recording receive timeline")
             if len(chunk) < len(pcm_data):
                 self._limit_reached = True
-                self._write_metadata("storage_limit_reached", total_bytes=self._total_bytes)
+                self._write_metadata(
+                    "storage_limit_reached",
+                    total_bytes=self._total_bytes,
+                    storage_limit_reached=True,
+                )
 
     def read_chunks(
         self,
@@ -293,6 +572,8 @@ class PersistentPCMSink(Sink):
         with self._lock:
             for file in self._files.values():
                 file.flush()
+            if self._timeline_file is not None:
+                self._timeline_file.flush()
             paths = list(self.session_dir.glob("user-*.pcm"))
             for path in paths:
                 try:
@@ -309,6 +590,31 @@ class PersistentPCMSink(Sink):
                 if data:
                     chunks[user_id] = (data, start + len(data))
         return chunks
+
+    def read_timeline_segments(
+        self,
+        *,
+        max_bytes: int,
+        gap_seconds: float = DEFAULT_TIMELINE_TURN_GAP_SECONDS,
+    ) -> list[RecordingTimelineSegment] | None:
+        """Return chronological utterance slices, or ``None`` for old recordings."""
+        with self._lock:
+            for file in self._files.values():
+                file.flush()
+            if self._timeline_file is not None:
+                self._timeline_file.flush()
+            return load_recording_timeline_segments(
+                self.session_dir,
+                max_bytes=max_bytes,
+                gap_seconds=gap_seconds,
+            )
+
+    def read_timeline_audio(self, segment: RecordingTimelineSegment) -> bytes:
+        with self._lock:
+            file = self._files.get(segment.user_id)
+            if file is not None:
+                file.flush()
+            return read_recording_timeline_audio(self.session_dir, segment)
 
     @property
     def total_bytes(self) -> int:
@@ -332,8 +638,29 @@ class PersistentPCMSink(Sink):
                 finally:
                     file.close()
             self._files.clear()
+            if self._timeline_file is not None:
+                try:
+                    self._timeline_file.flush()
+                    os.fsync(self._timeline_file.fileno())
+                finally:
+                    self._timeline_file.close()
+                    self._timeline_file = None
             status = "storage_limit_reached" if self._limit_reached else "recorded"
-            self._write_metadata(status, total_bytes=self._total_bytes)
+            self._write_metadata(
+                status,
+                total_bytes=self._total_bytes,
+                storage_limit_reached=self._limit_reached,
+            )
+
+    def flush(self) -> None:
+        """Synchronously persist every userspace PCM buffer without closing it."""
+        with self._lock:
+            for file in self._files.values():
+                file.flush()
+                os.fsync(file.fileno())
+            if self._timeline_file is not None:
+                self._timeline_file.flush()
+                os.fsync(self._timeline_file.fileno())
 
     def format_audio(self, audio) -> None:  # pragma: no cover - base cleanup is overridden
         return
@@ -380,6 +707,13 @@ class PersistentPCMSink(Sink):
                 finally:
                     file.close()
             self._files.clear()
+            if self._timeline_file is not None:
+                try:
+                    self._timeline_file.flush()
+                    os.fsync(self._timeline_file.fileno())
+                finally:
+                    self._timeline_file.close()
+                    self._timeline_file = None
             deleted = 0
             for path in self.session_dir.glob("user-*.pcm"):
                 try:
@@ -387,11 +721,15 @@ class PersistentPCMSink(Sink):
                     deleted += 1
                 except FileNotFoundError:
                     continue
+            try:
+                self._timeline_path.unlink()
+            except FileNotFoundError:
+                pass
             return deleted
 
 
 def cleanup_old_recordings(*, now: datetime | None = None, retention_days: int | None = None) -> int:
-    """Remove completed recordings after the retention window; preserve failures."""
+    """Remove terminal recording sessions after retention; keep retryable work."""
     current = now or datetime.now(timezone.utc)
     keep_days = (
         retention_days
@@ -410,7 +748,7 @@ def cleanup_old_recordings(*, now: datetime | None = None, retention_days: int |
             updated_at = datetime.fromisoformat(metadata["updated_at"])
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=timezone.utc)
-            if status in {"delivered", "delivered_audio_deleted"} and updated_at < cutoff:
+            if status in TERMINAL_STATUSES and updated_at < cutoff:
                 shutil.rmtree(metadata_path.parent)
                 removed += 1
         except (OSError, ValueError, KeyError, json.JSONDecodeError):

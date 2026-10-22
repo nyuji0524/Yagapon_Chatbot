@@ -120,6 +120,7 @@ YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS=<選考等の除外チャンネルID>
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS=選考
 YAGAPON_KNOWLEDGE_CURATION_ENABLED=false
 YAGAPON_KNOWLEDGE_CURATION_BATCH=3
+YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS=
 ```
 
 個人用の`gh`認証やPATを本番VMへコピーしない。キューobjectは機密検査済みの候補だけを含み、
@@ -127,6 +128,11 @@ YAGAPON_KNOWLEDGE_CURATION_BATCH=3
 KnowledgeリポジトリのOrganization/Repository Actions設定では、Workflow permissionsをRead and writeにし、
 `Allow GitHub Actions to create and approve pull requests`を有効にする。これを確認するまでは
 `YAGAPON_KNOWLEDGE_CURATION_ENABLED=false`のままにする。
+
+Discord会話は検索上 `access_scope=channel` を維持するため、継続整理の対象にするチャンネルIDを
+`YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`へカンマ区切りで明示する。許可済みguildかつ、この
+positive allowlistに一致するチャンネルだけが非公開Knowledgeリポジトリの確認待ち草案になる。
+未指定、親カテゴリ名だけの一致、`restricted`資料は自動送信しない。
 
 承認後にKnowledge PRがmainへ入ると、`source-index-watch`がcommit SHAの変更を検出する。
 front matterのstatusが`active`または`historical`の文書だけを

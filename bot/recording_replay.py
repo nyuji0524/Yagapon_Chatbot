@@ -23,7 +23,10 @@ from bot.recording import (
     PCM_CHANNELS,
     PCM_SAMPLE_RATE,
     PCM_SAMPLE_WIDTH,
+    RecordingTimelineSegment,
+    load_recording_timeline_segments,
     load_transcript_content,
+    read_recording_timeline_audio,
     recording_root,
     save_external_transcript,
     transcript_root,
@@ -35,6 +38,14 @@ log = logging.getLogger("yagapon.recording_replay")
 def replay_root() -> Path:
     configured = os.environ.get("YAGAPON_REPLAY_DIR")
     return Path(configured) if configured else recording_root().parent / "replays"
+
+
+def _drive_session_id(artifact: "RecordingArtifact", target_guild_id: int) -> str:
+    """Return a retry-stable Drive idempotency key for a replay artifact."""
+    return (
+        f"recording-replay:{target_guild_id}:"
+        f"{artifact.source_guild_id}:{artifact.session_id}"
+    )
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,7 @@ class RecordingArtifact:
     transcript_path: Path | None
     transcript_bytes: int
     session_dir: Path
+    source_channel_id: int | None = None
 
     def public_dict(self) -> dict:
         value = asdict(self)
@@ -135,6 +147,9 @@ def list_recording_artifacts() -> list[RecordingArtifact]:
                 transcript_path=transcript,
                 transcript_bytes=transcript_bytes,
                 session_dir=metadata_path.parent,
+                source_channel_id=(
+                    int(metadata["channel_id"]) if metadata.get("channel_id") else None
+                ),
             ))
         except (OSError, ValueError, json.JSONDecodeError):
             log.exception("Could not inspect recording metadata path=%s", metadata_path)
@@ -164,6 +179,7 @@ def list_recording_artifacts() -> list[RecordingArtifact]:
                     transcript_path=path.resolve(),
                     transcript_bytes=path.stat().st_size,
                     session_dir=root / str(guild_id) / path.stem,
+                    source_channel_id=None,
                 ))
             except (OSError, ValueError):
                 log.exception("Could not inspect transcript archive path=%s", path)
@@ -228,6 +244,21 @@ class ReadOnlyReplaySink:
                 chunks[user_id] = (data, start + len(data))
         return chunks
 
+    def read_timeline_segments(
+        self,
+        *,
+        max_bytes: int,
+        gap_seconds: float = 1.25,
+    ) -> list[RecordingTimelineSegment] | None:
+        return load_recording_timeline_segments(
+            self.artifact.session_dir,
+            max_bytes=max_bytes,
+            gap_seconds=gap_seconds,
+        )
+
+    def read_timeline_audio(self, segment: RecordingTimelineSegment) -> bytes:
+        return read_recording_timeline_audio(self.artifact.session_dir, segment)
+
     def _write_metadata(self, status: str, **extra) -> None:
         current = {}
         if self._metadata_path.exists():
@@ -277,6 +308,7 @@ class RecordingReplayManager:
         self.bot = bot
         self.jobs: dict[str, ReplayJob] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._closing = False
 
     def active(self) -> bool:
         return any(job.status in {"queued", "running"} for job in self.jobs.values())
@@ -288,6 +320,8 @@ class RecordingReplayManager:
         target_channel,
         retranscribe: bool,
     ) -> ReplayJob:
+        if self._closing:
+            raise RuntimeError("recording replay manager is shutting down")
         if self.active():
             raise RuntimeError("another recording replay is already running")
         if retranscribe and artifact.raw_bytes <= 0:
@@ -313,6 +347,18 @@ class RecordingReplayManager:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job
+
+    async def shutdown(self, *, timeout: float = 20.0) -> None:
+        """Stop accepting jobs, drain briefly, then checkpoint interrupted work."""
+        self._closing = True
+        tasks = [task for task in self._tasks if not task.done()]
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def get(self, job_id: str) -> ReplayJob | None:
         in_memory = self.jobs.get(job_id)
@@ -427,13 +473,15 @@ class RecordingReplayManager:
             from bot.gdrive import upload_minutes, upload_transcript
 
             title = f"[テスト] {artifact.channel_name} {artifact.session_id}"
-            transcript_url, minutes_url, summary = await asyncio.gather(
+            drive_session_id = _drive_session_id(artifact, job.target_guild_id)
+            publish_batch = asyncio.gather(
                 upload_transcript(
                     self.bot.config,
                     job.target_guild_id,
                     transcript,
                     title,
                     meeting_at=artifact.started_at or None,
+                    session_id=drive_session_id,
                 ),
                 upload_minutes(
                     self.bot.config,
@@ -441,17 +489,51 @@ class RecordingReplayManager:
                     minutes,
                     title,
                     meeting_at=artifact.started_at or None,
+                    session_id=drive_session_id,
                 ),
                 _summarize_minutes(minutes),
+                return_exceptions=True,
             )
-            job.drive_transcript_url = transcript_url or ""
-            job.drive_minutes_url = minutes_url or ""
+            publish_cancelled = False
+            try:
+                # Drive writes run in executor threads and cannot be stopped
+                # safely once started.  Finish the batch so any successful URL
+                # can be checkpointed before interruption/failure is recorded.
+                publish_results = await asyncio.shield(publish_batch)
+            except asyncio.CancelledError:
+                publish_results = await publish_batch
+                publish_cancelled = True
+
+            transcript_result, minutes_result, summary_result = publish_results
+            if not isinstance(transcript_result, BaseException):
+                job.drive_transcript_url = transcript_result or ""
+            if not isinstance(minutes_result, BaseException):
+                job.drive_minutes_url = minutes_result or ""
+            self._persist_job(job)
+
+            if publish_cancelled:
+                raise asyncio.CancelledError
+            publish_error = next(
+                (
+                    result
+                    for result in publish_results
+                    if isinstance(result, BaseException)
+                ),
+                None,
+            )
+            if publish_error is not None:
+                raise publish_error
+
+            transcript_url = job.drive_transcript_url
+            minutes_url = job.drive_minutes_url
+            summary = summary_result
 
             from bot.meeting_index import index_bot_meeting
 
             await index_bot_meeting(
                 self.bot,
                 guild_id=job.target_guild_id,
+                channel_id=job.target_channel_id,
                 session_id=artifact.session_id,
                 channel_name=artifact.channel_name,
                 started_at=artifact.started_at or None,
@@ -497,6 +579,13 @@ class RecordingReplayManager:
                     "retranscribe": job.retranscribe,
                 },
             )
+        except asyncio.CancelledError:
+            job.status = "interrupted"
+            job.stage = "interrupted"
+            job.error_type = "CancelledError"
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist_job(job)
+            raise
         except Exception as exc:
             failed_stage = job.stage
             job.status = "failed"

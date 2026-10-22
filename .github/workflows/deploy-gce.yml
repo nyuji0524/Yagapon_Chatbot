@@ -18,6 +18,9 @@ jobs:
   deploy:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
       vars.YAGAPON_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: production
@@ -78,7 +81,9 @@ jobs:
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            compose.yaml deploy/remote-deploy.sh deploy/systemd/yagapon.service \
+            compose.yaml deploy/remote-deploy.sh deploy/rag-eval-control.sh \
+            docs/rag-eval-cases.yaml \
+            deploy/systemd/yagapon.service \
             "$GCE_INSTANCE:/tmp/"
 
       - name: Deploy and verify health
