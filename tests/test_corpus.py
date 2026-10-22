@@ -200,6 +200,82 @@ async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus
     )
 
 
+@pytest.mark.asyncio
+async def test_history_max_tokens_recovers_only_from_locally_filtered_evidence(
+    corpus_manager,
+):
+    implementation = lexical_hit(
+        "implementation",
+        score=500,
+        authority="repository_history",
+        source_type="source_code_history",
+    )
+    conversation = lexical_hit(
+        "on-site-report",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券"])
+    corpus_manager.rag_store.search_exact = Mock(
+        return_value=[implementation, conversation]
+    )
+    corpus_manager.rag_store.record_query = Mock(return_value="query-history-recovered")
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    incomplete = SimpleNamespace(
+        text="公開してはいけない途中回答",
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                finish_reason="MAX_TOKENS",
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[
+                        SimpleNamespace(
+                            retrieved_context=SimpleNamespace(
+                                title="未監査の根拠",
+                                uri="https://evil.example/truncated-grounding",
+                                text="途中応答にしかない偽の根拠",
+                                custom_metadata=[],
+                            )
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+    recovered = SimpleNamespace(
+        text=(
+            "整理券は当日の追加発行と待機列の調整が課題だったぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:implementation,on-site-report]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
+        usage_metadata=None,
+        candidates=[SimpleNamespace(finish_reason="STOP", grounding_metadata=None)],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[incomplete, recovered]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券運用で問題になった点は何ですか",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "当日の追加発行" in result.text
+    assert "途中回答" not in result.text
+    assert len(result.citations) == 2
+    assert all("evil.example" not in citation for citation in result.citations)
+    calls = corpus_manager._client.aio.models.generate_content.await_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["config"].tools is not None
+    assert calls[1].kwargs["config"].tools is None
+    assert "途中応答にしかない偽の根拠" not in calls[1].kwargs["contents"]
+
+
 def add_message(manager: CorpusManager, *, content: str = "テストメッセージ", timestamp=None):
     manager.add_message(
         guild_id=1,
@@ -2433,8 +2509,88 @@ async def test_incomplete_rag_output_is_never_returned_as_an_answer(corpus_manag
     assert result.no_answer is True
     assert "途中回答" not in result.text
     assert "もう一度" in result.text
+    assert result.citations == ()
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
     config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
     assert config.max_output_tokens == 8192
+
+
+@pytest.mark.asyncio
+async def test_incomplete_rag_recovery_failure_keeps_both_partial_outputs_private(
+    corpus_manager,
+):
+    conversation = lexical_hit(
+        "on-site-report",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[conversation])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                text="一次の途中回答",
+                usage_metadata=None,
+                candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+            ),
+            SimpleNamespace(
+                text="回復処理の途中回答",
+                usage_metadata=None,
+                candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+            ),
+        ]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券運用で問題になった点は何ですか",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    assert result.citations == ()
+    assert "一次の途中回答" not in result.text
+    assert "回復処理の途中回答" not in result.text
+    assert "もう一度" in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_safety_stopped_rag_output_never_enters_lexical_recovery(corpus_manager):
+    conversation = lexical_hit(
+        "on-site-report",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[conversation])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="安全停止された内容",
+            usage_metadata=None,
+            candidates=[SimpleNamespace(finish_reason="SAFETY")],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの整理券運用で問題になった点は何ですか",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    assert result.citations == ()
+    assert "安全停止された内容" not in result.text
+    assert "もう一度" in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 def test_expanded_citation_limit_still_enforces_channel_acl(corpus_manager):

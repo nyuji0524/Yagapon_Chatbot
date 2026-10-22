@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from google import genai
 from google.genai import types
 
-from bot.ai_completion import require_complete_model_output
+from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
 from bot.ai_models import generation_config, log_usage, rag_model
 from bot.ai_retry import retry_rate_limit
 from bot.discord_visibility import normalized_channel_ids
@@ -2198,6 +2198,55 @@ class CorpusManager:
                     and (parsed.explicit_status or not REQUIRE_EXPLICIT_ANSWER_STATUS)
                 )
 
+            async def recover_verified_evidence(
+                context: str,
+                hits: list[LexicalHit],
+                semantic_evidence: tuple[_GroundingEvidence, ...] = (),
+            ) -> bool:
+                """Retry using only evidence that passed local authorization filters."""
+                nonlocal answer, has_answer, sources, used_lexical_hits
+                recovered_answer = await self._recover_from_lexical_hits(
+                    question=question,
+                    system_instruction=system,
+                    evidence_context=context,
+                    model=model,
+                    max_output_tokens=remaining_output_tokens,
+                )
+                recovered = parse_model_answer(recovered_answer or "")
+                observe_answer_contract(recovered, stage="exact_recovery")
+                if not usable(recovered):
+                    has_answer = False
+                    sources = []
+                    return False
+
+                recovered_hits = selected_lexical_hits(hits, recovered)
+                used_firebase = selected_firebase_evidence(firebase_evidence, recovered)
+                used_semantic = selected_semantic_evidence(
+                    semantic_evidence,
+                    recovered,
+                )
+                recovered_sources = list(
+                    dict.fromkeys(item.citation for item in used_semantic if item.citation)
+                )
+                recovered_sources.extend(
+                    self._lexical_sources(recovered_hits, recovered_sources)
+                )
+                recovered_sources.extend(
+                    self._firebase_sources(used_firebase, recovered_sources)
+                )
+                if not recovered_sources:
+                    has_answer = False
+                    sources = []
+                    return False
+
+                # The retry used only locally filtered exact/runtime evidence,
+                # plus semantic excerpts that passed the grounding audit.
+                used_lexical_hits = recovered_hits
+                sources = recovered_sources
+                answer = recovered.text
+                has_answer = True
+                return True
+
             # Current/approved exact matches and ephemeral runtime evidence are
             # cheaper and more authoritative for a single-fact question.  A
             # broad request must still search the corpus: one exact hit may
@@ -2279,85 +2328,80 @@ class CorpusManager:
                     max_delay=30,
                 )
                 log_usage(log, "rag_query", model, response)
-                require_complete_model_output(response, operation="rag_query")
-                parsed = parse_model_answer((response.text or "").strip())
-                observe_answer_contract(parsed, stage="file_search")
-                answer = parsed.text or "回答を生成できなかったぽん..."
-                has_answer = usable(parsed)
-                # File Search metadata filtering stays disabled while legacy
-                # documents are migrated. Enforce the festival again on the
-                # returned evidence so off-year citations cannot support an answer.
-                semantic_audit = self._response_grounding_audit(
-                    response,
-                    limit=search_top_k,
-                    answer_text=parsed.text,
-                    expected_festival=festival,
-                    expected_date=target_date.isoformat() if target_date else None,
-                    expected_date_from=target_date_from,
-                    expected_date_to=target_date_to,
-                    question_kind=question_kind,
-                    allowed_channel_ids=allowed_channel_ids,
-                    allow_unrestricted_conversations=allow_unrestricted_conversations,
-                )
-                semantic_sources = semantic_audit.sources
-                used_lexical_hits = selected_lexical_hits(search_hits, parsed)
-                used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
-                sources = [*semantic_sources]
-                sources.extend(self._lexical_sources(used_lexical_hits, sources))
-                sources.extend(self._firebase_sources(used_firebase, sources))
-                if semantic_audit.requires_recovery:
+                try:
+                    require_complete_model_output(response, operation="rag_query")
+                except IncompleteModelOutput as exc:
+                    # Token exhaustion is recoverable because exact-search and
+                    # Firebase evidence were already filtered locally. Never
+                    # use text or grounding from the truncated response. Other
+                    # stops (for example SAFETY/BLOCKLIST) remain fail-closed.
+                    if exc.finish_reason != "MAX_TOKENS" or not (
+                        search_hits or firebase_evidence
+                    ):
+                        raise
                     log.warning(
-                        "Rejected File Search answer grounding "
-                        "(rejected_chunks=%s invalid_supports=%s coverage=%s)",
-                        semantic_audit.rejected_supported_chunks,
-                        semantic_audit.invalid_supports,
-                        semantic_audit.claim_coverage_complete,
+                        "RAG File Search exhausted output tokens; retrying from "
+                        "locally filtered evidence (kind=%s guild=%s)",
+                        question_kind.value,
+                        guild_id,
                     )
-                    # The answer may already have incorporated rejected evidence.
-                    # Never preserve it merely because another citation survived.
-                    has_answer = False
-                    sources = []
-
-                recovery_semantic_evidence = tuple(
-                    item for item in semantic_audit.evidence if item.text
-                )
-                if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
-                    not has_answer
-                    or not (semantic_sources or used_lexical_hits or used_firebase)
-                    or semantic_audit.requires_recovery
-                ):
-                    recovery_context = with_lexical_context(evidence_context, search_hits)
-                    for item in recovery_semantic_evidence:
-                        recovery_context += self._untrusted_evidence(item.key, item.text)
-                    recovered_answer = await self._recover_from_lexical_hits(
-                        question=question,
-                        system_instruction=system,
-                        evidence_context=recovery_context,
-                        model=model,
-                        max_output_tokens=(
-                            remaining_output_tokens
-                        ),
+                    if not await recover_verified_evidence(search_context, search_hits):
+                        raise
+                else:
+                    parsed = parse_model_answer((response.text or "").strip())
+                    observe_answer_contract(parsed, stage="file_search")
+                    answer = parsed.text or "回答を生成できなかったぽん..."
+                    has_answer = usable(parsed)
+                    # File Search metadata filtering stays disabled while legacy
+                    # documents are migrated. Enforce the festival again on the
+                    # returned evidence so off-year citations cannot support an answer.
+                    semantic_audit = self._response_grounding_audit(
+                        response,
+                        limit=search_top_k,
+                        answer_text=parsed.text,
+                        expected_festival=festival,
+                        expected_date=target_date.isoformat() if target_date else None,
+                        expected_date_from=target_date_from,
+                        expected_date_to=target_date_to,
+                        question_kind=question_kind,
+                        allowed_channel_ids=allowed_channel_ids,
+                        allow_unrestricted_conversations=allow_unrestricted_conversations,
                     )
-                    recovered = parse_model_answer(recovered_answer or "")
-                    observe_answer_contract(recovered, stage="exact_recovery")
-                    if usable(recovered):
-                        used_lexical_hits = selected_lexical_hits(search_hits, recovered)
-                        used_firebase = selected_firebase_evidence(firebase_evidence, recovered)
-                        used_semantic = selected_semantic_evidence(
-                            recovery_semantic_evidence,
-                            recovered,
+                    semantic_sources = semantic_audit.sources
+                    used_lexical_hits = selected_lexical_hits(search_hits, parsed)
+                    used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
+                    sources = [*semantic_sources]
+                    sources.extend(self._lexical_sources(used_lexical_hits, sources))
+                    sources.extend(self._firebase_sources(used_firebase, sources))
+                    if semantic_audit.requires_recovery:
+                        log.warning(
+                            "Rejected File Search answer grounding "
+                            "(rejected_chunks=%s invalid_supports=%s coverage=%s)",
+                            semantic_audit.rejected_supported_chunks,
+                            semantic_audit.invalid_supports,
+                            semantic_audit.claim_coverage_complete,
                         )
-                        # The retry used only evidence that passed every local filter.
-                        sources = list(
-                            dict.fromkeys(item.citation for item in used_semantic if item.citation)
-                        )
-                        sources.extend(self._lexical_sources(used_lexical_hits, sources))
-                        sources.extend(self._firebase_sources(used_firebase, sources))
-                        if sources:
-                            answer = recovered.text
-                            has_answer = True
-                    else:
+                        # The answer may already have incorporated rejected evidence.
+                        # Never preserve it merely because another citation survived.
                         has_answer = False
+                        sources = []
+
+                    recovery_semantic_evidence = tuple(
+                        item for item in semantic_audit.evidence if item.text
+                    )
+                    if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
+                        not has_answer
+                        or not (semantic_sources or used_lexical_hits or used_firebase)
+                        or semantic_audit.requires_recovery
+                    ):
+                        recovery_context = with_lexical_context(evidence_context, search_hits)
+                        for item in recovery_semantic_evidence:
+                            recovery_context += self._untrusted_evidence(item.key, item.text)
+                        await recover_verified_evidence(
+                            recovery_context,
+                            search_hits,
+                            recovery_semantic_evidence,
+                        )
             no_answer = not sources or not has_answer
             if no_answer:
                 answer = (
