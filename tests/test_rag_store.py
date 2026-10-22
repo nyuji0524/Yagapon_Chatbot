@@ -153,6 +153,23 @@ def test_year_filter_includes_timeless_curated_repository_document(tmp_path):
     assert [hit.document_key for hit in hits] == ["knowledge:retry"]
 
 
+def test_year_filter_excludes_inactive_timeless_curated_document(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "knowledge://deprecated",
+        "再試行についての古い運用",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "knowledge:deprecated"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "deprecated"},
+            {"key": "source_type", "string_value": "knowledge_repository"},
+        ],
+    )
+
+    assert store.search_exact(1, ["再試行"], festival=28) == []
+
+
 def test_curated_global_document_survives_sql_candidate_limit(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     store.upsert_document(

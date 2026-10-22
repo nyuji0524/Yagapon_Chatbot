@@ -300,7 +300,8 @@ class RagStore:
             # excluded from year-specific questions.
             conditions.append(
                 "(festival = ? OR (festival IS NULL AND authority IN "
-                "('canonical', 'curated', 'reviewed_record')))"
+                "('canonical', 'curated', 'reviewed_record') AND status IN "
+                "('active', 'historical', 'approved', 'verified', 'current')))"
             )
             params.append(festival)
         if target_date is not None:
