@@ -48,6 +48,8 @@ EXCLUDED_NAMES = {
 }
 MAX_FILE_BYTES = 120_000
 CHUNK_CHARS = 36_000
+SOURCE_UPLOAD_CONCURRENCY_DEFAULT = 2
+SOURCE_UPLOAD_CONCURRENCY_MAX = 8
 SOURCE_SECRET_PATTERNS = {
     key: value
     for key, value in SENSITIVE_PATTERNS.items()
@@ -259,6 +261,23 @@ def load_repositories(path: Path) -> list[Repository]:
         if not allowed_env or repository.name.casefold() in allowed_env:
             repositories.append(repository)
     return repositories
+
+
+def source_upload_concurrency() -> int:
+    raw = os.environ.get(
+        "YAGAPON_SOURCE_UPLOAD_CONCURRENCY",
+        str(SOURCE_UPLOAD_CONCURRENCY_DEFAULT),
+    )
+    try:
+        configured = int(raw)
+    except ValueError:
+        log.warning(
+            "Invalid YAGAPON_SOURCE_UPLOAD_CONCURRENCY=%r; using %s",
+            raw,
+            SOURCE_UPLOAD_CONCURRENCY_DEFAULT,
+        )
+        configured = SOURCE_UPLOAD_CONCURRENCY_DEFAULT
+    return max(1, min(configured, SOURCE_UPLOAD_CONCURRENCY_MAX))
 
 
 def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
@@ -564,15 +583,17 @@ async def sync_once(args) -> dict:
                 pending.append((chunk, digest, previous))
         if pending:
             assert corpus is not None
+            upload_semaphore = asyncio.Semaphore(source_upload_concurrency())
 
             async def upload(item: tuple[SourceChunk, str, dict | None]):
-                chunk, digest, previous = item
-                remote_name = await corpus._upload_document(
-                    store_name,
-                    f"Source | {repository.name} | {chunk.path}:{chunk.start_line}"[:512],
-                    chunk.text,
-                    metadata_for(chunk, args.guild_id, digest),
-                )
+                async with upload_semaphore:
+                    chunk, digest, previous = item
+                    remote_name = await corpus._upload_document(
+                        store_name,
+                        f"Source | {repository.name} | {chunk.path}:{chunk.start_line}"[:512],
+                        chunk.text,
+                        metadata_for(chunk, args.guild_id, digest),
+                    )
                 if not remote_name:
                     raise RuntimeError(
                         f"Failed to index {repository.name}:{chunk.path}:{chunk.start_line}"
