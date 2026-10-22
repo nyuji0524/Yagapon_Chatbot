@@ -38,7 +38,6 @@ from bot.firebase_knowledge import (
     COLLECTIONS,
     FirebaseEvidence,
     FirebaseKnowledgeReader,
-    firebase_document_path_is_safe,
     firebase_projected_fields_are_safe,
     is_explicit_firebase_list_query,
 )
@@ -1132,7 +1131,7 @@ class RagAnswer:
 @dataclass(frozen=True)
 class _FirebaseListItem:
     position: int
-    document_path: str
+    reference: str
     fields: dict[str, object]
 
 
@@ -2544,8 +2543,8 @@ class CorpusManager:
             r"^item:\s*(?P<position>\d+)/(?P<total>\d+)\s*$",
             re.MULTILINE,
         )
-        document_pattern = re.compile(
-            r"^document:\s*(?P<path>[^\r\n]+)\s*$",
+        reference_pattern = re.compile(
+            r"^reference:\s*(?P<reference>[A-Za-z][A-Za-z0-9]*:\d+)\s*$",
             re.MULTILINE,
         )
         fields_pattern = re.compile(r"^fields:\s*(?P<fields>\{.*\})\s*$", re.MULTILINE)
@@ -2584,15 +2583,14 @@ class CorpusManager:
             source_type = header.group("source_type")
             if source_type not in COLLECTIONS:
                 return ()
-            collection_parent: str | None = None
             items: list[_FirebaseListItem] = []
             for offset in range(returned):
                 current = evidence[cursor + offset]
                 current_header = header_pattern.search(current.body)
                 item_match = item_pattern.search(current.body)
-                document_match = document_pattern.search(current.body)
+                reference_match = reference_pattern.search(current.body)
                 fields_match = fields_pattern.search(current.body)
-                if not current_header or not item_match or not document_match or not fields_match:
+                if not current_header or not item_match or not reference_match or not fields_match:
                     return ()
                 if (
                     int(current_header.group("festival")) != festival
@@ -2606,24 +2604,12 @@ class CorpusManager:
                 ):
                     return ()
 
-                document_path = document_match.group("path").strip()
-                path_parts = document_path.split("/")
+                reference = reference_match.group("reference").strip()
+                expected_reference = f"{source_type}:{offset + 1}"
                 if (
-                    len(path_parts) < 4
-                    or path_parts[0] not in {"festival", "yagamy"}
-                    or path_parts[1] != str(festival)
-                    or current.document_key != f"firebase:{document_path}"
-                    or not firebase_document_path_is_safe(
-                        source_type,
-                        festival,
-                        document_path,
-                    )
+                    reference != expected_reference
+                    or current.document_key != f"firebase:{expected_reference}"
                 ):
-                    return ()
-                current_parent = document_path.rsplit("/", 1)[0]
-                if collection_parent is None:
-                    collection_parent = current_parent
-                elif current_parent != collection_parent:
                     return ()
                 try:
                     fields = json.loads(fields_match.group("fields"))
@@ -2638,7 +2624,7 @@ class CorpusManager:
                 items.append(
                     _FirebaseListItem(
                         position=offset + 1,
-                        document_path=document_path,
+                        reference=reference,
                         fields=fields,
                     )
                 )
@@ -2702,13 +2688,10 @@ class CorpusManager:
                         for key in ("title", "eventName", "name")
                         if isinstance(item.fields.get(key), str) and item.fields[key].strip()
                     ),
-                    item.document_path.rsplit("/", 1)[-1],
+                    f"項目 {item.position}",
                 )
                 lines.append(
                     f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}"
-                )
-                lines.append(
-                    f"- `document`: {cls._escape_untrusted_markdown(item.document_path)}"
                 )
                 for key, value in item.fields.items():
                     rendered_value = json.dumps(

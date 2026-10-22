@@ -250,6 +250,9 @@ YAGAPON_FIREBASE_KNOWLEDGE_ENABLED=false
 YAGAPON_FIREBASE_KNOWLEDGE_BACKEND=public
 YAGAPON_FIREBASE_KNOWLEDGE_PROJECT=yagamy26th
 YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=
+YAGAPON_FIREBASE_KNOWLEDGE_EMULATOR_HOST=support-firestore:8080
+YAGAPON_FIREBASE_KNOWLEDGE_TIMEOUT_SECONDS=8
+YAGAPON_FIREBASE_KNOWLEDGE_CACHE_SECONDS=60
 YAGAPON_FIREBASE_KNOWLEDGE_LIMIT=100
 YAGAPON_FIREBASE_KNOWLEDGE_MAX_DOCUMENTS=2000
 ```
@@ -257,9 +260,10 @@ YAGAPON_FIREBASE_KNOWLEDGE_MAX_DOCUMENTS=2000
 Firebase現在値の`public` backendは未認証RESTを使うため、Firestore Security Rulesが適用される。
 `firestore`を指定した場合はADCがRulesを迂回するため、専用サービスアカウントと最小権限を使う。
 資格情報がプロジェクトを広く読み取れる場合でも、回答へ渡すのはcollection/pathとfieldをレビュー済みの
-安全投影だけである。map型も子キーと型を固定し、署名・認証情報や個人情報を含むURLを除外する。
-決定論的一覧表示でも同じpath/field契約を再検証するため、個人情報・個票・申請・会計・認証情報を
-動的な質問で読み出すことはない。
+安全投影だけである。Knowledge Readerは書込みAPIを持たない専用clientを使い、取得時のfield maskでも
+未許可fieldを落とす。map型も子キーと型を固定し、署名・認証情報、個人連絡先を含む値をモデル入力前に
+除外する。Firestore document ID/pathは回答やモデル入力へ渡さない。決定論的一覧表示でも同じfield契約を
+再検証するため、個人情報・個票・申請・会計・認証情報を動的な質問で読み出すことはない。
 非公開リポジトリをソース索引へ含める場合、本番では組織の`All repositories`へインストールした
 read-only GitHub Appを使う。権限は`Contents: Read-only`と自動付与される`Metadata: Read-only`だけにする。
 App自体は組織の全repositoryを読めるが、source indexは`source_index/repositories.yaml`のレビュー済み

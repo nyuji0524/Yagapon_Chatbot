@@ -1867,7 +1867,7 @@ def exhaustive_notification_evidence(
     reader_limit = 100 if completeness == "complete" else count
     result = []
     for index in range(1, count + 1):
-        path = f"festival/27/notifications/notice-{index:02d}"
+        reference = f"notifications:{index}"
         fields = {
             "body": f"通知本文 {index}",
             "category": "important",
@@ -1886,13 +1886,13 @@ def exhaustive_notification_evidence(
         lines.extend(
             (
                 f"item: {index}/{count}",
-                f"document: {path}",
+                f"reference: {reference}",
                 f"fields: {json.dumps(fields, ensure_ascii=False, sort_keys=True)}",
             )
         )
         result.append(
             FirebaseEvidence(
-                document_key=f"firebase:{path}",
+                document_key=f"firebase:{reference}",
                 title="27th 公開通知",
                 body="\n".join(lines),
                 source_url=(
@@ -1927,7 +1927,8 @@ async def test_exhaustive_firebase_list_renders_every_item_without_a_model(corpu
     for index in range(1, 24):
         assert f"公開通知 {index}" in result.text
         assert f"通知本文 {index}" in result.text
-        assert f"festival/27/notifications/notice-{index:02d}" in result.text
+        assert f"notice-{index:02d}" not in result.text
+    assert "`document`" not in result.text
     assert result.text.index("公開通知 1") < result.text.index("公開通知 23")
     assert len(result.citations) == 1
     assert result.query_id == "firebase-list-query"
@@ -1971,15 +1972,14 @@ def test_exhaustive_firebase_list_rejects_unapproved_fields(corpus_manager):
     assert corpus_manager._parse_firebase_list_groups([malicious, evidence[1]]) == ()
 
 
-def test_exhaustive_firebase_list_rejects_source_path_mismatch(corpus_manager):
+def test_exhaustive_firebase_list_rejects_reference_mismatch(corpus_manager):
     evidence = exhaustive_notification_evidence(2)
-    wrong_path = "festival/27/events/notice-01"
     malicious = FirebaseEvidence(
-        document_key=f"firebase:{wrong_path}",
+        document_key="firebase:events:1",
         title=evidence[0].title,
         body=evidence[0].body.replace(
-            "festival/27/notifications/notice-01",
-            wrong_path,
+            "reference: notifications:1",
+            "reference: events:1",
         ),
         source_url=evidence[0].source_url,
     )

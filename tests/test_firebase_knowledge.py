@@ -1,8 +1,10 @@
+import json
 from urllib.parse import quote
 
 import pytest
 
 from bot.firebase_knowledge import COLLECTIONS, FirebaseDocumentBatch, FirebaseKnowledgeReader
+from bot.firestore_readonly import FirestoreListPage
 from bot.knowledge_authority import QuestionKind
 
 
@@ -143,6 +145,181 @@ def test_nested_projection_drops_unknown_children_and_sensitive_urls(monkeypatch
 
 
 @pytest.mark.parametrize(
+    "private_body",
+    [
+        "担当: 山田太郎 / 学籍番号: 12345678",
+        "連絡先 private.person@example.com",
+        "電話 090-1234-5678",
+        "api_key=ActualSecretValue982734",
+    ],
+)
+def test_allowed_scalar_private_data_is_dropped_before_model(monkeypatch, private_body):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "festival/27/notifications/private-body"
+        ),
+        "fields": {
+            "title": {"stringValue": "安全な公開通知"},
+            "body": {"stringValue": private_body},
+            "status": {"stringValue": "published"},
+        },
+    }
+
+    evidence = reader._rank(
+        "公開通知を教えて",
+        "notifications",
+        COLLECTIONS["notifications"]["fields"],
+        [document],
+        27,
+    )
+
+    assert len(evidence) == 1
+    assert "安全な公開通知" in evidence[0].body
+    assert private_body not in evidence[0].body
+    assert '"body"' not in evidence[0].body
+
+
+def test_harmless_format_characters_are_removed_without_dropping_public_text():
+    value = "安全な文\u200b字と\ufeff告知"
+
+    assert FirebaseKnowledgeReader._safe_public_text(value) == "安全な文字と告知"
+
+
+@pytest.mark.parametrize(
+    "private_value",
+    [
+        "private\u200b@example.com",
+        "api_\u2060key=ActualSecretValue982734",
+    ],
+)
+def test_format_characters_cannot_obfuscate_private_data(private_value):
+    assert not isinstance(FirebaseKnowledgeReader._safe_public_text(private_value), str)
+
+
+@pytest.mark.parametrize(
+    "public_body",
+    [
+        "開催します☀️",
+        "家族向け👨‍👩‍👧",
+    ],
+)
+def test_public_emoji_text_is_preserved_before_model(monkeypatch, public_body):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "festival/27/notifications/public-emoji"
+        ),
+        "fields": {
+            "title": {"stringValue": "公開通知"},
+            "body": {"stringValue": public_body},
+            "status": {"stringValue": "published"},
+        },
+    }
+
+    evidence = reader._rank(
+        "公開通知を教えて",
+        "notifications",
+        COLLECTIONS["notifications"]["fields"],
+        [document],
+        27,
+    )
+
+    assert len(evidence) == 1
+    assert public_body in evidence[0].body
+
+
+@pytest.mark.parametrize(
+    "private_body",
+    [
+        "A" * 495 + "private@example.com",
+        "A" * 495 + "api_key=ActualSecretValue982734",
+    ],
+)
+def test_private_data_beyond_output_boundary_drops_entire_scalar(monkeypatch, private_body):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "festival/27/notifications/private-boundary"
+        ),
+        "fields": {
+            "title": {"stringValue": "公開通知"},
+            "body": {"stringValue": private_body},
+            "status": {"stringValue": "published"},
+        },
+    }
+
+    evidence = reader._rank(
+        "公開通知を教えて",
+        "notifications",
+        COLLECTIONS["notifications"]["fields"],
+        [document],
+        27,
+    )
+
+    assert len(evidence) == 1
+    assert '"body"' not in evidence[0].body
+
+
+def test_sensitive_document_id_never_reaches_evidence(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    sensitive_id = "private.person@example.com"
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            f"festival/27/notifications/{sensitive_id}"
+        ),
+        "fields": {
+            "title": {"stringValue": "公開通知"},
+            "status": {"stringValue": "published"},
+        },
+    }
+
+    evidence = reader._rank(
+        "公開通知一覧",
+        "notifications",
+        COLLECTIONS["notifications"]["fields"],
+        [document],
+        27,
+        exhaustive=True,
+    )
+
+    assert len(evidence) == 1
+    rendered = repr(evidence[0])
+    assert evidence[0].document_key == "firebase:notifications:1"
+    assert sensitive_id not in rendered
+    assert "document:" not in evidence[0].body
+    assert reader._rank(
+        sensitive_id,
+        "notifications",
+        COLLECTIONS["notifications"]["fields"],
+        [document],
+        27,
+    ) == []
+
+
+def test_wire_field_mask_uses_only_reviewed_nested_leaves():
+    fields = FirebaseKnowledgeReader._wire_field_paths("notifications")
+
+    assert "action" not in fields
+    assert {"action.type", "action.url", "action.label", "action.targetId"}.issubset(fields)
+    assert "ownerEmail" not in fields
+
+    event_fields = FirebaseKnowledgeReader._wire_field_paths("events")
+    assert "coupon" not in event_fields
+    assert "coupon.discount" in event_fields
+    assert "coupon.itemIds" in event_fields
+    assert "fcmTokens" not in event_fields
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "https://example.com/open?recipient=private%40example.com",
@@ -190,11 +367,18 @@ async def test_public_backend_uses_rules_compatible_status_query(monkeypatch):
     reader = FirebaseKnowledgeReader()
     captured = {}
 
-    async def request(method, url, *, payload=None, headers=None):
-        captured.update(method=method, url=url, payload=payload, headers=headers)
-        return []
+    async def run_status_query(parent, collection_id, fields, statuses, limit, offset):
+        captured.update(
+            parent=parent,
+            collection_id=collection_id,
+            fields=fields,
+            statuses=statuses,
+            limit=limit,
+            offset=offset,
+        )
+        return ()
 
-    monkeypatch.setattr(reader._directory, "_request", request)
+    monkeypatch.setattr(reader._client, "run_status_query", run_status_query)
 
     await reader._collection(
         "standbyPassEvents",
@@ -202,17 +386,13 @@ async def test_public_backend_uses_rules_compatible_status_query(monkeypatch):
         ("open", "paused", "closed"),
     )
 
-    assert captured["method"] == "POST"
-    assert captured["url"].endswith("/yagamy/28:runQuery")
-    assert captured["headers"] == {"X-Goog-Api-Key": "firebase-public-key"}
-    field_filter = captured["payload"]["structuredQuery"]["where"]["fieldFilter"]
-    assert field_filter["field"]["fieldPath"] == "status"
-    assert field_filter["op"] == "IN"
-    assert [value["stringValue"] for value in field_filter["value"]["arrayValue"]["values"]] == [
-        "open",
-        "paused",
-        "closed",
-    ]
+    assert captured["parent"] == "yagamy/28"
+    assert captured["collection_id"] == "standbyPassEvents"
+    assert captured["statuses"] == ("open", "paused", "closed")
+    assert captured["limit"] == 100
+    assert captured["offset"] == 0
+    assert "status" in captured["fields"]
+    assert "eventId" in captured["fields"]
 
 
 async def test_exhaustive_status_query_pages_until_complete(monkeypatch):
@@ -226,16 +406,13 @@ async def test_exhaustive_status_query_pages_until_complete(monkeypatch):
         _notification_document(f"notice-{index}", title=f"通知{index}")
         for index in range(3)
     ]
-    payloads = []
+    calls = []
 
-    async def request(_method, _url, *, payload=None, headers=None):
-        payloads.append(payload)
-        query = payload["structuredQuery"]
-        offset = query.get("offset", 0)
-        limit = query["limit"]
-        return [{"document": item} for item in documents[offset : offset + limit]]
+    async def run_status_query(_parent, _collection_id, _fields, _statuses, limit, offset):
+        calls.append((limit, offset))
+        return tuple(documents[offset : offset + limit])
 
-    monkeypatch.setattr(reader._directory, "_request", request)
+    monkeypatch.setattr(reader._client, "run_status_query", run_status_query)
 
     batch = await reader._collection(
         "notifications",
@@ -247,9 +424,7 @@ async def test_exhaustive_status_query_pages_until_complete(monkeypatch):
     assert len(batch) == 3
     assert batch.complete is True
     assert batch.reader_limit == 10
-    assert len(payloads) == 2
-    assert "offset" not in payloads[0]["structuredQuery"]
-    assert payloads[1]["structuredQuery"]["offset"] == 2
+    assert calls == [(2, 0), (2, 2)]
 
 
 async def test_exhaustive_collection_get_follows_page_tokens(monkeypatch):
@@ -259,7 +434,7 @@ async def test_exhaustive_collection_get_follows_page_tokens(monkeypatch):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_LIMIT", "2")
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_MAX_DOCUMENTS", "10")
     reader = FirebaseKnowledgeReader()
-    urls = []
+    calls = []
     first = {
         "name": "projects/demo/databases/(default)/documents/festival/27/events/a",
         "fields": {"eventName": {"stringValue": "A"}},
@@ -269,13 +444,13 @@ async def test_exhaustive_collection_get_follows_page_tokens(monkeypatch):
         "fields": {"eventName": {"stringValue": "B"}},
     }
 
-    async def request(_method, url, *, payload=None, headers=None):
-        urls.append(url)
-        if "pageToken=" not in url:
-            return {"documents": [first], "nextPageToken": "next/token"}
-        return {"documents": [second]}
+    async def list_collection(path, fields, page_size, page_token):
+        calls.append((path, fields, page_size, page_token))
+        if page_token is None:
+            return FirestoreListPage((first,), "next/token")
+        return FirestoreListPage((second,), None)
 
-    monkeypatch.setattr(reader._directory, "_request", request)
+    monkeypatch.setattr(reader._client, "list_collection", list_collection)
 
     batch = await reader._collection(
         "events",
@@ -286,8 +461,9 @@ async def test_exhaustive_collection_get_follows_page_tokens(monkeypatch):
 
     assert [item["name"].rsplit("/", 1)[-1] for item in batch] == ["a", "b"]
     assert batch.complete is True
-    assert len(urls) == 2
-    assert "pageToken=next%2Ftoken" in urls[1]
+    assert len(calls) == 2
+    assert calls[0][3] is None
+    assert calls[1][3] == "next/token"
 
 
 async def test_non_config_collection_still_uses_collection_list_get(monkeypatch):
@@ -297,17 +473,23 @@ async def test_non_config_collection_still_uses_collection_list_get(monkeypatch)
     reader = FirebaseKnowledgeReader()
     captured = {}
 
-    async def request(method, url, *, payload=None, headers=None):
-        captured.update(method=method, url=url, payload=payload, headers=headers)
-        return {"documents": []}
+    async def list_collection(path, fields, page_size, page_token):
+        captured.update(
+            path=path,
+            fields=fields,
+            page_size=page_size,
+            page_token=page_token,
+        )
+        return FirestoreListPage((), None)
 
-    monkeypatch.setattr(reader._directory, "_request", request)
+    monkeypatch.setattr(reader._client, "list_collection", list_collection)
 
     await reader._collection("events", "festival/28/events", ())
 
-    assert captured["method"] == "GET"
-    assert captured["url"].endswith("/festival/28/events?pageSize=100")
-    assert captured["payload"] is None
+    assert captured["path"] == "festival/28/events"
+    assert captured["page_size"] == 100
+    assert captured["page_token"] is None
+    assert "eventName" in captured["fields"]
 
 
 async def test_ranking_config_uses_known_public_document_get(monkeypatch):
@@ -317,8 +499,8 @@ async def test_ranking_config_uses_known_public_document_get(monkeypatch):
     reader = FirebaseKnowledgeReader()
     captured = {}
 
-    async def request(method, url, *, payload=None, headers=None):
-        captured.update(method=method, url=url, payload=payload, headers=headers)
+    async def get_document(path, fields):
+        captured.update(path=path, fields=fields)
         return {
             "name": (
                 "projects/demo-project/databases/(default)/documents/"
@@ -327,7 +509,7 @@ async def test_ranking_config_uses_known_public_document_get(monkeypatch):
             "fields": {"status": {"stringValue": "result"}},
         }
 
-    monkeypatch.setattr(reader._directory, "_request", request)
+    monkeypatch.setattr(reader._client, "get_document", get_document)
 
     documents = await reader._collection(
         "rankingConfig",
@@ -335,8 +517,8 @@ async def test_ranking_config_uses_known_public_document_get(monkeypatch):
         (),
     )
 
-    assert captured["method"] == "GET"
-    assert captured["url"].endswith("/yagamy/27/config/ranking")
+    assert captured["path"] == "yagamy/27/config/ranking"
+    assert captured["fields"] == ("status", "votingPhase", "updatedAt")
     assert documents[0]["fields"]["status"] == {"stringValue": "result"}
 
 
@@ -349,8 +531,8 @@ async def test_config_uses_known_standby_pass_document_get(monkeypatch, festival
     reader = FirebaseKnowledgeReader()
     captured = {}
 
-    async def request(method, url, *, payload=None, headers=None):
-        captured.update(method=method, url=url, payload=payload, headers=headers)
+    async def get_document(path, fields):
+        captured.update(path=path, fields=fields)
         return {
             "name": (
                 "projects/demo-project/databases/(default)/documents/"
@@ -359,7 +541,7 @@ async def test_config_uses_known_standby_pass_document_get(monkeypatch, festival
             "fields": {"isEnabled": {"booleanValue": True}},
         }
 
-    monkeypatch.setattr(reader._directory, "_request", request)
+    monkeypatch.setattr(reader._client, "get_document", get_document)
 
     documents = await reader._collection(
         "config",
@@ -367,10 +549,8 @@ async def test_config_uses_known_standby_pass_document_get(monkeypatch, festival
         (),
     )
 
-    assert captured["method"] == "GET"
-    assert captured["url"].endswith(f"/yagamy/{festival}/config/standbyPass")
-    assert captured["payload"] is None
-    assert captured["headers"] == {"X-Goog-Api-Key": "firebase-public-key"}
+    assert captured["path"] == f"yagamy/{festival}/config/standbyPass"
+    assert "isEnabled" in captured["fields"]
     assert documents[0]["fields"]["isEnabled"] == {"booleanValue": True}
 
 
@@ -555,17 +735,22 @@ def test_notification_list_uses_real_timestamp_oldest_first_and_shared_collectio
         exhaustive=True,
     )
 
-    assert [item.document_key.rsplit("/", 1)[-1] for item in evidence] == [
-        "z-last-but-oldest",
-        "middle-created-fallback",
-        "alphabetically-first-but-newest",
+    assert [item.document_key for item in evidence] == [
+        "firebase:notifications:1",
+        "firebase:notifications:2",
+        "firebase:notifications:3",
+    ]
+    assert [json.loads(item.body.split("fields: ", 1)[1])["title"] for item in evidence] == [
+        "最古",
+        "中間",
+        "最新",
     ]
     assert {item.title for item in evidence} == {"27th 公開通知"}
     assert len({item.source_url for item in evidence}) == 1
     assert evidence[0].source_url.endswith(
         "/data/~2Ffestival~2F27~2Fnotifications"
     )
-    assert all(item.document_key.rsplit("/", 1)[-1] not in item.source_url for item in evidence)
+    assert all("notice" not in item.source_url for item in evidence)
 
 
 def test_exhaustive_non_notification_collection_has_stable_document_order(monkeypatch):
@@ -588,7 +773,12 @@ def test_exhaustive_non_notification_collection_has_stable_document_order(monkey
         exhaustive=True,
     )
 
-    assert [item.document_key.rsplit("/", 1)[-1] for item in evidence] == [
+    assert [item.document_key for item in evidence] == [
+        "firebase:events:1",
+        "firebase:events:2",
+        "firebase:events:3",
+    ]
+    assert [json.loads(item.body.split("fields: ", 1)[1])["eventName"] for item in evidence] == [
         "a-event",
         "m-event",
         "z-event",
@@ -671,7 +861,15 @@ def test_ranking_result_returns_each_category_podium_and_no_private_vote_data(mo
         27,
     )
 
-    assert [item.document_key.rsplit("/", 1)[-1] for item in evidence] == [
+    assert [item.document_key for item in evidence] == [
+        "firebase:ranking:1",
+        "firebase:ranking:2",
+        "firebase:ranking:3",
+        "firebase:ranking:4",
+        "firebase:ranking:5",
+        "firebase:ranking:6",
+    ]
+    assert [json.loads(item.body.split("fields: ", 1)[1])["eventId"] for item in evidence] == [
         "ex-a",
         "ex-b",
         "ex-c",
@@ -695,7 +893,11 @@ def test_ranking_result_returns_each_category_podium_and_no_private_vote_data(mo
 
 
 @pytest.mark.asyncio
-async def test_ranking_question_fetches_only_public_aggregate_and_status(monkeypatch):
+@pytest.mark.parametrize("public_status", ["result", "結果発表"])
+async def test_ranking_question_fetches_only_public_aggregate_and_status(
+    monkeypatch,
+    public_status,
+):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
@@ -719,7 +921,7 @@ async def test_ranking_question_fetches_only_public_aggregate_and_status(monkeyp
                     "projects/demo-project/databases/(default)/documents/"
                     "yagamy/27/config/ranking"
                 ),
-                "fields": {"status": {"stringValue": "result"}},
+                "fields": {"status": {"stringValue": public_status}},
             }]
         return []
 
@@ -736,7 +938,50 @@ async def test_ranking_question_fetches_only_public_aggregate_and_status(monkeyp
         ("rankingConfig", "yagamy/27/config/ranking"),
     ]
     assert any("優勝企画" in item.body and '"score": 50' in item.body for item in evidence)
-    assert any('"status": "result"' in item.body for item in evidence)
+    assert any(f'"status": "{public_status}"' in item.body for item in evidence)
+
+
+@pytest.mark.parametrize("config_status", ["voting", "draft", "", None])
+@pytest.mark.asyncio
+async def test_ranking_scores_are_withheld_until_result_is_public(
+    monkeypatch,
+    config_status,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+
+    async def collection(name, _path, _statuses):
+        if name == "ranking":
+            return [
+                _ranking_document(
+                    "winner",
+                    event_name="未公開の優勝企画",
+                    category="exhibition",
+                    score=99,
+                )
+            ]
+        if config_status is None:
+            return []
+        return [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": config_status}},
+        }]
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    evidence = await reader.evidence_for(
+        "27thの大賞企画の結果と票数を教えて",
+        QuestionKind.RUNTIME,
+        festival=27,
+    )
+
+    assert all("未公開の優勝企画" not in item.body for item in evidence)
+    assert all('"score": 99' not in item.body for item in evidence)
 
 
 @pytest.mark.asyncio
@@ -775,8 +1020,8 @@ async def test_ranking_categories_and_config_are_not_globally_truncated(monkeypa
         festival=27,
     )
 
-    ranking = [item for item in evidence if "/ranking/" in item.document_key]
-    config = [item for item in evidence if "/config/" in item.document_key]
+    ranking = [item for item in evidence if item.title.endswith("公開集計")]
+    config = [item for item in evidence if item.title.endswith("公開状態")]
     assert len(ranking) == 6
     assert len(config) == 1
 

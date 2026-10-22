@@ -120,12 +120,15 @@ python -m source_index
 
 運用上はFirebaseプロジェクトを広く読み取れる資格情報を与えてよいが、**読み取り権限と回答への開示権限は
 別**とする。回答へ渡すcollection/pathはコード上のレジストリへ登録し、フィールド単位の安全投影を必須にする。
-map型は子キーと型まで固定し、署名・認証queryやpercent-encodedの個人情報を含むURLを拒否する。
-LLMを使わない全件一覧rendererも、source type・固定path・投影fieldを同じレジストリで再検証する。
+Knowledge ReaderはGETと固定`runQuery`だけを持つ専用clientを使い、取得時のfield maskと取得後の投影を
+二重に適用する。map型は子キーと型まで固定し、署名・認証query、個人連絡先、認証情報を含む値を
+モデル入力前に拒否する。Firestore document ID/pathは回答・検索語・モデル入力へ渡さず、一時参照番号へ
+置き換える。LLMを使わない全件一覧rendererも、source type・一時参照番号・投影fieldを同じレジストリで
+再検証する。
 未知collectionを利用者の質問から動的に組み立てて読まず、`users`、`staffInfos`、個人別投票、整理券申請・
 利用ログ、会計・申請情報、連絡先、認証情報は回答へ渡さない。新しいcollectionは、データ分類・公開可能field・
 集約単位・引用先をレビューしてからレジストリへ追加する。`firestore` backendを選ぶ場合はADCがRulesを
-迂回するため、専用サービスアカウントへ読み取り専用権限を付け、この投影境界を必ず維持する。
+迂回するため、専用サービスアカウントへ`roles/datastore.viewer`だけを付け、この投影境界を必ず維持する。
 
 ## 検索と回答
 

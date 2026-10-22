@@ -1,4 +1,9 @@
-"""Read a small allowlist of non-personal Firestore data for current-state RAG answers."""
+"""Read reviewed non-personal Firestore data for current-state RAG answers.
+
+The runtime identity may have broad read access, but this module deliberately
+keeps disclosure narrower: paths, statuses and projected fields come only from
+the registry below.  Firestore Rules are not used as the answer boundary.
+"""
 
 from __future__ import annotations
 
@@ -8,16 +13,50 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from bot.festival import current_festival
+from bot.firestore_readonly import FirestoreReadonlyClient
 from bot.knowledge_authority import QuestionKind
-from bot.support_directory import SupportDirectory, _document_fields
 
 log = logging.getLogger("yagapon.firebase_knowledge")
+
+
+def _field_value(value: dict[str, Any] | None) -> Any:
+    """Decode only the Firestore value types used by reviewed projections."""
+    if not value:
+        return None
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "integerValue" in value:
+        return int(value["integerValue"])
+    if "doubleValue" in value:
+        return float(value["doubleValue"])
+    if "booleanValue" in value:
+        return bool(value["booleanValue"])
+    if "timestampValue" in value:
+        return value["timestampValue"]
+    if "nullValue" in value:
+        return None
+    if "arrayValue" in value:
+        return tuple(_field_value(item) for item in value["arrayValue"].get("values", ()))
+    if "mapValue" in value:
+        return {
+            key: _field_value(item)
+            for key, item in value["mapValue"].get("fields", {}).items()
+        }
+    return None
+
+
+def _document_fields(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        name: _field_value(value)
+        for name, value in document.get("fields", {}).items()
+    }
 
 
 @dataclass(frozen=True)
@@ -55,7 +94,10 @@ COLLECTIONS = {
             "eventName", "name", "title", "organization", "organizationId",
             "place", "placeRoom", "status", "isAllHeld", "isDay1Held", "isDay2Held",
             "day1StartTime", "day1EndTime", "day2StartTime", "day2EndTime",
-            "festivalId", "category",
+            "festivalId", "category", "shortDescription", "longDescription",
+            "organizationDescription", "section", "keyword", "whenRainy", "urlPath",
+            "placeId", "venueId", "venueIds", "hasStandbyPass", "hasStampRally",
+            "day1IsAllDay", "day2IsAllDay", "priority", "coupon",
         ),
     },
     "standbyPassEvents": {
@@ -73,8 +115,8 @@ COLLECTIONS = {
         "path": "festival/{festival}/notifications",
         "public_statuses": ("published",),
         "fields": (
-            "title", "body", "status", "category", "publishedAt", "createdAt",
-            "sendPush", "action",
+            "schemaVersion", "title", "body", "status", "category", "publishedAt",
+            "createdAt", "displayTargets", "sendPush", "action",
         ),
     },
     "ranking": {
@@ -91,7 +133,7 @@ COLLECTIONS = {
         "path": "yagamy/{festival}/config/ranking",
         "document": True,
         "fields": (
-            "status", "updatedAt",
+            "status", "votingPhase", "updatedAt",
         ),
     },
     "maps": {
@@ -146,7 +188,20 @@ _DROP = object()
 _SCALAR = "scalar"
 _PUBLIC_URL = "public_url"
 _FIELD_SCHEMAS: dict[str, dict[str, object]] = {
+    "events": {
+        "venueIds": [_SCALAR],
+        "coupon": {
+            "isEnabled": _SCALAR,
+            "type": _SCALAR,
+            "contents": _SCALAR,
+            "itemName": _SCALAR,
+            "remark": _SCALAR,
+            "discount": _SCALAR,
+            "itemIds": [_SCALAR],
+        },
+    },
     "notifications": {
+        "displayTargets": [_SCALAR],
         "action": {
             "type": _SCALAR,
             "url": _PUBLIC_URL,
@@ -201,6 +256,29 @@ _SECRET_IN_URL = re.compile(
     r"x-goog-[a-z0-9_-]*|x-amz-[a-z0-9_-]*)(?:=|:|/)[^/?#&;\s]+",
     re.IGNORECASE,
 )
+_CONTACT_EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_CONTACT_PHONE = re.compile(
+    r"(?<!\d)(?:\+?81[-\s]?(?:0)?|0)(?:\d[-\s]?){8,10}\d(?!\d)"
+)
+_LABELED_PRIVATE_DATA = re.compile(
+    r"(?:学籍番号|学生番号|氏名|フルネーム|個人住所|住所|担当者?)\s*[:：=]\s*\S+",
+    re.IGNORECASE,
+)
+_OPAQUE_SECRET_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        r"\bmfa\.[A-Za-z0-9_-]{20,}\b",
+        r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}\b",
+        r"\bsk-[A-Za-z0-9_-]{12,}\b",
+        r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
+        r"\bAIza[0-9A-Za-z_-]{20,}\b",
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r"(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)"
+        r"\s*[:=]\s*[`\"']?[^\s`\"']{8,}",
+    )
+)
 
 
 def is_explicit_firebase_list_query(question: str) -> bool:
@@ -218,19 +296,6 @@ def is_explicit_firebase_list_query(question: str) -> bool:
         re.IGNORECASE,
     )
     return bool(noun_then_list or list_then_noun)
-
-
-def firebase_document_path_is_safe(source_type: str, festival: int, path: str) -> bool:
-    """Validate that evidence came from the exact reviewed document scope."""
-    config = COLLECTIONS.get(source_type)
-    if config is None:
-        return False
-    base_path = str(config["path"]).format(festival=festival)
-    if source_type == "config" or config.get("document") is True:
-        return path == base_path
-    prefix = base_path + "/"
-    document_id = path[len(prefix):] if path.startswith(prefix) else ""
-    return bool(document_id) and "/" not in document_id
 
 
 def firebase_projected_fields_are_safe(source_type: str, fields: dict[str, Any]) -> bool:
@@ -259,14 +324,33 @@ class FirebaseKnowledgeReader:
             ),
         )
         self.cache_seconds = max(10, int(os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_CACHE_SECONDS", "60")))
-        self.api_key = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_API_KEY", "").strip()
-        self._directory = SupportDirectory()
-        knowledge_project = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "").strip()
-        if knowledge_project:
-            self._directory.project_id = knowledge_project
-        knowledge_backend = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "").strip().lower()
-        if knowledge_backend in {"emulator", "firestore", "public"}:
-            self._directory.backend = knowledge_backend
+        self.project_id = os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "").strip()
+        self.backend = os.environ.get(
+            "YAGAPON_FIREBASE_KNOWLEDGE_BACKEND",
+            "public",
+        ).strip().lower()
+        self._client: FirestoreReadonlyClient | None = None
+        if self.project_id and self.backend in {"emulator", "firestore", "public"}:
+            emulator_host = os.environ.get(
+                "YAGAPON_FIREBASE_KNOWLEDGE_EMULATOR_HOST",
+                os.environ.get(
+                    "YAGAPON_SUPPORT_FIRESTORE_EMULATOR_HOST",
+                    os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080"),
+                ),
+            ).strip()
+            timeout = float(
+                os.environ.get("YAGAPON_FIREBASE_KNOWLEDGE_TIMEOUT_SECONDS", "8")
+            )
+            self._client = FirestoreReadonlyClient(
+                project_id=self.project_id,
+                backend=self.backend,
+                emulator_host=emulator_host,
+                api_key=os.environ.get(
+                    "YAGAPON_FIREBASE_KNOWLEDGE_API_KEY",
+                    "",
+                ).strip(),
+                timeout=timeout,
+            )
         self._cache: dict[str, tuple[float, FirebaseDocumentBatch]] = {}
         self._cache_lock = asyncio.Lock()
 
@@ -274,8 +358,7 @@ class FirebaseKnowledgeReader:
     def available(self) -> bool:
         return (
             self.enabled
-            and self._directory.backend in {"emulator", "firestore", "public"}
-            and bool(self._directory.project_id)
+            and self._client is not None
         )
 
     async def evidence_for(
@@ -334,9 +417,19 @@ class FirebaseKnowledgeReader:
                 ),
                 return_exceptions=True,
             )
+            result_by_name = {
+                name: documents
+                for (name, _config), documents in zip(selected, results, strict=True)
+            }
+            ranking_public = self._ranking_results_are_public(
+                result_by_name.get("rankingConfig")
+            )
             for (name, config), documents in zip(selected, results, strict=True):
                 if isinstance(documents, BaseException):
                     log.warning("Firebase collection lookup failed for %s: %s", name, documents)
+                    continue
+                if name == "ranking" and not ranking_public:
+                    log.info("Withholding ranking aggregate until public result state")
                     continue
                 evidence.extend(
                     self._rank(
@@ -360,6 +453,15 @@ class FirebaseKnowledgeReader:
         # podium behavior.
         return evidence
 
+    @staticmethod
+    def _ranking_results_are_public(documents: object) -> bool:
+        if not isinstance(documents, list | tuple) or len(documents) != 1:
+            return False
+        fields = _document_fields(documents[0])
+        status = str(fields.get("status") or "").strip().casefold()
+        voting_phase = str(fields.get("votingPhase") or "").strip()
+        return status in {"result", "published", "final", "結果発表"} or voting_phase == "最終結果発表"
+
     async def _collection(
         self,
         name: str,
@@ -373,12 +475,11 @@ class FirebaseKnowledgeReader:
             cached = self._cache.get(cache_key)
             if cached and now - cached[0] < self.cache_seconds:
                 return cached[1]
+        if self._client is None:
+            return FirebaseDocumentBatch([], complete=False, reader_limit=self.limit)
+        field_paths = self._wire_field_paths(name)
         if name == "config" or COLLECTIONS.get(name, {}).get("document") is True:
-            payload = await self._directory._request(
-                "GET",
-                self._directory._documents_url(f"/{path}"),
-                headers=self._public_headers(),
-            )
+            payload = await self._client.get_document(path, field_paths)
             documents = FirebaseDocumentBatch(
                 [payload] if payload else [],
                 complete=True,
@@ -386,44 +487,21 @@ class FirebaseKnowledgeReader:
             )
         elif public_statuses:
             parent, collection_id = path.rsplit("/", 1)
-            if len(public_statuses) == 1:
-                value = {"stringValue": public_statuses[0]}
-                operator = "EQUAL"
-            else:
-                value = {
-                    "arrayValue": {
-                        "values": [{"stringValue": status} for status in public_statuses]
-                    }
-                }
-                operator = "IN"
             documents_list: list[dict[str, Any]] = []
             complete = False
             fetch_limit = self.max_documents + 1 if exhaustive else self.limit
             while len(documents_list) < fetch_limit:
                 page_size = min(self.limit, fetch_limit - len(documents_list))
-                structured_query: dict[str, Any] = {
-                    "from": [{"collectionId": collection_id}],
-                    "where": {
-                        "fieldFilter": {
-                            "field": {"fieldPath": "status"},
-                            "op": operator,
-                            "value": value,
-                        }
-                    },
-                    "orderBy": [
-                        {"field": {"fieldPath": "__name__"}, "direction": "ASCENDING"}
-                    ],
-                    "limit": page_size,
-                }
-                if documents_list:
-                    structured_query["offset"] = len(documents_list)
-                response = await self._directory._request(
-                    "POST",
-                    self._directory._documents_url(f"/{parent}:runQuery"),
-                    headers=self._public_headers(),
-                    payload={"structuredQuery": structured_query},
+                page = list(
+                    await self._client.run_status_query(
+                        parent,
+                        collection_id,
+                        field_paths,
+                        public_statuses,
+                        page_size,
+                        len(documents_list),
+                    )
                 )
-                page = [row["document"] for row in response or () if "document" in row]
                 documents_list.extend(page)
                 if len(page) < page_size:
                     complete = True
@@ -440,21 +518,19 @@ class FirebaseKnowledgeReader:
             )
         else:
             documents_list = []
-            page_token = ""
             complete = False
             fetch_limit = self.max_documents + 1 if exhaustive else self.limit
+            page_token: str | None = None
             while len(documents_list) < fetch_limit:
                 page_size = min(self.limit, fetch_limit - len(documents_list))
-                suffix = f"?pageSize={page_size}"
-                if page_token:
-                    suffix += f"&pageToken={quote(page_token, safe='')}"
-                payload = await self._directory._request(
-                    "GET",
-                    self._directory._documents_url(f"/{path}{suffix}"),
-                    headers=self._public_headers(),
+                page = await self._client.list_collection(
+                    path,
+                    field_paths,
+                    page_size,
+                    page_token,
                 )
-                documents_list.extend(list((payload or {}).get("documents", ())))
-                page_token = str((payload or {}).get("nextPageToken") or "")
+                documents_list.extend(page.documents)
+                page_token = page.next_page_token
                 if not page_token:
                     complete = True
                     break
@@ -471,11 +547,6 @@ class FirebaseKnowledgeReader:
         async with self._cache_lock:
             self._cache[cache_key] = (now, documents)
         return documents
-
-    def _public_headers(self) -> dict[str, str] | None:
-        if self._directory.backend == "public" and self.api_key:
-            return {"X-Goog-Api-Key": self.api_key}
-        return None
 
     def _rank(
         self,
@@ -498,17 +569,15 @@ class FirebaseKnowledgeReader:
                 value = self._project_field(source_type, key, fields[key])
                 if value is not _DROP:
                     projected[key] = value
-            doc_id = document.get("name", "").rsplit("/", 1)[-1]
-            if not doc_id or not projected:
+            if not projected:
                 continue
-            searchable = f"{doc_id} {json.dumps(projected, ensure_ascii=False, sort_keys=True)}".casefold()
+            searchable = json.dumps(projected, ensure_ascii=False, sort_keys=True).casefold()
             score = sum(1 for term in terms if term.casefold() in searchable)
             if terms and score == 0:
                 continue
             path = document["name"].split("/documents/", 1)[-1]
             ranked.append(
                 {
-                    "document_key": f"firebase:{path}",
                     "path": path,
                     "projected": projected,
                     "score": score,
@@ -527,7 +596,7 @@ class FirebaseKnowledgeReader:
                     key=lambda item: (
                         item["timestamp"] is None,
                         item["timestamp"] if item["timestamp"] is not None else 0.0,
-                        item["document_key"],
+                        item["path"],
                     )
                 )
                 order = "publishedAt/createdAt ascending (oldest first)"
@@ -535,7 +604,7 @@ class FirebaseKnowledgeReader:
                 ranked.sort(key=self._ranking_sort_key)
                 order = "category ascending, score descending, document path ascending"
             else:
-                ranked.sort(key=lambda item: item["document_key"])
+                ranked.sort(key=lambda item: item["path"])
                 order = "document path ascending"
             selected = ranked
         else:
@@ -547,7 +616,7 @@ class FirebaseKnowledgeReader:
                         -item["score"],
                         item["timestamp"] is None,
                         -(item["timestamp"] or 0.0),
-                        item["document_key"],
+                        item["path"],
                     )
                 )
             elif source_type == "ranking":
@@ -555,7 +624,7 @@ class FirebaseKnowledgeReader:
                 selected = self._ranking_podium(ranked)
                 order = "category ascending, score descending; top three ranks including ties"
             else:
-                ranked.sort(key=lambda item: (-item["score"], item["document_key"]))
+                ranked.sort(key=lambda item: (-item["score"], item["path"]))
             if source_type != "ranking":
                 selected = ranked[:5]
                 order = "relevance descending"
@@ -569,7 +638,7 @@ class FirebaseKnowledgeReader:
         # one URL so Discord emits at most one login preview for the citation.
         console_path = "~2F" + quote(collection_path, safe="").replace("%2F", "~2F")
         url = (
-            f"https://console.firebase.google.com/project/{self._directory.project_id}/"
+            f"https://console.firebase.google.com/project/{self.project_id}/"
             f"firestore/databases/-default-/data/{console_path}"
         )
         citation_title = f"{festival}th {_SOURCE_LABELS.get(source_type, source_type)}"
@@ -585,6 +654,7 @@ class FirebaseKnowledgeReader:
         )
         evidence = []
         for position, item in enumerate(selected, start=1):
+            reference = f"{source_type}:{position}"
             header = f"Firestore現在値（{festival}th / {source_type}）"
             if exhaustive:
                 completeness = "complete" if collection_complete else "unknown-limit-reached"
@@ -595,7 +665,7 @@ class FirebaseKnowledgeReader:
                         f"completeness={completeness}; order={order}"
                     )
                 header += f"\nitem: {position}/{returned_count}"
-            body_lines = [header, f"document: {item['path']}"]
+            body_lines = [header, f"reference: {reference}"]
             if item.get("computed_rank"):
                 body_lines.append(f"computed_rank: {item['computed_rank']}")
             body_lines.append(
@@ -604,13 +674,34 @@ class FirebaseKnowledgeReader:
             body = "\n".join(body_lines)
             evidence.append(
                 FirebaseEvidence(
-                    item["document_key"],
+                    f"firebase:{reference}",
                     citation_title,
                     body,
                     url,
                 )
             )
         return evidence
+
+    @classmethod
+    def _wire_field_paths(cls, source_type: str) -> tuple[str, ...]:
+        """Return the exact reviewed Firestore field mask for one source."""
+        config = COLLECTIONS[source_type]
+        result: list[str] = []
+        for key in config["fields"]:
+            schema = _FIELD_SCHEMAS.get(source_type, {}).get(key, _SCALAR)
+            result.extend(cls._schema_field_paths(str(key), schema))
+        return tuple(dict.fromkeys(result))
+
+    @classmethod
+    def _schema_field_paths(cls, prefix: str, schema: object) -> list[str]:
+        if isinstance(schema, dict):
+            result: list[str] = []
+            for child_key, child_schema in schema.items():
+                result.extend(
+                    cls._schema_field_paths(f"{prefix}.{child_key}", child_schema)
+                )
+            return result
+        return [prefix]
 
     @staticmethod
     def _is_exhaustive_query(question: str) -> bool:
@@ -669,7 +760,7 @@ class FirebaseKnowledgeReader:
         category = str(projected.get("category") or "")
         score = projected.get("score")
         numeric_score = float(score) if isinstance(score, int | float) else 0.0
-        return category, -numeric_score, str(item.get("document_key") or "")
+        return category, -numeric_score, str(item.get("path") or "")
 
     @classmethod
     def _ranking_podium(cls, ranked: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -700,16 +791,6 @@ class FirebaseKnowledgeReader:
         return selected
 
     @classmethod
-    def _bounded(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return value[:500]
-        if isinstance(value, tuple | list):
-            return [cls._bounded(item) for item in value[:20]]
-        if isinstance(value, dict):
-            return {str(key)[:100]: cls._bounded(item) for key, item in list(value.items())[:20]}
-        return value
-
-    @classmethod
     def _project_field(cls, source_type: str, key: str, value: Any) -> Any:
         schema = _FIELD_SCHEMAS.get(source_type, {}).get(key, _SCALAR)
         return cls._project_value(value, schema)
@@ -718,7 +799,7 @@ class FirebaseKnowledgeReader:
     def _project_value(cls, value: Any, schema: object) -> Any:
         if schema == _SCALAR:
             if isinstance(value, str):
-                return value[:500]
+                return cls._safe_public_text(value)
             if isinstance(value, bool | int | float):
                 return value
             return _DROP
@@ -747,6 +828,42 @@ class FirebaseKnowledgeReader:
                     projected[str(child_key)] = safe_child
             return projected if projected else _DROP
         return _DROP
+
+    @staticmethod
+    def _safe_public_text(value: str) -> str | object:
+        """Drop high-confidence credentials and private contacts before the LLM."""
+        # Remove formatting controls such as zero-width spaces before scanning
+        # so ordinary copied text survives while obfuscated secrets become
+        # detectable. Preserve ZWJ because it is part of emoji sequences.
+        inspected_characters: list[str] = []
+        for character in value:
+            category = unicodedata.category(character)
+            if category == "Cf" and character != "\u200d":
+                continue
+            if category[0] == "C" and character not in {"\n", "\r", "\t", "\u200d"}:
+                return _DROP
+            inspected_characters.append(character)
+            if len(inspected_characters) >= 8_192:
+                break
+        inspected = "".join(inspected_characters)
+        normalized = unicodedata.normalize("NFKC", inspected)
+        variants = (
+            normalized,
+            "".join(
+                character
+                for character in normalized
+                if unicodedata.category(character)[0] != "M" and character != "\u200d"
+            ),
+        )
+        for candidate in dict.fromkeys(variants):
+            if (
+                _CONTACT_EMAIL.search(candidate)
+                or _CONTACT_PHONE.search(candidate)
+                or _LABELED_PRIVATE_DATA.search(candidate)
+                or any(pattern.search(candidate) for pattern in _OPAQUE_SECRET_PATTERNS)
+            ):
+                return _DROP
+        return inspected[:500]
 
     @staticmethod
     def _safe_public_url(value: Any) -> str | object:
