@@ -39,7 +39,10 @@ USER yagapon
 EXPOSE 8000
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"
+# The production VM is intentionally small. Cold Python imports and Discord startup
+# can exceed one minute while an image is first paged into memory, so startup
+# failures must not make Compose tear down otherwise healthy dependent workers.
+HEALTHCHECK --interval=15s --timeout=15s --start-period=150s --retries=4 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10).read()"
 
 CMD ["python", "main.py"]
