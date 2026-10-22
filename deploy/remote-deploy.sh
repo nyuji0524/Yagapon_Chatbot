@@ -65,7 +65,9 @@ rollback() {
 }
 cleanup_staging() {
   if [[ "$staging_dir" != /tmp ]]; then
-    rm -rf -- "$staging_dir"
+    if ! rm -rf -- "$staging_dir"; then
+      echo "Warning: could not remove deployment staging directory: $staging_dir" >&2
+    fi
   fi
 }
 trap 'rollback; cleanup_staging' ERR
