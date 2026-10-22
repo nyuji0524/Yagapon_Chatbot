@@ -1,6 +1,10 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from bot.client import (
+    YagaPon,
     _clean_rag_query,
     _decorate_rag_answer,
     _guild_yagapon_emojis,
@@ -8,6 +12,7 @@ from bot.client import (
     _is_rag_invocation,
     _is_voice_reference_channel,
     _mentioned_bot_role_ids,
+    _split_discord_text,
 )
 
 
@@ -139,3 +144,38 @@ def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
     decorated = _decorate_rag_answer("見つからなかったぽん。", guild, no_answer=True)
 
     assert decorated.startswith("<:yagapon_cry:2> 見つからなかったぽん。")
+
+
+def test_split_discord_text_hard_splits_a_single_oversized_line_without_loss():
+    text = "x" * 5000
+
+    chunks = _split_discord_text(text)
+
+    assert len(chunks) >= 3
+    assert all(chunks)
+    assert all(len(chunk) <= 1900 for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_discord_text_reopens_code_blocks_without_losing_code():
+    text = "```python\n" + "x" * 5000 + "\n```"
+
+    chunks = _split_discord_text(text)
+
+    assert len(chunks) >= 3
+    assert all(chunks)
+    assert all(len(chunk) <= 1900 for chunk in chunks)
+    assert chunks[0].startswith("```python\n")
+    assert all(chunk.rstrip().endswith("```") for chunk in chunks)
+    assert sum(chunk.count("x") for chunk in chunks) == 5000
+
+
+@pytest.mark.asyncio
+async def test_send_split_message_never_sends_empty_payload_for_long_line():
+    destination = SimpleNamespace(send=AsyncMock(side_effect=lambda value, **_: value))
+
+    sent = await YagaPon.send_split_message(None, destination, "z" * 5000)
+
+    assert sent
+    assert all(call.args[0] for call in destination.send.await_args_list)
+    assert sum(call.args[0].count("z") for call in destination.send.await_args_list) == 5000

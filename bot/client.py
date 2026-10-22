@@ -132,6 +132,69 @@ def _decorate_rag_answer(answer: str, guild, *, no_answer: bool) -> str:
     return f"{selected[0]} {answer}\n\n{selected[1]}"
 
 
+def _split_discord_text(text: str, *, limit: int = 1900) -> list[str]:
+    """Split arbitrary text without dropping oversized lines or breaking fences.
+
+    Discord accepts at most 2,000 characters.  Reserve a few characters so an
+    open Markdown code block can be closed in one message and reopened in the
+    next.  Unlike the former line-only splitter, this also makes progress when
+    one generated paragraph or code line is larger than the whole message.
+    """
+    if not text:
+        return []
+    if limit < 32:
+        raise ValueError("Discord chunk limit is too small")
+
+    content_limit = limit - 8
+    chunks: list[str] = []
+    current = ""
+    in_code_block = False
+    current_language = ""
+
+    def flush() -> None:
+        nonlocal current
+        if not current:
+            return
+        payload = current
+        if in_code_block and not payload.rstrip().endswith("```"):
+            payload += "\n```"
+        if payload:
+            chunks.append(payload)
+        current = f"```{current_language}\n" if in_code_block else ""
+
+    for logical_line in text.splitlines(keepends=True):
+        stripped = logical_line.strip()
+        is_fence = stripped.startswith("```")
+        # Never split the fence marker itself.  If it does not fit, finish the
+        # current message first (closing/reopening an existing block as needed).
+        if is_fence and current and len(current) + len(logical_line) > content_limit:
+            flush()
+
+        remaining = logical_line
+        while remaining:
+            available = content_limit - len(current)
+            if available <= 0:
+                flush()
+                available = content_limit - len(current)
+            current += remaining[:available]
+            remaining = remaining[available:]
+            if remaining:
+                flush()
+
+        if is_fence:
+            if in_code_block:
+                in_code_block = False
+                current_language = ""
+            else:
+                in_code_block = True
+                current_language = stripped[3:].strip()
+
+    # ``splitlines(keepends=True)`` returns nothing for an empty string only;
+    # a normal final line (with or without newline) is already in ``current``.
+    flush()
+    return chunks
+
+
 class YagaPon(discord.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -745,36 +808,10 @@ class YagaPon(discord.Bot):
             # channel-scoped evidence. Voice mode has its own in-session TTS.
 
     async def send_split_message(self, destination, text: str):
-        """コードブロックを考慮して2000文字制限で分割送信"""
+        """コードブロックを考慮してDiscordの文字数制限内で分割送信。"""
         sent_messages = []
-        lines = text.split("\n")
-        current_chunk = ""
-        in_code_block = False
-        current_lang = ""
-
-        for line in lines:
-            if line.strip().startswith("```"):
-                if not in_code_block:
-                    current_lang = line.strip().replace("```", "").strip()
-                in_code_block = not in_code_block
-
-            if len(current_chunk) + len(line) + 10 > 1900:
-                to_send = current_chunk
-                if in_code_block:
-                    to_send += "\n```"
-
-                sent_messages.append(await destination.send(to_send, silent=True))
-
-                if in_code_block:
-                    lang = f" {current_lang}" if current_lang else ""
-                    current_chunk = f"```{lang}\n(続き)...\n{line}"
-                else:
-                    current_chunk = f"(続き)...\n{line}"
-            else:
-                current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
-
-        if current_chunk:
-            sent_messages.append(await destination.send(current_chunk, silent=True))
+        for chunk in _split_discord_text(text):
+            sent_messages.append(await destination.send(chunk, silent=True))
         return sent_messages
 
     async def close(self):

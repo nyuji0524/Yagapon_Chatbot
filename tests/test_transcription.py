@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from bot import transcription
+from bot.ai_completion import IncompleteModelOutput
 from bot.transcription import transcribe_audio
 
 
@@ -43,6 +44,34 @@ async def test_transcription_uses_dedicated_model_and_deletes_upload(monkeypatch
         "type": "verbatim",
         "diarization_mode": "speaker",
     }
+    client.files.delete.assert_called_once_with(name="files/test")
+
+
+@pytest.mark.asyncio
+async def test_dedicated_transcription_rejects_incomplete_interaction_status():
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            output_text="spk_1: 途中まで",
+            status="incomplete",
+        )
+    )
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(interactions=SimpleNamespace(create=create)),
+    )
+
+    with pytest.raises(
+        IncompleteModelOutput,
+        match="transcription_create.*STATUS_INCOMPLETE",
+    ):
+        await transcribe_audio(
+            client,
+            b"RIFFtest",
+            mime_type="audio/wav",
+            display_name="meeting.wav",
+        )
+
     client.files.delete.assert_called_once_with(name="files/test")
 
 
@@ -150,6 +179,35 @@ async def test_transcription_can_reserve_dedicated_quota_for_listen_mode():
     create.assert_not_awaited()
     prompt = fallback.await_args.kwargs["contents"][0]
     assert "矢上祭" in prompt
+
+
+@pytest.mark.asyncio
+async def test_fallback_transcription_rejects_max_tokens_and_deletes_upload():
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    fallback = AsyncMock(
+        return_value=SimpleNamespace(
+            text="Speaker 1: 途中までの文字起こし",
+            candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+        )
+    )
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(create=AsyncMock()),
+            models=SimpleNamespace(generate_content=fallback),
+        ),
+    )
+
+    with pytest.raises(IncompleteModelOutput, match="transcription_fallback.*MAX_TOKENS"):
+        await transcribe_audio(
+            client,
+            b"RIFFtest",
+            mime_type="audio/wav",
+            display_name="meeting.wav",
+            prefer_dedicated=False,
+        )
+
+    client.files.delete.assert_called_once_with(name="files/test")
 
 
 @pytest.mark.asyncio

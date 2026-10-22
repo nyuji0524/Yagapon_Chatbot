@@ -8,6 +8,7 @@ from pathlib import Path
 
 from google.genai import types
 
+from bot.ai_completion import require_complete_model_output
 from bot.ai_models import (
     generation_config,
     log_usage,
@@ -139,6 +140,7 @@ async def transcribe_audio(
                 _dedicated_transcription_rate_limiter.reset()
                 model = transcribe_model()
                 log_usage(log, "transcription", model, response)
+                require_complete_model_output(response, operation="transcription_create")
                 return (response.output_text or "").strip()
             except RateLimitExceeded as exc:
                 cooldown = _dedicated_transcription_rate_limiter.trip(
@@ -259,6 +261,10 @@ async def transcribe_audio(
             max_delay=15.0,
         )
         log_usage(log, "transcription_fallback", fallback_model, fallback_response)
+        require_complete_model_output(
+            fallback_response,
+            operation="transcription_fallback",
+        )
         text = (fallback_response.text or "").strip()
         return _replace_registered_labels(text, voiceprint_labels)
     finally:

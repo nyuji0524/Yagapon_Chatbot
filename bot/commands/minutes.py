@@ -13,11 +13,16 @@ from uuid import uuid4
 
 import discord
 
+from bot.ai_completion import require_complete_model_output
 from bot.ai_models import fast_model, generation_config, log_usage
 from bot.ai_retry import new_genai_client
 from bot.authorization import require_registered_member
 from bot.meeting_time import display_meeting_date
-from bot.minutes_generation import generate_minutes
+from bot.minutes_generation import (
+    format_notification_summary,
+    generate_minutes,
+    notification_summary_failure,
+)
 from bot.recording import save_external_transcript
 from bot.transcription import transcribe_audio
 
@@ -374,21 +379,24 @@ async def _transcribe_file(
 
 
 async def _summarize(minutes: str) -> str:
-    """議事録を要約"""
+    """Create a clearly labelled Discord overview, never a fake full minutes."""
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     try:
         model = fast_model()
         response = await client.aio.models.generate_content(
             model=model,
             contents=(
-                "以下の議事録を3〜5行で簡潔に要約してください。\n"
-                "要約には: 参加者、主な議題、決定事項を含めてください。\n"
+                "以下の議事録からDiscord通知用の概要を作成してください。\n"
+                "これは議事録全文の代替ではありません。参加者、主な議題、決定事項、未決事項を含め、"
+                "内容が多い場合は無理に3〜5行へ押し込まず、必要な箇条書きを増やしてください。\n"
                 "語尾は「ぽん」をつけてください。\n\n"
                 f"{minutes}"
             ),
-            config=generation_config(model, thinking_level="low", max_output_tokens=512),
+            config=generation_config(model, thinking_level="low", max_output_tokens=2048),
         )
         log_usage(log, "minutes_summary", model, response)
-        return response.text or "要約を生成できなかったぽん..."
+        require_complete_model_output(response, operation="minutes_notification_summary")
+        return format_notification_summary(response.text or "")
     except Exception:
-        return minutes[:500] + ("\n\n..." if len(minutes) > 500 else "")
+        log.exception("Minutes notification summary generation failed")
+        return notification_summary_failure()
