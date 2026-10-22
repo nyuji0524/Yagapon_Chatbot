@@ -724,6 +724,8 @@ class RagStore:
         with self._lock, self._connect() as connection:
             rows = list(fetch_rows())
             if is_history and limit >= 2:
+                # Keep this SQL equivalent to is_history_narrative_source().
+                # SQLite cannot call the Python predicate used after retrieval.
                 record_rows = fetch_rows(
                     "(source_type = ? OR substr(source_type, 1, 8) = 'meeting_')",
                     ("discord_conversation",),
