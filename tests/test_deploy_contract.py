@@ -16,3 +16,4 @@ def test_remote_deploy_wait_exceeds_container_start_period():
 
     assert "for _ in $(seq 1 48)" in deploy
     assert "sleep 5" in deploy
+    assert "timeout --signal=TERM --kill-after=30s 420s docker run --rm" in deploy

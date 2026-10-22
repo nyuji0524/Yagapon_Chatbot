@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from bot.recording import (
     PersistentPCMSink,
     cleanup_old_recordings,
+    finalize_recording_replay,
     find_recoverable_recordings,
     load_transcript_content,
     save_external_transcript,
@@ -128,6 +129,67 @@ def test_uploaded_transcript_uses_same_durable_archive(tmp_path, monkeypatch):
     assert path.parent == tmp_path / "transcripts" / "99"
     assert "/" not in path.name
     assert load_transcript_content(path) == "Speaker 1: 発言"
+
+
+def test_successful_replay_archives_transcript_before_deleting_retained_pcm(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    session = tmp_path / "recordings" / "1" / "session-1"
+    session.mkdir(parents=True)
+    (session / "user-10.pcm").write_bytes(b"audio")
+    (session / "metadata.json").write_text(
+        json.dumps(
+            {
+                "guild_id": "1",
+                "status": "delivered_recording_retained",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    deleted = finalize_recording_replay(
+        guild_id=1,
+        session_id="session-1",
+        session_dir=session,
+        channel_name="全体会議",
+        transcript="[Speaker 1]: 保存済み",
+        replay_job_id="replay-test",
+    )
+
+    metadata = json.loads((session / "metadata.json").read_text(encoding="utf-8"))
+    transcript = tmp_path / "transcripts" / "1" / "session-1.md"
+    assert deleted == 1
+    assert list(session.glob("user-*.pcm")) == []
+    assert load_transcript_content(transcript) == "[Speaker 1]: 保存済み"
+    assert metadata["status"] == "delivered_audio_deleted"
+    assert metadata["replay_job_id"] == "replay-test"
+
+
+def test_replay_does_not_delete_audio_from_non_terminal_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    session = tmp_path / "recordings" / "1" / "session-1"
+    session.mkdir(parents=True)
+    pcm = session / "user-10.pcm"
+    pcm.write_bytes(b"audio")
+    (session / "metadata.json").write_text(
+        json.dumps({"guild_id": "1", "status": "recording"}),
+        encoding="utf-8",
+    )
+
+    deleted = finalize_recording_replay(
+        guild_id=1,
+        session_id="session-1",
+        session_dir=session,
+        channel_name="全体会議",
+        transcript="[Speaker 1]: 未完了",
+        replay_job_id="replay-test",
+    )
+
+    assert deleted == 0
+    assert pcm.exists()
+    assert not (tmp_path / "transcripts" / "1" / "session-1.md").exists()
 
 
 def test_recording_checkpoint_can_be_resumed(tmp_path):

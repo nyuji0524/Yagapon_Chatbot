@@ -104,6 +104,26 @@ def test_exact_search_reranks_curated_documents(tmp_path):
     assert hits[0].status == "approved"
 
 
+def test_exact_search_ranks_canonical_above_curated(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    for authority in ("curated", "canonical"):
+        store.upsert_document(
+            f"documents/{authority}",
+            "整理券の正式な権限契約",
+            metadata(27)
+            + [
+                {"key": "document_key", "string_value": authority},
+                {"key": "authority", "string_value": authority},
+                {"key": "status", "string_value": "verified"},
+            ],
+        )
+
+    hits = store.search_exact(1, ["整理券"], festival=27)
+
+    assert [hit.document_key for hit in hits] == ["canonical", "curated"]
+    assert hits[0].score > hits[1].score
+
+
 def test_exact_search_includes_global_trusted_documents(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     global_metadata = [
@@ -112,6 +132,7 @@ def test_exact_search_includes_global_trusted_documents(tmp_path):
         {"key": "channel_name", "string_value": "Bot運用仕様"},
         {"key": "authority", "string_value": "curated"},
         {"key": "status", "string_value": "current"},
+        {"key": "source_type", "string_value": "builtin_reference"},
     ]
     store.upsert_document("builtin://drive", "文字起こしは専用フォルダへ保存する", global_metadata)
 
@@ -132,6 +153,59 @@ def test_year_filter_still_excludes_unlabelled_guild_documents(tmp_path):
     )
 
     assert store.search_exact(1, ["文字起こし"], festival=28) == []
+
+
+def test_year_filter_includes_timeless_curated_repository_document(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "knowledge://retry",
+        "PR作成に失敗した草案は次回の再試行まで保存する",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "knowledge:retry"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "active"},
+            {"key": "source_type", "string_value": "knowledge_repository"},
+        ],
+    )
+
+    hits = store.search_exact(1, ["再試行"], festival=28)
+
+    assert [hit.document_key for hit in hits] == ["knowledge:retry"]
+
+
+def test_year_filter_excludes_inactive_timeless_curated_document(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "knowledge://deprecated",
+        "再試行についての古い運用",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "knowledge:deprecated"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "deprecated"},
+            {"key": "source_type", "string_value": "knowledge_repository"},
+        ],
+    )
+
+    assert store.search_exact(1, ["再試行"], festival=28) == []
+
+
+def test_year_filter_excludes_timeless_document_from_unapproved_source_type(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "source://unlabelled-code",
+        "再試行についてのコードコメント",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "document_key", "string_value": "source:unlabelled-code"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "current"},
+            {"key": "source_type", "string_value": "source_code"},
+        ],
+    )
+
+    assert store.search_exact(1, ["再試行"], festival=28) == []
 
 
 def test_curated_global_document_survives_sql_candidate_limit(tmp_path):
@@ -196,6 +270,7 @@ def test_trusted_terminology_is_retrievable_for_room_and_yil_questions(tmp_path)
             {"key": "channel_name", "string_value": record["title"]},
             {"key": "authority", "string_value": "curated"},
             {"key": "status", "string_value": record["status"]},
+            {"key": "source_type", "string_value": "builtin_reference"},
             {"key": "source_url", "string_value": record["source_url"]},
         ]
         if record.get("festival") is not None:

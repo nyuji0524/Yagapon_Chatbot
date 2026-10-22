@@ -124,6 +124,8 @@ class YagaPon(discord.Bot):
         self.recording_replays = RecordingReplayManager(self)
         self.support_directory = SupportDirectory()
         self._recording_recovery_task: asyncio.Task | None = None
+        self._close_lock = asyncio.Lock()
+        self._close_completed = False
 
         # コマンド登録
         from bot.commands import (
@@ -589,18 +591,39 @@ class YagaPon(discord.Bot):
         return sent_messages
 
     async def close(self):
-        log.info("Shutting down, flushing buffers...")
-        from bot.voice import checkpoint_voice_sessions_for_shutdown
+        async with self._close_lock:
+            if self._close_completed:
+                return
+            log.info("Shutting down, checkpointing voice sessions...")
+            from bot.voice import checkpoint_voice_sessions_for_shutdown
 
-        await checkpoint_voice_sessions_for_shutdown()
-        if self._recording_recovery_task and not self._recording_recovery_task.done():
-            self._recording_recovery_task.cancel()
             try:
-                await self._recording_recovery_task
-            except asyncio.CancelledError:
-                pass
-        await self.corpus.shutdown()
-        await super().close()
+                await checkpoint_voice_sessions_for_shutdown()
+            except Exception:
+                log.exception(
+                    "Voice session checkpoint failed during shutdown; continuing cleanup"
+                )
+            if self._recording_recovery_task and not self._recording_recovery_task.done():
+                self._recording_recovery_task.cancel()
+                try:
+                    await self._recording_recovery_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    log.exception(
+                        "Recording recovery task failed during shutdown; continuing cleanup"
+                    )
+            # Close the Discord connection before the slower corpus flush so
+            # Pycord cannot start a reconnect against an already-closing HTTP
+            # session during deployments.
+            try:
+                await super().close()
+            finally:
+                # A transport error while Discord is closing must not discard
+                # buffered knowledge waiting for its durable upload.
+                log.info("Discord closing finished; flushing corpus buffers...")
+                await self.corpus.shutdown()
+                self._close_completed = True
 
 
 def create_bot() -> YagaPon:

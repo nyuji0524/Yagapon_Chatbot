@@ -15,6 +15,7 @@ repositories:
   - name: YagamiFes-IT/YagamiFes-IT-Knowledge
     ref: main
     fetch: gcs
+    source_type: knowledge_repository
     authority: curated
     status: current
     front_matter_statuses: [active, historical]
