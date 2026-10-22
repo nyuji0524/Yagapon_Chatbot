@@ -77,6 +77,13 @@ jobs:
 
       - name: Copy deployment files
         run: |
+          stage="/tmp/yagapon-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          quoted_stage=$(printf '%q' "$stage")
+          gcloud compute ssh "$GCE_INSTANCE" \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            --command "umask 077; mkdir $quoted_stage"
           gcloud compute scp \
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
@@ -84,15 +91,17 @@ jobs:
             compose.yaml deploy/remote-deploy.sh deploy/rag-eval-control.sh \
             docs/rag-eval-cases.yaml \
             deploy/systemd/yagapon.service \
-            "$GCE_INSTANCE:/tmp/"
+            "$GCE_INSTANCE:$stage/"
 
       - name: Deploy and verify health
         env:
           IMAGE_SHA: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
         run: |
           quoted_image=$(printf '%q' "$IMAGE_SHA")
+          stage="/tmp/yagapon-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          quoted_stage=$(printf '%q' "$stage")
           gcloud compute ssh "$GCE_INSTANCE" \
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            --command "sudo /bin/bash /tmp/remote-deploy.sh $quoted_image"
+            --command "sudo /bin/bash $quoted_stage/remote-deploy.sh $quoted_image $quoted_stage"
