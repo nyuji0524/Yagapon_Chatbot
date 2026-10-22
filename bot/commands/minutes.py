@@ -58,6 +58,14 @@ def register(bot):
         doc_title = title or os.path.splitext(file.filename)[0]
         checkpoint_dir = None
         meeting_at = datetime.now(timezone.utc)
+        from bot.knowledge_policy import evaluate_meeting_export
+
+        export_decision = evaluate_meeting_export(
+            guild_id=ctx.guild_id,
+            channel=ctx.channel,
+            category=getattr(ctx.channel, "category", None),
+            is_ignored=getattr(bot.config, "is_ignored", None),
+        )
         try:
             # 音声ファイルをダウンロード
             audio_bytes = await file.read()
@@ -99,12 +107,17 @@ def register(bot):
             # 後続の要約APIが失敗しても、再度STTする必要はない。
             from bot.gdrive import upload_minutes, upload_transcript
 
-            transcript_url = await upload_transcript(
-                bot.config,
-                ctx.guild_id,
-                transcript,
-                doc_title,
-                meeting_at=meeting_at,
+            transcript_url = (
+                await upload_transcript(
+                    bot.config,
+                    ctx.guild_id,
+                    transcript,
+                    doc_title,
+                    meeting_at=meeting_at,
+                    session_id=session_id,
+                )
+                if export_decision.allowed
+                else None
             )
             checkpoint_dir = (
                 transcript_path.parent / f"{session_id}-checkpoints"
@@ -123,34 +136,58 @@ def register(bot):
                 raise RuntimeError("minutes generation returned empty content")
 
             # Google Docsに保存
-            drive_url = await upload_minutes(
-                bot.config,
-                ctx.guild_id,
-                minutes,
-                doc_title,
-                meeting_at=meeting_at,
+            drive_url = (
+                await upload_minutes(
+                    bot.config,
+                    ctx.guild_id,
+                    minutes,
+                    doc_title,
+                    meeting_at=meeting_at,
+                    session_id=session_id,
+                )
+                if export_decision.allowed
+                else None
             )
 
             # 要約を生成
             summary = await _summarize(minutes)
 
+            from bot.knowledge_policy import evaluate_knowledge_export
             from bot.knowledge_publish import publish_meeting_knowledge
 
-            knowledge = await publish_meeting_knowledge(
-                session_id=session_id,
+            decision = evaluate_knowledge_export(
                 guild_id=ctx.guild_id,
-                channel_name=doc_title,
-                mode="uploaded",
-                transcript=transcript,
-                summary=summary,
-                minutes=minutes,
+                channel=ctx.channel,
+                category=getattr(ctx.channel, "category", None),
+                is_ignored=getattr(bot.config, "is_ignored", None),
             )
+            knowledge = None
+            if decision.allowed:
+                knowledge = await publish_meeting_knowledge(
+                    session_id=session_id,
+                    guild_id=ctx.guild_id,
+                    channel_id=ctx.channel.id,
+                    channel_name=doc_title,
+                    mode="uploaded",
+                    transcript=transcript,
+                    summary=summary,
+                    minutes=minutes,
+                )
+            else:
+                log.warning(
+                    "Uploaded meeting Knowledge export skipped guild=%s channel=%s reason=%s",
+                    ctx.guild_id,
+                    getattr(ctx.channel, "id", None),
+                    decision.reason,
+                )
 
             from bot.meeting_index import index_bot_meeting
 
             await index_bot_meeting(
                 bot,
                 guild_id=ctx.guild_id,
+                channel_id=ctx.channel.id,
+                parent_channel_id=getattr(ctx.channel, "parent_id", None),
                 session_id=session_id,
                 channel_name=doc_title,
                 started_at=meeting_at,

@@ -16,16 +16,19 @@ async def test_close_flushes_corpus_when_voice_checkpoint_fails(monkeypatch):
     bot._recording_recovery_task = None
     bot.corpus = SimpleNamespace(shutdown=AsyncMock())
     checkpoint = AsyncMock(side_effect=RuntimeError("checkpoint failed"))
+    shutdown_reactions = AsyncMock()
     discord_close = AsyncMock()
     monkeypatch.setattr(
         "bot.voice.checkpoint_voice_sessions_for_shutdown",
         checkpoint,
     )
+    monkeypatch.setattr("bot.reactions.shutdown_reactions", shutdown_reactions)
     monkeypatch.setattr(discord.Bot, "close", discord_close)
 
     await YagaPon.close(bot)
 
     checkpoint.assert_awaited_once_with()
+    shutdown_reactions.assert_awaited_once_with(bot)
     discord_close.assert_awaited_once_with()
     bot.corpus.shutdown.assert_awaited_once_with()
     assert bot._close_completed is True

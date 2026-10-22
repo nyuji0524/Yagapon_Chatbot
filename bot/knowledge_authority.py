@@ -127,6 +127,16 @@ def can_answer_directly(kind: QuestionKind, authority: str, status: str) -> bool
     return authority in _DIRECT_AUTHORITIES[kind] and status not in {"draft", "raw", "deprecated"}
 
 
+def allows_unreviewed_evidence(kind: QuestionKind) -> bool:
+    """Whether raw conversation may be the sole evidence for this question."""
+    return kind in {QuestionKind.HISTORY, QuestionKind.GENERAL}
+
+
+def direct_authorities(kind: QuestionKind) -> tuple[str, ...]:
+    """Return deterministic authority labels safe as sole answer evidence."""
+    return tuple(sorted(_DIRECT_AUTHORITIES[kind]))
+
+
 def authority_score(kind: QuestionKind, authority: str, status: str) -> int:
     priorities = _PRIORITIES[kind]
     try:

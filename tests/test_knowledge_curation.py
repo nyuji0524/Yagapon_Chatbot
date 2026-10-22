@@ -9,6 +9,7 @@ from knowledge_curation.__main__ import (
     build_bundle,
     classify_bureau,
     curate_once,
+    curation_document_allowed,
     render_decision,
 )
 
@@ -166,3 +167,46 @@ async def test_curation_is_disabled_by_default(tmp_path, monkeypatch):
     result = await curate_once(state_path=tmp_path / "state.json", limit=3)
 
     assert result == {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}
+
+
+@pytest.mark.asyncio
+async def test_autonomous_curation_never_exports_channel_scoped_discord_content(tmp_path, monkeypatch):
+    database = tmp_path / "rag.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    store = RagStore(database)
+    store.upsert_document(
+        "documents/private",
+        "チャンネル限定の会議記録" * 100,
+        [
+            {"key": "document_key", "string_value": "private"},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 456},
+            {"key": "access_scope", "string_value": "channel"},
+        ],
+    )
+
+    result = await curate_once(state_path=tmp_path / "state.json", limit=3)
+
+    assert result["eligible"] == 0
+    assert result["policy_excluded"] == 1
+    assert result["processed"] == 0
+
+
+def test_autonomous_curation_accepts_only_explicit_channel_ids(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "456,invalid")
+    document = {
+        "guild_id": 123,
+        "channel_id": 456,
+        "access_scope": "channel",
+    }
+
+    assert curation_document_allowed(document) is True
+    assert curation_document_allowed({**document, "channel_id": 457}) is False
+    assert curation_document_allowed({**document, "guild_id": 999}) is False
+    assert curation_document_allowed({**document, "access_scope": "restricted"}) is False

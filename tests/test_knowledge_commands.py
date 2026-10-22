@@ -13,6 +13,7 @@ from bot.commands.knowledge import (
     _read_drive_source,
 )
 from bot.google_credentials import GoogleCredentialScopeError
+from bot.knowledge_policy import evaluate_knowledge_export, evaluate_meeting_export
 
 
 def test_knowledge_guild_allowlist_uses_explicit_list(monkeypatch):
@@ -82,6 +83,86 @@ def test_protected_channel_allows_unmatched_channel(monkeypatch):
     channel = SimpleNamespace(id=21, name="開発全般", parent=None)
 
     assert _protected_channel(channel) is False
+
+
+def test_shared_export_policy_fails_closed_for_unapproved_or_unresolved_context(
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "1")
+    normal = SimpleNamespace(id=10, name="会議", parent=None, category=None)
+    unresolved = SimpleNamespace(
+        id=10,
+        name="会議",
+        parent=None,
+        category=None,
+        _knowledge_export_lineage_resolved=False,
+    )
+
+    assert evaluate_knowledge_export(guild_id=2, channel=normal).reason == (
+        "guild-not-allowlisted"
+    )
+    assert evaluate_knowledge_export(guild_id=1, channel=unresolved).reason == (
+        "channel-lineage-unresolved"
+    )
+
+
+def test_shared_export_policy_rejects_protected_category_and_ignored_parent(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
+    category = SimpleNamespace(id=30, name="IT局員選考")
+    protected = SimpleNamespace(id=10, name="面接室", parent=None, category=category)
+    assert evaluate_knowledge_export(guild_id=1, channel=protected).reason == (
+        "protected-channel"
+    )
+
+    parent = SimpleNamespace(id=20, name="非公開")
+    thread = SimpleNamespace(id=21, name="会議", parent=parent, category=None)
+
+    def ignored(guild_id, channel_id):
+        return guild_id == 1 and channel_id == 20
+
+    assert evaluate_knowledge_export(
+        guild_id=1,
+        channel=thread,
+        is_ignored=ignored,
+    ).reason == "ignored-channel"
+
+
+def test_meeting_external_export_requires_same_audience_or_explicit_channel(monkeypatch):
+    monkeypatch.delenv("YAGAPON_MEETING_EXPORT_CHANNEL_IDS", raising=False)
+    default_role = SimpleNamespace(id=1)
+    guild = SimpleNamespace(default_role=default_role)
+    private = SimpleNamespace(
+        id=10,
+        name="役員会",
+        guild=guild,
+        parent=None,
+        category=None,
+        permissions_for=lambda _role: SimpleNamespace(
+            view_channel=False,
+            read_message_history=False,
+        ),
+    )
+    assert evaluate_meeting_export(guild_id=1, channel=private).reason == (
+        "channel-not-export-approved"
+    )
+
+    monkeypatch.setenv("YAGAPON_MEETING_EXPORT_CHANNEL_IDS", "10")
+    assert evaluate_meeting_export(guild_id=1, channel=private).allowed is True
+
+    monkeypatch.setenv("YAGAPON_MEETING_EXPORT_CHANNEL_IDS", "")
+    public = SimpleNamespace(
+        id=11,
+        name="全体会議",
+        guild=guild,
+        parent=None,
+        category=None,
+        permissions_for=lambda _role: SimpleNamespace(
+            view_channel=True,
+            read_message_history=True,
+        ),
+    )
+    assert evaluate_meeting_export(guild_id=1, channel=public).allowed is True
 
 
 def test_thread_permissions_use_resolved_parent_when_thread_parent_is_uncached():

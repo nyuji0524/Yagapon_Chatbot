@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -29,6 +30,24 @@ from bot.knowledge_publish import SENSITIVE_PATTERNS
 from bot.secret_value import read_secret
 
 log = logging.getLogger("yagapon.source_index")
+
+# Explicitly reviewed legacy Knowledge pages that predate ``access_scope``.
+# Unknown/missing declarations remain restricted. Remove entries after the
+# corresponding front matter is migrated in the Knowledge repository.
+LEGACY_GUILD_VISIBLE_KNOWLEDGE_PATHS = frozenset(
+    {
+        "years/27th/people-and-roles/web-development-team.md",
+        "years/27th/people-and-roles/shiohara-leadership-philosophy.md",
+        "years/27th/sources/github/official-website-20261010.md",
+        "years/27th/sources/documents/2026-10-10-web-project-lead-handover.md",
+        "roles/web-project-lead.md",
+        "knowledge/organization/website-team-coordination.md",
+        "knowledge/development/website-development-and-review.md",
+        "knowledge/operations/website-content-updates.md",
+        "knowledge/operations/yagapon-intake-retry.md",
+        "knowledge/systems/official-website.md",
+    }
+)
 
 ALLOWED_EXTENSIONS = {
     ".py", ".dart", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -45,12 +64,16 @@ EXCLUDED_NAMES = {
     ".env", ".env.local", "firebase_options.dart", "google-services.json",
     "GoogleService-Info.plist", "service-account.json", "credentials.json",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "pubspec.lock",
+    # This bundle is seeded once as reviewed ``builtin_reference`` records.
+    # Indexing its JSON representation again as deployed source code creates
+    # duplicate evidence with the wrong authority and citation label.
+    "trusted_knowledge.json",
 }
 MAX_FILE_BYTES = 120_000
 CHUNK_CHARS = 36_000
 SOURCE_UPLOAD_CONCURRENCY_DEFAULT = 2
 SOURCE_UPLOAD_CONCURRENCY_MAX = 8
-SOURCE_POLICY_VERSION = 2
+SOURCE_POLICY_VERSION = 5
 SOURCE_SECRET_PATTERNS = {
     key: value
     for key, value in SENSITIVE_PATTERNS.items()
@@ -65,7 +88,7 @@ DEFAULT_REPOSITORY_MANIFEST = {
             "name": "nyuji0524/Yagapon_Chatbot",
             "ref": "main",
             "include": [
-                "bot/", "api/", "knowledge_index/", "knowledge_sync/",
+                "bot/", "api/", "knowledge_sync/",
                 "knowledge_catalog/", "rag_eval/", "reviewer/", "source_index/",
                 "deploy/", ".github/workflows/", "main.py", "compose.yaml", "Dockerfile",
             ],
@@ -132,6 +155,10 @@ class SourceChunk:
     source_type: str
     authority: str
     status: str
+    access_scope: str = "guild"
+    channel_id: int | None = None
+    start_at: str | None = None
+    end_at: str | None = None
 
     @property
     def source_url(self) -> str:
@@ -312,12 +339,12 @@ def document_policy(
     *,
     default_authority: str | None = None,
     default_status: str | None = None,
-) -> tuple[str, str, int | None] | None:
-    """Resolve authority/status and exclude unapproved curated documents."""
+) -> tuple[str, str, int | None, str, int | None, str | None] | None:
+    """Resolve authority/status/visibility and exclude unapproved documents."""
     authority = default_authority or repository.authority or "repository_context"
     status = default_status or repository.status or "current"
     if not repository.front_matter_statuses:
-        return authority, status, None
+        return authority, status, None, "guild", None, None
     normalized = text.replace("\r\n", "\n")
     if (
         not path.endswith(".md")
@@ -352,7 +379,39 @@ def document_policy(
         and 1 <= festival_value <= 999
         else None
     )
-    return document_authority, document_status, document_festival
+    # Human review of content is not by itself permission to widen the source
+    # audience. Curated documents must explicitly opt into guild visibility or
+    # retain the originating Discord channel. Legacy/missing declarations are
+    # kept administrator-only until a reviewer classifies them.
+    declared_access_scope = payload.get("access_scope")
+    access_scope = str(declared_access_scope or "restricted").strip().lower()
+    if declared_access_scope is None and path in LEGACY_GUILD_VISIBLE_KNOWLEDGE_PATHS:
+        access_scope = "guild"
+    channel_id = None
+    if access_scope == "channel":
+        try:
+            channel_id = int(payload.get("channel_id"))
+        except (TypeError, ValueError):
+            return None
+        if channel_id <= 0:
+            return None
+    elif access_scope != "guild":
+        access_scope = "restricted"
+    raw_date = str(payload.get("date") or "").strip()
+    document_date = None
+    if raw_date:
+        try:
+            document_date = datetime.strptime(raw_date, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            log.warning("Ignoring invalid curated document date: %s:%s", path, raw_date)
+    return (
+        document_authority,
+        document_status,
+        document_festival,
+        access_scope,
+        channel_id,
+        document_date,
+    )
 
 
 def gcs_snapshot(repository: Repository) -> tuple[str, list[tuple[str, bytes]]]:
@@ -401,6 +460,10 @@ def chunks_for(
     festival: int | None = None,
     source_type: str = "source_code",
     infer_missing_festival: bool = True,
+    access_scope: str = "guild",
+    channel_id: int | None = None,
+    start_at: str | None = None,
+    end_at: str | None = None,
 ) -> list[SourceChunk]:
     lines = content.splitlines()
     chunks = []
@@ -442,6 +505,10 @@ def chunks_for(
             source_type=source_type,
             authority=authority,
             status=status,
+            access_scope=access_scope,
+            channel_id=channel_id,
+            start_at=start_at,
+            end_at=end_at,
         ))
         start = end
     return chunks
@@ -487,6 +554,7 @@ def metadata_for(chunk: SourceChunk, guild_id: int, digest: str) -> list[dict]:
         {"key": "guild_id", "string_value": str(guild_id)},
         {"key": "status", "string_value": chunk.status},
         {"key": "authority", "string_value": chunk.authority},
+        {"key": "access_scope", "string_value": chunk.access_scope},
         {"key": "document_key", "string_value": chunk.key},
         {"key": "channel_name", "string_value": f"{chunk.repository}:{chunk.path}"[:500]},
         {"key": "source_url", "string_value": chunk.source_url[:500]},
@@ -499,7 +567,139 @@ def metadata_for(chunk: SourceChunk, guild_id: int, digest: str) -> list[dict]:
     ]
     if chunk.festival is not None:
         metadata.append({"key": "festival", "numeric_value": float(chunk.festival)})
+    if chunk.channel_id is not None:
+        metadata.append({"key": "channel_id", "string_value": str(chunk.channel_id)})
+    if chunk.start_at:
+        metadata.append({"key": "start_at", "string_value": chunk.start_at})
+    if chunk.end_at:
+        metadata.append({"key": "end_at", "string_value": chunk.end_at})
     return metadata
+
+
+def repository_manifest_digest(repository: Repository) -> str:
+    """Fingerprint every manifest setting that can change selected evidence."""
+    payload = {
+        "name": repository.name,
+        "ref": repository.ref,
+        "include": repository.include,
+        "fetch": repository.fetch,
+        "source_type": repository.source_type,
+        "authority": repository.authority,
+        "status": repository.status,
+        "front_matter_statuses": repository.front_matter_statuses,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def metadata_digest_for(chunk: SourceChunk, guild_id: int, digest: str) -> str:
+    """Fingerprint the exact File Search metadata sent for a source chunk."""
+    encoded = json.dumps(
+        metadata_for(chunk, guild_id, digest),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def repository_state_is_current(
+    repository: Repository,
+    previous_repository: dict,
+    existing_entries: list[dict],
+    *,
+    commit: str,
+    authority: str,
+    status: str,
+    remote_names: set[str] | None = None,
+    local_remote_names: dict[str, str] | None = None,
+) -> bool:
+    """Validate a repository checkpoint before taking the no-fetch fast path."""
+    expected_document_count = previous_repository.get("document_count")
+    return (
+        previous_repository.get("commit") == commit
+        and previous_repository.get("authority") == authority
+        and previous_repository.get("status") == status
+        and previous_repository.get("source_type", "source_code")
+        == repository.source_type
+        and previous_repository.get("policy_version") == SOURCE_POLICY_VERSION
+        and previous_repository.get("manifest_digest")
+        == repository_manifest_digest(repository)
+        and isinstance(expected_document_count, int)
+        and expected_document_count > 0
+        and len(existing_entries) == expected_document_count
+        and all(
+            entry.get("commit") == commit
+            and entry.get("policy_version") == SOURCE_POLICY_VERSION
+            and entry.get("schema") == f"source-v{SOURCE_POLICY_VERSION}"
+            and entry.get("source_type", "source_code") == repository.source_type
+            and bool(entry.get("authority"))
+            and bool(entry.get("status"))
+            and "festival" in entry
+            and bool(entry.get("remote_name"))
+            and bool(entry.get("metadata_sha256"))
+            and (
+                remote_names is None
+                or str(entry.get("remote_name")) in remote_names
+            )
+            and (
+                local_remote_names is None
+                or local_remote_names.get(str(entry.get("document_key") or ""))
+                == str(entry.get("remote_name") or "")
+            )
+            for entry in existing_entries
+        )
+    )
+
+
+def state_entry_matches_chunk(
+    previous: dict | None,
+    chunk: SourceChunk,
+    digest: str,
+    *,
+    guild_id: int = 0,
+    remote_names: set[str] | None = None,
+    local_remote_names: dict[str, str] | None = None,
+) -> bool:
+    """Return whether content and all retrieval-policy metadata match remotely."""
+    if not previous:
+        return False
+    return (
+        previous.get("sha256") == digest
+        and previous.get("content_sha256") == chunk.content_sha256
+        and previous.get("commit") == chunk.commit
+        and previous.get("authority") == chunk.authority
+        and previous.get("status") == chunk.status
+        and previous.get("source_type", "source_code") == chunk.source_type
+        and previous.get("festival") == chunk.festival
+        and previous.get("policy_version") == SOURCE_POLICY_VERSION
+        and previous.get("schema") == f"source-v{SOURCE_POLICY_VERSION}"
+        and previous.get("metadata_sha256")
+        == metadata_digest_for(chunk, guild_id, digest)
+        and bool(previous.get("remote_name"))
+        and (
+            remote_names is None
+            or str(previous.get("remote_name")) in remote_names
+        )
+        and (
+            local_remote_names is None
+            or local_remote_names.get(chunk.key)
+            == str(previous.get("remote_name") or "")
+        )
+    )
+
+
+def stale_managed_document_keys(
+    documents: dict[str, dict],
+    live_keys: set[str],
+    configured_repositories: set[str],
+) -> set[str]:
+    """Return stale keys without deleting repositories outside this run."""
+    return {
+        key
+        for key, value in documents.items()
+        if value.get("repository") in configured_repositories and key not in live_keys
+    }
 
 
 async def sync_once(args) -> dict:
@@ -508,6 +708,7 @@ async def sync_once(args) -> dict:
     token = read_secret("YAGAPON_SOURCE_GITHUB_TOKEN")
     client = GitHubSourceClient(token)
     repositories = load_repositories(args.manifest)
+    configured_repositories = {repository.name for repository in repositories}
     config = ConfigManager()
     store_name = os.environ.get("YAGAPON_CORPUS_STORE_NAME") or config.get_corpus(args.guild_id)
     if not store_name:
@@ -518,8 +719,23 @@ async def sync_once(args) -> dict:
     live_keys = set()
     deployed = deployed_refs(args.release)
     indexed = unchanged = removed = skipped = 0
+    remote_documents = (
+        []
+        if corpus is None
+        else await corpus.list_remote_documents(store_name)
+    )
+    remote_names = {item["name"] for item in remote_documents}
+    local_remote_names = (
+        None
+        if corpus is None
+        else {
+            str(item["document_key"]): str(item.get("remote_name") or "")
+            for item in corpus.rag_store.document_references(args.guild_id)
+        }
+    )
 
     for repository in repositories:
+        manifest_digest = repository_manifest_digest(repository)
         archive = None
         if repository.fetch == "gcs":
             commit, archive = await asyncio.to_thread(gcs_snapshot, repository)
@@ -531,13 +747,20 @@ async def sync_once(args) -> dict:
         )
         status = repository.status or ("deployed" if is_deployed else "current")
         previous_repository = state["repositories"].get(repository.name, {})
-        if (
-            previous_repository.get("commit") == commit
-            and previous_repository.get("authority") == authority
-            and previous_repository.get("status") == status
-            and previous_repository.get("source_type", "source_code")
-            == repository.source_type
-            and previous_repository.get("policy_version") == SOURCE_POLICY_VERSION
+        existing_entries = [
+            {"document_key": key, **value}
+            for key, value in state["documents"].items()
+            if value.get("repository") == repository.name
+        ]
+        if repository_state_is_current(
+            repository,
+            previous_repository,
+            existing_entries,
+            commit=commit,
+            authority=authority,
+            status=status,
+            remote_names=remote_names,
+            local_remote_names=local_remote_names,
         ):
             existing = [
                 key
@@ -563,7 +786,8 @@ async def sync_once(args) -> dict:
                 commit,
                 repository.include,
             )
-        pending: list[tuple[SourceChunk, str, dict | None]] = []
+        pending: list[tuple[SourceChunk, str, dict | None, dict | None]] = []
+        repository_live_keys: set[str] = set()
         for path, raw in archive:
             if not safe_source_path(path, repository.include, len(raw)):
                 continue
@@ -585,7 +809,14 @@ async def sync_once(args) -> dict:
             if policy is None:
                 skipped += 1
                 continue
-            document_authority, document_status, document_festival = policy
+            (
+                document_authority,
+                document_status,
+                document_festival,
+                document_access_scope,
+                document_channel_id,
+                document_date,
+            ) = policy
             for chunk in chunks_for(
                 repository.name,
                 commit,
@@ -596,30 +827,89 @@ async def sync_once(args) -> dict:
                 festival=document_festival,
                 source_type=repository.source_type,
                 infer_missing_festival=repository.source_type == "source_code",
+                access_scope=document_access_scope,
+                channel_id=document_channel_id,
+                start_at=(f"{document_date}T00:00:00+09:00" if document_date else None),
+                end_at=(f"{document_date}T23:59:59+09:00" if document_date else None),
             ):
                 live_keys.add(chunk.key)
+                repository_live_keys.add(chunk.key)
                 digest = hashlib.sha256(chunk.text.encode()).hexdigest()
                 previous = state["documents"].get(chunk.key)
-                if (
-                    previous
-                    and previous.get("content_sha256") == chunk.content_sha256
-                    and previous.get("authority") == chunk.authority
-                    and previous.get("status") == chunk.status
-                    and previous.get("source_type", "source_code") == chunk.source_type
+                if state_entry_matches_chunk(
+                    previous,
+                    chunk,
+                    digest,
+                    guild_id=args.guild_id,
+                    remote_names=remote_names if corpus is not None else None,
+                    local_remote_names=local_remote_names,
                 ):
                     unchanged += 1
                     continue
                 if args.dry_run:
                     indexed += 1
                     continue
-                pending.append((chunk, digest, previous))
+                assert corpus is not None
+                pending.append(
+                    (
+                        chunk,
+                        digest,
+                        previous,
+                        corpus.rag_store.get_document(chunk.key),
+                    )
+                )
+        # An empty archive, a wrong include rule, or a policy/secret-scanner
+        # regression must never be interpreted as a valid zero-document
+        # generation.  Retain the last complete checkpoint and all of its
+        # remotes until a non-empty approved generation can be built.
+        if not repository_live_keys:
+            raise RuntimeError(
+                f"Source generation for {repository.name} produced no approved documents"
+            )
+
+        successful_uploads = []
+        previous_names: list[str] = []
+
+        async def rollback_generation() -> None:
+            """Remove this attempt and atomically restore its prior mirror rows."""
+            assert corpus is not None
+            new_names = list(
+                dict.fromkeys(result[4] for result in successful_uploads if result[4])
+            )
+            if new_names:
+                try:
+                    deleted = await corpus._delete_documents(new_names)
+                    if deleted != len(new_names):
+                        log.error(
+                            "Remote rollback left %d source documents for %s; "
+                            "the next reconciliation will remove them",
+                            len(new_names) - deleted,
+                            repository.name,
+                        )
+                except Exception:
+                    log.exception(
+                        "Remote rollback failed for source generation %s; "
+                        "the next reconciliation will remove the orphan",
+                        repository.name,
+                    )
+            # _delete_documents removes successful new mirror rows. Replace the
+            # complete affected key set in one transaction, including deletion
+            # of keys that had no pre-upload row.
+            await asyncio.to_thread(
+                corpus.rag_store.restore_document_snapshots,
+                [item[0].key for item in pending],
+                [item[3] for item in pending if item[3] is not None],
+            )
+
         if pending:
             assert corpus is not None
             upload_semaphore = asyncio.Semaphore(source_upload_concurrency())
 
-            async def upload(item: tuple[SourceChunk, str, dict | None]):
+            async def upload(
+                item: tuple[SourceChunk, str, dict | None, dict | None]
+            ):
                 async with upload_semaphore:
-                    chunk, digest, previous = item
+                    chunk, digest, previous, old_snapshot = item
                     remote_name = await corpus._upload_document(
                         store_name,
                         f"Source | {repository.name} | {chunk.path}:{chunk.start_line}"[:512],
@@ -630,35 +920,43 @@ async def sync_once(args) -> dict:
                     raise RuntimeError(
                         f"Failed to index {repository.name}:{chunk.path}:{chunk.start_line}"
                     )
-                return chunk, digest, previous, remote_name
+                return chunk, digest, previous, old_snapshot, remote_name
 
             results = await asyncio.gather(*(upload(item) for item in pending), return_exceptions=True)
             failures = [result for result in results if isinstance(result, BaseException)]
-            successes = [result for result in results if not isinstance(result, BaseException)]
+            successful_uploads = [
+                result for result in results if not isinstance(result, BaseException)
+            ]
             if failures:
-                # Preserve the old complete generation and remove all newly
-                # uploaded documents from this failed repository generation.
-                await corpus._delete_documents([result[3] for result in successes])
+                await rollback_generation()
                 raise RuntimeError(
                     f"Source generation failed for {repository.name}: {failures[0]}"
                 ) from failures[0]
-            previous_names = [
+            previous_names = list(dict.fromkeys(
                 result[2]["remote_name"]
-                for result in successes
+                for result in successful_uploads
                 if result[2] and result[2].get("remote_name")
-            ]
-            if previous_names:
-                await corpus._delete_documents(previous_names)
-            for chunk, digest, _previous, remote_name in successes:
+            ))
+            for chunk, digest, _previous, _old_snapshot, remote_name in successful_uploads:
                 state["documents"][chunk.key] = {
+                    "document_key": chunk.key,
                     "sha256": digest,
                     "content_sha256": chunk.content_sha256,
                     "remote_name": remote_name,
                     "repository": repository.name,
                     "path": chunk.path,
+                    "commit": chunk.commit,
+                    "festival": chunk.festival,
                     "authority": chunk.authority,
                     "status": chunk.status,
                     "source_type": chunk.source_type,
+                    "policy_version": SOURCE_POLICY_VERSION,
+                    "schema": f"source-v{SOURCE_POLICY_VERSION}",
+                    "metadata_sha256": metadata_digest_for(
+                        chunk,
+                        args.guild_id,
+                        digest,
+                    ),
                 }
                 indexed += 1
         state["repositories"][repository.name] = {
@@ -667,15 +965,77 @@ async def sync_once(args) -> dict:
             "status": status,
             "source_type": repository.source_type,
             "policy_version": SOURCE_POLICY_VERSION,
+            "manifest_digest": manifest_digest,
+            "document_count": len(repository_live_keys),
+            "generation_id": hashlib.sha256(
+                f"{commit}:{SOURCE_POLICY_VERSION}:{manifest_digest}".encode()
+            ).hexdigest(),
         }
+        # Checkpoint every complete repository. A later repository failure
+        # must not orphan uploads from repositories that already succeeded.
+        if not args.dry_run:
+            try:
+                save_state(args.state, state)
+            except Exception:
+                if successful_uploads:
+                    await rollback_generation()
+                raise
+            # The durable checkpoint and SQLite mirror now both identify the
+            # complete new generation.  Old remotes are cleanup, not part of
+            # the commit: a crash or partial delete is repaired by the next
+            # run's orphan reconciliation without rolling back the new index.
+            if previous_names:
+                assert corpus is not None
+                deleted = await corpus._delete_documents(previous_names)
+                if deleted != len(previous_names):
+                    raise RuntimeError(
+                        f"Could not remove all previous documents for {repository.name}; "
+                        "the new generation is checkpointed and cleanup will retry"
+                    )
 
-    for key in set(state["documents"]) - live_keys:
-        previous = state["documents"].pop(key)
+    stale_managed_keys = stale_managed_document_keys(
+        state["documents"],
+        live_keys,
+        configured_repositories,
+    )
+    for key in stale_managed_keys:
+        previous = state["documents"][key]
         if not args.dry_run and previous.get("remote_name"):
             assert corpus is not None
-            await corpus._delete_documents([previous["remote_name"]])
+            deleted = await corpus._delete_documents([previous["remote_name"]])
+            if deleted != 1:
+                raise RuntimeError(
+                    f"Could not remove stale source document: {previous['remote_name']}"
+                )
+        state["documents"].pop(key)
         removed += 1
     if not args.dry_run:
+        # Remove only source-index documents for repositories owned by this
+        # manifest. Discord, meeting and builtin records are never touched.
+        assert corpus is not None
+        expected_names = {
+            key: value.get("remote_name")
+            for key, value in state["documents"].items()
+            if value.get("repository") in configured_repositories
+        }
+        refreshed = await corpus.list_remote_documents(store_name)
+        orphan_names = []
+        for item in refreshed:
+            metadata = item["metadata"]
+            if metadata.get("repository") not in configured_repositories:
+                continue
+            if metadata.get("source_type") not in {
+                "source_code",
+                "knowledge_repository",
+            }:
+                continue
+            document_key = str(metadata.get("document_key") or "")
+            if expected_names.get(document_key) != item["name"]:
+                orphan_names.append(item["name"])
+        if orphan_names:
+            deleted = await corpus._delete_documents(orphan_names)
+            if deleted != len(orphan_names):
+                raise RuntimeError("Could not reconcile orphaned source documents")
         save_state(args.state, state)
     return {"indexed": indexed, "unchanged": unchanged, "removed": removed, "skipped": skipped}
 

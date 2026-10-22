@@ -25,6 +25,28 @@ async def speak_in_vc(bot, message: discord.Message, text: str):
         return  # VCにいなければスキップ
 
     vc_channel = member.voice.channel
+    # A text answer may only be spoken into the same VoiceChannel's built-in
+    # chat. Never relay answers from a separate/private text channel into a VC.
+    if getattr(getattr(message, "channel", None), "id", None) != getattr(
+        vc_channel, "id", None
+    ):
+        log.info("Skipping text-answer TTS because text and voice audiences differ")
+        return
+
+    # /join owns its VoiceClient for recording and finalization.  Reuse the
+    # session's serialized TTS path instead of moving or disconnecting that
+    # managed connection from this short-lived text-answer helper.
+    from bot.voice import get_session
+
+    session = get_session(message.guild.id)
+    if session and session.voice_client and session.voice_client.is_connected():
+        if getattr(session.channel, "id", None) != getattr(vc_channel, "id", None):
+            log.info(
+                "Skipping text-answer TTS because the managed voice session is in another channel"
+            )
+            return
+        await session.speak(text)
+        return
 
     try:
         import edge_tts
@@ -34,6 +56,7 @@ async def speak_in_vc(bot, message: discord.Message, text: str):
 
     tmp_path = None
     voice_client = None
+    connected_here = False
 
     try:
         # 音声生成
@@ -43,17 +66,35 @@ async def speak_in_vc(bot, message: discord.Message, text: str):
         tmp.close()
         await communicate.save(tmp_path)
 
+        # A /join can start while edge-tts is generating audio.  Check again
+        # before touching a VoiceClient so that the newly managed connection
+        # remains owned by VoiceSession.
+        session = get_session(message.guild.id)
+        if session and session.voice_client and session.voice_client.is_connected():
+            if getattr(session.channel, "id", None) == getattr(vc_channel, "id", None):
+                await session.speak(text)
+            else:
+                log.info(
+                    "Skipping text-answer TTS because the managed voice session is in another channel"
+                )
+            return
+
         # VC接続
         if bot.voice_clients:
             for vc in bot.voice_clients:
                 if vc.guild == message.guild:
                     voice_client = vc
                     if vc.channel != vc_channel:
-                        await vc.move_to(vc_channel)
+                        # This helper does not own existing connections. Moving
+                        # one can interrupt voiceprint capture or another voice
+                        # workflow, so skip TTS instead.
+                        log.info("Skipping text-answer TTS because an existing voice client is busy")
+                        return
                     break
 
         if voice_client is None:
             voice_client = await vc_channel.connect()
+            connected_here = True
 
         # 再生
         if voice_client.is_playing():
@@ -66,12 +107,14 @@ async def speak_in_vc(bot, message: discord.Message, text: str):
         while voice_client.is_playing():
             await asyncio.sleep(0.5)
 
-        # 切断
-        await voice_client.disconnect()
+        # Only tear down the connection created by this helper.  A borrowed
+        # connection must remain available to its owning workflow.
+        if connected_here:
+            await voice_client.disconnect()
 
     except Exception as e:
         log.error(f"TTS error: {e}")
-        if voice_client and voice_client.is_connected():
+        if connected_here and voice_client and voice_client.is_connected():
             await voice_client.disconnect()
     finally:
         if tmp_path and os.path.exists(tmp_path):

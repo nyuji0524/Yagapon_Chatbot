@@ -6,6 +6,7 @@
 import discord
 
 from bot.authorization import require_registered_member
+from bot.discord_visibility import has_guildwide_rag_access, readable_channel_ids
 
 
 def register(bot):
@@ -14,7 +15,7 @@ def register(bot):
     async def meigen_cmd(ctx: discord.ApplicationContext, user: discord.Member = None):
         if not await require_registered_member(ctx, bot.config):
             return
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         corpus = bot.config.get_corpus(ctx.guild_id)
         if not corpus:
@@ -47,6 +48,15 @@ def register(bot):
             members_info=bot._build_members_info(ctx.guild_id),
             glossary_text=bot.config.get_glossary_text(ctx.guild_id),
             glossary=bot.config.get_glossary(ctx.guild_id),
+            allowed_channel_ids=readable_channel_ids(
+                ctx.guild,
+                ctx.author,
+                current_channel=ctx.channel,
+            ),
+            allow_unrestricted_conversations=has_guildwide_rag_access(
+                ctx.guild,
+                ctx.author,
+            ),
         )
 
         embed = discord.Embed(
@@ -57,4 +67,4 @@ def register(bot):
         if user:
             embed.set_footer(text=f"{user.display_name}の名言")
 
-        await ctx.followup.send(embed=embed, silent=True)
+        await ctx.followup.send(embed=embed, ephemeral=True)

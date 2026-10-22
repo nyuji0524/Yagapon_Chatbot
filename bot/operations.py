@@ -146,7 +146,9 @@ class OperationalStore:
 
     def update_job(self, job_id: str, status: str, progress: dict) -> None:
         now = _now()
-        finished_at = now if status in {"completed", "failed", "cancelled"} else None
+        finished_at = (
+            now if status in {"completed", "failed", "cancelled", "interrupted"} else None
+        )
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
@@ -158,6 +160,41 @@ class OperationalStore:
                 (status, json.dumps(progress, ensure_ascii=False), now, finished_at, job_id),
             )
 
+    def interrupt_running_jobs(
+        self,
+        *,
+        component: str | None = None,
+        reason: str = "process_restart",
+    ) -> list[str]:
+        """Mark jobs left running by an earlier process as interrupted."""
+        now = _now()
+        query = "SELECT id, progress_json FROM operational_jobs WHERE status='running'"
+        parameters: tuple[str, ...] = ()
+        if component is not None:
+            query += " AND component=?"
+            parameters = (component,)
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+            for row in rows:
+                progress = json.loads(row["progress_json"])
+                progress.update(
+                    {
+                        "status": "interrupted",
+                        "finished_at": now,
+                        "interrupted_reason": reason,
+                    }
+                )
+                connection.execute(
+                    """
+                    UPDATE operational_jobs
+                    SET status='interrupted', progress_json=?, updated_at=?, finished_at=?
+                    WHERE id=?
+                    """,
+                    (json.dumps(progress, ensure_ascii=False), now, now, row["id"]),
+                )
+        return [row["id"] for row in rows]
+
     def get_job(self, job_id: str) -> dict | None:
         with self._lock, self._connect() as connection:
             row = connection.execute(
@@ -165,8 +202,9 @@ class OperationalStore:
             ).fetchone()
         if row is None:
             return None
-        result = dict(row)
-        result.update(json.loads(result.pop("progress_json")))
+        durable = dict(row)
+        progress = json.loads(durable.pop("progress_json"))
+        result = {**progress, **durable}
         result["job_id"] = result.pop("id")
         return result
 

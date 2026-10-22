@@ -130,27 +130,6 @@ services:
     healthcheck:
       disable: true
 
-  knowledge-index-watch:
-    image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
-    build:
-      context: .
-    profiles: [knowledge]
-    restart: unless-stopped
-    env_file:
-      - ${YAGAPON_ENV_FILE:-.env}
-    environment:
-      YAGAPON_CONFIG_PATH: /data/server_config.json
-      YAGAPON_RAG_DB_PATH: /data/rag.sqlite3
-      YAGAPON_KNOWLEDGE_ROOT: /knowledge
-      YAGAPON_KNOWLEDGE_INDEX_STATE: /data/knowledge-index-state.json
-      GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
-    volumes:
-      - ${YAGAPON_DATA_PATH:-./data}:/data
-      - ${YAGAPON_KNOWLEDGE_REPO_PATH:-../YagamiFes-IT-Knowledge}:/knowledge:ro
-    command: ["python", "-m", "knowledge_index", "--watch-interval", "900"]
-    healthcheck:
-      disable: true
-
   support-firestore:
     build:
       context: ./firebase-emulator

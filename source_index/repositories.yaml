@@ -1,7 +1,7 @@
 repositories:
   - name: nyuji0524/Yagapon_Chatbot
     ref: main
-    include: [bot/, api/, knowledge_index/, knowledge_sync/, knowledge_catalog/, rag_eval/, reviewer/, source_index/, deploy/, .github/workflows/, main.py, compose.yaml, Dockerfile]
+    include: [bot/, api/, knowledge_sync/, knowledge_catalog/, rag_eval/, reviewer/, source_index/, deploy/, .github/workflows/, main.py, compose.yaml, Dockerfile]
   - name: YagamiFes-IT/Yaga_Support
     ref: main
     include: [lib/, test/, docs/current_spec/, pubspec.yaml, firebase.json]

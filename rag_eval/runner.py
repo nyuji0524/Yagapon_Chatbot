@@ -81,7 +81,9 @@ def evaluate_answer(case: EvalCase, response: dict, judgment: dict | None = None
         value for value in case.forbidden_exact if value.casefold() in folded_answer
     )
     if matched_forbidden:
-        failures.append("forbidden:" + ",".join(matched_forbidden))
+        # Production reports are published by GitHub Actions in a public
+        # repository. Never copy matched answer fragments into a failure label.
+        failures.append("forbidden")
 
     routing_checks = 1 + int(case.expected_festival is not None)
     routing_passed = 0
@@ -144,16 +146,13 @@ def evaluate_answer(case: EvalCase, response: dict, judgment: dict | None = None
         "performance": performance_score,
         "semantic": semantic_score,
     }
+    # This is the complete production-report contract. Answers, citations,
+    # query IDs, model-authored judge prose and per-request metadata remain
+    # inside the production container and must never reach Actions output or
+    # artifacts.
     return {
         "id": case.id,
         "passed": not failures,
-        "failures": failures,
-        "source_count": len(sources),
-        "festival": response.get("festival"),
-        "no_answer": bool(response.get("no_answer")),
-        "query_id": response.get("query_id"),
-        "category": case.category,
-        "latency_ms": latency_ms,
+        "failures": list(dict.fromkeys(failures)),
         "scores": scores,
-        "judgment": judgment,
     }

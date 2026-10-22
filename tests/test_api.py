@@ -1,10 +1,12 @@
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from api.server import create_app
+from api.server import create_app, shutdown_backfill_tasks
 from bot.corpus import BackfillResult, RagAnswer
 from bot.rag_judge import QualityJudgment
 from bot.recording_replay import RecordingArtifact, ReplayJob
@@ -69,6 +71,17 @@ def make_client():
         rag_store=SimpleNamespace(
             summary=Mock(return_value={"queries": 0}),
             recent_queries=Mock(return_value=[]),
+        ),
+        audit_remote_mirror=AsyncMock(
+            return_value={
+                "local_documents": 2,
+                "remote_documents": 2,
+                "local_only": 0,
+                "remote_only": 0,
+                "remote_duplicates": 0,
+                "remote_name_mismatches": 0,
+                "examples": {},
+            }
         ),
         start_backfill=Mock(return_value=True),
         finish_backfill=Mock(),
@@ -138,6 +151,7 @@ def test_ask_requires_token_and_passes_guild_context(monkeypatch):
         members_info="メンバー情報",
         glossary_text="用語集",
         glossary={},
+        allow_unrestricted_conversations=True,
     )
     assert response.json()["query_id"] == "query-1"
     assert response.json()["sources"] == ["source"]
@@ -201,6 +215,68 @@ def test_backfill_exposes_job_progress(monkeypatch):
     bot.corpus.finish_backfill.assert_called_once_with(1)
 
 
+def test_app_startup_reconciles_stale_backfill_jobs(tmp_path):
+    from bot.operations import OperationalStore
+    from knowledge_catalog.store import CatalogStore
+
+    _, bot = make_client()
+    bot.operations = OperationalStore(tmp_path / "operations.sqlite3")
+    bot.catalog = CatalogStore(tmp_path / "catalog.json")
+    stale_job_id = bot.operations.start_job(
+        "backfill",
+        guild_id=1,
+        progress={"status": "running", "finished_at": None},
+    )
+    unrelated_job_id = bot.operations.start_job(
+        "voice",
+        guild_id=1,
+        progress={"status": "running"},
+    )
+
+    with TestClient(create_app(bot)):
+        assert bot.operations.get_job(stale_job_id)["status"] == "interrupted"
+        assert bot.operations.get_job(unrelated_job_id)["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_api_shutdown_cancels_tasks_releases_guards_and_marks_jobs():
+    _, bot = make_client()
+    app = create_app(bot)
+    job_id = "still-running"
+    app.state.backfill_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "guild_id": 1,
+        "finished_at": None,
+    }
+    task = asyncio.create_task(asyncio.sleep(60), name="api-backfill-test")
+    app.state.backfill_tasks.add(task)
+
+    await shutdown_backfill_tasks(app)
+
+    assert task.cancelled()
+    assert app.state.accepting_backfills is False
+    assert app.state.backfill_tasks == set()
+    assert app.state.backfill_jobs[job_id]["status"] == "cancelled"
+    assert app.state.backfill_jobs[job_id]["finished_at"] is not None
+    bot.corpus.finish_backfill.assert_called_once_with(1)
+
+
+def test_backfill_rejects_new_work_after_shutdown_begins(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+    client.app.state.accepting_backfills = False
+
+    response = client.post(
+        "/backfill",
+        headers={"Authorization": "Bearer secret"},
+        json={"guild_id": 1},
+    )
+
+    assert response.status_code == 503
+    bot.corpus.start_backfill.assert_not_called()
+
+
 def test_catalog_candidate_can_be_approved_for_glossary(monkeypatch, tmp_path):
     from knowledge_catalog.store import CatalogStore
 
@@ -248,6 +324,24 @@ def test_rag_quality_dashboard_api_requires_token(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"queries": 0}
     bot.corpus.rag_store.summary.assert_called_once_with(1)
+
+
+def test_rag_mirror_audit_uses_configured_store(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+
+    response = client.get(
+        "/admin/rag/mirror?guild_id=1",
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["configured"] is True
+    assert response.json()["local_only"] == 0
+    bot.corpus.audit_remote_mirror.assert_awaited_once_with(
+        "fileSearchStores/test",
+        1,
+    )
 
 
 def test_rag_dashboard_html_contains_no_embedded_token():

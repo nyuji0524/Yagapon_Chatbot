@@ -12,8 +12,13 @@ import discord
 
 from bot.ai_models import fast_model, generation_config
 from bot.authorization import require_registered_member
+from bot.discord_visibility import (
+    has_guildwide_rag_access,
+    resolve_minutes_notification_channel,
+)
 from bot.gdrive import load_meeting_material
 from bot.knowledge_intake import parse_drive_file_url
+from bot.recording import RecordingLimitExceeded
 from bot.voice import VoiceMode, get_session, join_voice, leave_voice
 
 log = logging.getLogger("yagapon.commands.voice")
@@ -50,8 +55,7 @@ def register(bot):
             await ctx.respond("先にボイスチャンネルに入ってほしいぽん！", ephemeral=True)
             return
 
-        # VC参加と録音開始は、資料URLの有無にかかわらず参加者全体へ知らせる。
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         material = None
         if document_url.strip():
@@ -80,10 +84,16 @@ def register(bot):
         }
 
         material_line = f"\n📎 会議資料: [{material.name}]({material.url})" if material else ""
-        await ctx.followup.send(
-            f"🔊 {vc.name} に参加したぽん！\n{mode_desc[voice_mode]}{material_line}",
-            silent=True,
-        )
+        joined_message = f"🔊 {vc.name} に参加したぽん！\n{mode_desc[voice_mode]}{material_line}"
+        # Announce only in the originating VC chat. Never echo a private VC
+        # name or linked Drive URL into the arbitrary slash-command channel.
+        destination = resolve_minutes_notification_channel(None, ctx.guild, vc)
+        if destination:
+            try:
+                await destination.send(joined_message, silent=True)
+            except Exception:
+                log.exception("Could not post voice join notice guild=%s", ctx.guild_id)
+        await ctx.followup.send(joined_message, ephemeral=True)
 
         if voice_mode == VoiceMode.CHAT:
             await session.speak("こんにちはぽん！おしゃべりやがぽんだぽん！何でも話しかけてねぽん！")
@@ -92,50 +102,117 @@ def register(bot):
     async def leave_cmd(ctx: discord.ApplicationContext):
         if not await require_registered_member(ctx, bot.config):
             return
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         # セッション情報を退出前に取得
         session = get_session(ctx.guild_id)
         if not session:
-            await ctx.followup.send("ボイスチャンネルには参加していないぽん。", silent=True)
+            await ctx.followup.send(
+                "ボイスチャンネルには参加していないぽん。",
+                ephemeral=True,
+            )
+            return
+        member = ctx.guild.get_member(ctx.author.id) or ctx.author
+        member_voice = getattr(getattr(member, "voice", None), "channel", None)
+        same_voice_channel = getattr(member_voice, "id", None) == getattr(session.channel, "id", None)
+        if not same_voice_channel and not has_guildwide_rag_access(ctx.guild, member):
+            await ctx.followup.send(
+                "この録音を終了できるのは、録音中のボイスチャンネルの参加者かサーバー管理者だけだぽん。",
+                ephemeral=True,
+            )
             return
         if not session.claim_delivery():
-            await ctx.followup.send("退出と議事録作成はすでに進行中だぽん。完了通知を待ってねぽん！", silent=True)
+            await ctx.followup.send(
+                "退出と議事録作成はすでに進行中だぽん。完了通知を待ってねぽん！",
+                ephemeral=True,
+            )
             return
         channel_name = session.channel.name if session else "unknown"
-        category_name = (
-            getattr(getattr(session.channel, "category", None), "name", "")
-            if session
-            else ""
-        )
+        category_name = getattr(getattr(session.channel, "category", None), "name", "") if session else ""
         has_audio = bool(session and session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING))
 
         if has_audio:
-            await ctx.followup.send("🎙️ 音声を文字起こし中だぽん...少し待ってねぽん ⏳", silent=True)
+            await ctx.followup.send(
+                "🎙️ 音声を文字起こし中だぽん...少し待ってねぽん ⏳",
+                ephemeral=True,
+            )
 
         try:
             minutes = await leave_voice(ctx.guild_id)
         except Exception as exc:
             if session.recording_sink:
-                session.recording_sink.mark("leave_failed", error=type(exc).__name__)
+                session.recording_sink.mark(
+                    "capture_interrupted"
+                    if getattr(session, "_capture_interrupted", False)
+                    else ("recording_truncated" if isinstance(exc, RecordingLimitExceeded) else "leave_failed"),
+                    error=type(exc).__name__,
+                )
             log.exception("Voice leave failed for guild %s", ctx.guild_id)
-            destination = ctx.channel.send if has_audio else ctx.followup.send
-            await destination(
-                "退出処理中にエラーが発生したぽん。録音データはサーバーに保管してあるので、管理者が復旧できるぽん。",
-                silent=True,
+            message = (
+                "録音容量の上限に達したため、不完全な議事録は公開しなかったぽん。"
+                "録音データを保管したので管理者に確認してもらってねぽん。"
+                if isinstance(exc, RecordingLimitExceeded)
+                else "退出処理中にエラーが発生したぽん。録音データはサーバーに保管してあるので、管理者が復旧できるぽん。"
+            )
+            await ctx.followup.send(
+                message,
+                ephemeral=True,
             )
             return
+
+        # Delivery now spans Drive, Knowledge, File Search and Discord. Keep a
+        # recoverable marker until every durable destination has succeeded so
+        # an exception in any later step cannot strand a minutes_generated job.
+        if session.recording_sink:
+            session.recording_sink.mark(
+                "manual_delivery_pending",
+                transcript_path=str(session.transcript_path or ""),
+            )
 
         # 逐語文字起こしは議事録とは別のGoogle Docとして保存する。
         from bot.gdrive import upload_minutes, upload_transcript
 
-        transcript_url = await upload_transcript(
-            bot.config,
-            ctx.guild_id,
-            session.transcript_text,
-            channel_name,
-            meeting_at=session.started_at,
+        export_decision = session.external_export_decision()
+        session.checkpoint_delivery_progress(
+            external_export_expected=export_decision.allowed,
+            external_export_reason=export_decision.reason,
         )
+        if not export_decision.allowed:
+            log.info(
+                "External meeting export skipped guild=%s channel=%s reason=%s",
+                ctx.guild_id,
+                session.channel.id,
+                export_decision.reason,
+            )
+        transcript_url = (
+            await upload_transcript(
+                bot.config,
+                ctx.guild_id,
+                session.transcript_text,
+                channel_name,
+                meeting_at=session.started_at,
+                session_id=session.session_id,
+            )
+            if export_decision.allowed
+            else None
+        )
+        session.checkpoint_delivery_progress(
+            transcript_url=transcript_url or "",
+            transcript_path=str(session.transcript_path or ""),
+        )
+
+        if not minutes and has_audio:
+            if session.recording_sink:
+                session.recording_sink.mark(
+                    "minutes_generation_failed",
+                    error="EmptyMinutes",
+                    transcript_path=str(session.transcript_path or ""),
+                )
+            await ctx.followup.send(
+                "議事録を生成できなかったぽん。文字起こしと録音は復旧用に保管してあるので、管理者が再試行できるぽん。",
+                ephemeral=True,
+            )
+            return
 
         if not minutes:
             knowledge_url = await session.publish_knowledge()
@@ -144,6 +221,8 @@ def register(bot):
             await index_bot_meeting(
                 bot,
                 guild_id=ctx.guild_id,
+                channel_id=session.channel.id,
+                parent_channel_id=getattr(session.channel, "parent_id", None),
                 session_id=session.session_id,
                 channel_name=channel_name,
                 category_name=category_name,
@@ -157,16 +236,26 @@ def register(bot):
                 message += f"\n📜 [文字起こしをGoogle Docsで見る]({transcript_url})"
             if knowledge_url:
                 message += f"\n🗂️ [KnowledgeのDraft PR]({knowledge_url})"
-            await ctx.followup.send(message, silent=True)
+            await ctx.followup.send(message, ephemeral=True)
             return
 
         # 議事録と逐語文字起こしをそれぞれ保存
-        drive_url = await upload_minutes(
-            bot.config,
-            ctx.guild_id,
-            minutes,
-            channel_name,
-            meeting_at=session.started_at,
+        drive_url = (
+            await upload_minutes(
+                bot.config,
+                ctx.guild_id,
+                minutes,
+                channel_name,
+                meeting_at=session.started_at,
+                session_id=session.session_id,
+            )
+            if export_decision.allowed
+            else None
+        )
+        session.checkpoint_delivery_progress(
+            transcript_url=transcript_url or "",
+            minutes_url=drive_url or "",
+            transcript_path=str(session.transcript_path or ""),
         )
 
         # Geminiで要約を生成
@@ -177,6 +266,8 @@ def register(bot):
         await index_bot_meeting(
             bot,
             guild_id=ctx.guild_id,
+            channel_id=session.channel.id,
+            parent_channel_id=getattr(session.channel, "parent_id", None),
             session_id=session.session_id,
             channel_name=channel_name,
             category_name=category_name,
@@ -232,8 +323,28 @@ def register(bot):
         send_kwargs = {"embed": embed, "silent": True}
         if files:
             send_kwargs["files"] = files
-        await ctx.channel.send(**send_kwargs)
+        # Durable outputs have completed. Mark first so an optional Discord
+        # notification outage cannot trigger duplicate Drive/Knowledge output.
         session.mark_delivered(drive_url=drive_url, transcript_url=transcript_url)
+        destination = resolve_minutes_notification_channel(
+            bot.config,
+            ctx.guild,
+            session.channel,
+        )
+        if destination:
+            try:
+                await destination.send(**send_kwargs)
+            except Exception:
+                log.exception(
+                    "Minutes notification failed after durable delivery guild=%s",
+                    ctx.guild_id,
+                )
+                await ctx.followup.send(
+                    "保存は完了したけれど、通知チャンネルへの投稿に失敗したぽん。",
+                    ephemeral=True,
+                )
+        else:
+            await ctx.followup.send(**{**send_kwargs, "ephemeral": True, "silent": False})
 
 
 async def _summarize_minutes(minutes: str) -> str:

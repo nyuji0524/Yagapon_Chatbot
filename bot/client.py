@@ -13,7 +13,6 @@ from bot.operations import OperationalStore
 from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
 from bot.support_directory import SupportDirectory
-from bot.voice import VoiceMode
 from knowledge_catalog.store import CatalogStore, normalize_label
 
 log = logging.getLogger("yagapon.client")
@@ -59,9 +58,7 @@ def _mentioned_bot_role_ids(message: discord.Message, bot_user) -> tuple[int, ..
         )
         if str(name).strip()
     }
-    assigned_role_ids = {
-        getattr(role, "id", None) for role in getattr(bot_member, "roles", ())
-    }
+    assigned_role_ids = {getattr(role, "id", None) for role in getattr(bot_member, "roles", ())}
     return tuple(
         role.id
         for role in getattr(message, "role_mentions", ())
@@ -72,10 +69,37 @@ def _mentioned_bot_role_ids(message: discord.Message, bot_user) -> tuple[int, ..
 
 def _is_rag_invocation(message: discord.Message, bot_user) -> bool:
     """Whether a Discord message explicitly addresses this bot."""
-    return bool(
-        bot_user
-        and (bot_user.mentioned_in(message) or _mentioned_bot_role_ids(message, bot_user))
+    return bool(bot_user and (bot_user.mentioned_in(message) or _mentioned_bot_role_ids(message, bot_user)))
+
+
+def _is_voice_reference_channel(message_channel, voice_channel) -> bool:
+    """Accept only the active VC's own chat or a thread explicitly under it.
+
+    Channel names and categories are not identities: unrelated text channels
+    commonly share both.  Collecting those messages as meeting material can
+    silently contaminate minutes and lets bystanders inject instructions.
+    """
+    voice_channel_id = getattr(voice_channel, "id", None)
+    if voice_channel_id is None:
+        return False
+    return (
+        getattr(message_channel, "id", None) == voice_channel_id
+        or getattr(message_channel, "parent_id", None) == voice_channel_id
     )
+
+
+def _is_ignored_with_parent(config, guild_id: int, channel) -> bool:
+    """Apply /ignore to a channel and every thread below it."""
+    identifiers = {
+        value
+        for value in (
+            getattr(channel, "id", None),
+            getattr(channel, "parent_id", None),
+            getattr(getattr(channel, "parent", None), "id", None),
+        )
+        if value is not None
+    }
+    return any(config.is_ignored(guild_id, int(channel_id)) for channel_id in identifiers)
 
 
 def _guild_yagapon_emojis(guild) -> dict[str, str]:
@@ -182,6 +206,65 @@ class YagaPon(discord.Bot):
             )
         log.info(f"おしゃべりやがぽん起動: {self.user}")
 
+    async def on_application_command_error(self, ctx, error):
+        """Always acknowledge failed slash commands without leaking internals."""
+        root_error = getattr(error, "original", error)
+        command = getattr(ctx, "command", None)
+        command_name = getattr(command, "qualified_name", None) or getattr(command, "name", None) or "unknown"
+        guild_id = getattr(ctx, "guild_id", None)
+        if guild_id is None:
+            guild_id = getattr(getattr(ctx, "guild", None), "id", None)
+        interaction = getattr(ctx, "interaction", None)
+        response = getattr(interaction, "response", None)
+        responded = bool(response and response.is_done())
+
+        log.error(
+            "Application command failed command=%s guild=%s error_type=%s",
+            command_name,
+            guild_id,
+            type(root_error).__name__,
+            exc_info=(
+                type(root_error),
+                root_error,
+                root_error.__traceback__,
+            ),
+        )
+        try:
+            self.operations.record_event(
+                "discord_command",
+                "application_command",
+                "failed",
+                guild_id=guild_id,
+                item_key=command_name,
+                details={
+                    "error_type": type(root_error).__name__,
+                    "responded_before_error": responded,
+                },
+            )
+        except Exception:
+            log.exception("Could not persist application-command failure metadata")
+
+        message = (
+            "処理中に問題が発生したぽん。少し待ってからもう一度試してねぽん。"
+            "\n解決しない場合は、このコマンド名を管理者に伝えてほしいぽん。"
+        )
+        try:
+            if responded:
+                await ctx.followup.send(message, ephemeral=True)
+            else:
+                try:
+                    await ctx.respond(message, ephemeral=True)
+                except discord.InteractionResponded:
+                    await ctx.followup.send(message, ephemeral=True)
+        except Exception:
+            # An expired/deleted interaction cannot be acknowledged.  The
+            # original exception and safe metadata have already been logged.
+            log.exception(
+                "Could not acknowledge failed application command command=%s guild=%s",
+                command_name,
+                guild_id,
+            )
+
     async def on_guild_join(self, guild: discord.Guild):
         for channel in guild.text_channels:
             if channel.permissions_for(guild.me).send_messages:
@@ -197,158 +280,245 @@ class YagaPon(discord.Bot):
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ):
         """VCから人がいなくなったら自動退出"""
-        # 誰かがVCから抜けた場合のみ処理
-        if not before.channel or member.id == self.user.id:
+        # 誰かがVCから抜けた場合のみ処理。Discord側からbot自身が
+        # 切断された場合も、セッションを取り残さず同じ回収経路へ送る。
+        if not before.channel:
+            return
+        bot_departed_source = member.id == self.user.id and (
+            after.channel is None or after.channel.id != before.channel.id
+        )
+        if member.id == self.user.id and not bot_departed_source:
             return
 
         # botがそのVCにいるか確認
-        from bot.voice import get_session, leave_voice
+        from bot.voice import VoiceMode, get_session, leave_voice
 
         session = get_session(member.guild.id)
-        if not session or not session.voice_client or not session.voice_client.is_connected():
+        if not session or not session.voice_client:
+            return
+        if not bot_departed_source and not session.voice_client.is_connected():
             return
         if session.channel.id != before.channel.id:
             return
 
+        if bot_departed_source:
+            if getattr(session, "_intentional_stop", False):
+                return
+            session._capture_interrupted = True
+            session._transcription_failed = True
+            session.is_active = False
+            if session.recording_sink:
+                session.recording_sink.mark(
+                    "capture_interrupted",
+                    reason="bot-moved" if after.channel is not None else "bot-disconnected",
+                )
+
         # VCに残っているのがbotだけか確認
-        humans = [m for m in before.channel.members if not m.bot]
+        humans = [] if bot_departed_source else [m for m in before.channel.members if not m.bot]
         if len(humans) == 0:
             log.info(f"VC {before.channel.name} に誰もいなくなったので自動退出")
 
-            # 議事録生成がある場合はテキストチャンネルに通知
-            has_minutes = session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING)
             if not session.claim_delivery():
                 return
             try:
                 minutes = await leave_voice(member.guild.id)
             except Exception as exc:
                 if session.recording_sink:
-                    session.recording_sink.mark("automatic_leave_failed", error=type(exc).__name__)
+                    from bot.recording import RecordingLimitExceeded
+
+                    session.recording_sink.mark(
+                        "capture_interrupted"
+                        if getattr(session, "_capture_interrupted", False)
+                        else (
+                            "recording_truncated"
+                            if isinstance(exc, RecordingLimitExceeded)
+                            else "automatic_leave_failed"
+                        ),
+                        error=type(exc).__name__,
+                    )
                 log.exception("Automatic voice leave failed for guild %s", member.guild.id)
                 return
 
-            from bot.gdrive import upload_transcript
-
-            transcript_url = await upload_transcript(
-                self.config,
-                member.guild.id,
-                session.transcript_text,
-                session.channel.name,
-                meeting_at=session.started_at,
-            )
-
-            if not minutes:
-                await session.publish_knowledge()
+            # Durable delivery must not depend on whether Discord has a
+            # writable notification channel.  Any failure before
+            # mark_delivered keeps the PCM recoverable for the retry worker.
+            try:
+                from bot.gdrive import upload_minutes, upload_transcript
                 from bot.meeting_index import index_bot_meeting
 
-                await index_bot_meeting(
-                    self,
-                    guild_id=member.guild.id,
-                    session_id=session.session_id,
-                    channel_name=session.channel.name,
-                    category_name=getattr(
-                        getattr(session.channel, "category", None), "name", ""
-                    ),
-                    started_at=session.started_at,
-                    transcript=session.transcript_text,
-                    transcript_url=transcript_url,
+                export_decision = session.external_export_decision()
+                session.checkpoint_delivery_progress(
+                    external_export_expected=export_decision.allowed,
+                    external_export_reason=export_decision.reason,
                 )
-                session.mark_delivered(transcript_url=transcript_url)
-                return
+                if not export_decision.allowed:
+                    log.info(
+                        "External meeting export skipped guild=%s channel=%s reason=%s",
+                        member.guild.id,
+                        session.channel.id,
+                        export_decision.reason,
+                    )
+                transcript_url = (
+                    await upload_transcript(
+                        self.config,
+                        member.guild.id,
+                        session.transcript_text,
+                        session.channel.name,
+                        meeting_at=session.started_at,
+                        session_id=session.session_id,
+                    )
+                    if export_decision.allowed
+                    else None
+                )
+                session.checkpoint_delivery_progress(
+                    transcript_url=transcript_url or "",
+                    transcript_path=str(getattr(session, "transcript_path", "") or ""),
+                )
 
-            if minutes and has_minutes:
-                # 通知先の優先順位: 設定済み議事録CH → システムCH → 最初の送信可能CH
-                notify_ch = None
-                configured_channel_id = self.config.get_minutes_channel(member.guild.id)
-                if configured_channel_id:
-                    configured_channel = member.guild.get_channel(configured_channel_id)
-                    if configured_channel and configured_channel.permissions_for(member.guild.me).send_messages:
-                        notify_ch = configured_channel
-                if member.guild.system_channel:
-                    notify_ch = notify_ch or member.guild.system_channel
-                if not notify_ch:
-                    for ch in member.guild.text_channels:
-                        if ch.permissions_for(member.guild.me).send_messages:
-                            notify_ch = ch
-                            break
+                if not minutes and session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
+                    raise RuntimeError("minutes generation returned no content")
 
-                if notify_ch:
-                    from bot.commands.voice_cmd import _summarize_minutes
-                    from bot.gdrive import upload_minutes
+                if not minutes:
+                    await session.publish_knowledge()
+                    await index_bot_meeting(
+                        self,
+                        guild_id=member.guild.id,
+                        channel_id=session.channel.id,
+                        parent_channel_id=getattr(session.channel, "parent_id", None),
+                        session_id=session.session_id,
+                        channel_name=session.channel.name,
+                        category_name=getattr(getattr(session.channel, "category", None), "name", ""),
+                        started_at=session.started_at,
+                        transcript=session.transcript_text,
+                        transcript_url=transcript_url,
+                    )
+                    session.mark_delivered(transcript_url=transcript_url)
+                    return
 
-                    drive_url = await upload_minutes(
+                from bot.commands.voice_cmd import _summarize_minutes
+
+                drive_url = (
+                    await upload_minutes(
                         self.config,
                         member.guild.id,
                         minutes,
                         session.channel.name,
                         meeting_at=session.started_at,
-                    )
-                    summary = await _summarize_minutes(minutes)
-                    knowledge_url = await session.publish_knowledge(
-                        summary=summary,
-                        minutes=minutes,
-                    )
-                    from bot.meeting_index import index_bot_meeting
-
-                    await index_bot_meeting(
-                        self,
-                        guild_id=member.guild.id,
                         session_id=session.session_id,
-                        channel_name=session.channel.name,
-                        category_name=getattr(
-                            getattr(session.channel, "category", None), "name", ""
-                        ),
-                        started_at=session.started_at,
-                        transcript=session.transcript_text,
-                        minutes=minutes,
-                        transcript_url=transcript_url,
-                        minutes_url=drive_url,
                     )
-
-                    embed = discord.Embed(
-                        title=f"📝 議事録（自動生成） - {session.channel.name}",
-                        description=summary[:4096],
-                        color=discord.Color.blue(),
+                    if export_decision.allowed
+                    else None
+                )
+                session.checkpoint_delivery_progress(
+                    transcript_url=transcript_url or "",
+                    minutes_url=drive_url or "",
+                    transcript_path=str(getattr(session, "transcript_path", "") or ""),
+                )
+                summary = await _summarize_minutes(minutes)
+                knowledge_url = await session.publish_knowledge(
+                    summary=summary,
+                    minutes=minutes,
+                )
+                await index_bot_meeting(
+                    self,
+                    guild_id=member.guild.id,
+                    channel_id=session.channel.id,
+                    parent_channel_id=getattr(session.channel, "parent_id", None),
+                    session_id=session.session_id,
+                    channel_name=session.channel.name,
+                    category_name=getattr(getattr(session.channel, "category", None), "name", ""),
+                    started_at=session.started_at,
+                    transcript=session.transcript_text,
+                    minutes=minutes,
+                    transcript_url=transcript_url,
+                    minutes_url=drive_url,
+                )
+                session.mark_delivered(
+                    drive_url=drive_url,
+                    transcript_url=transcript_url,
+                )
+            except Exception as exc:
+                if session.recording_sink:
+                    session.recording_sink.mark(
+                        "automatic_leave_failed",
+                        stage="delivery",
+                        error=type(exc).__name__,
                     )
-                    if drive_url:
-                        embed.add_field(name="📄 全文", value=f"[Google Docsで見る]({drive_url})", inline=False)
-                    if transcript_url:
-                        embed.add_field(
-                            name="📜 逐語文字起こし",
-                            value=f"[Google Docsで見る]({transcript_url})",
-                            inline=False,
-                        )
-                    if knowledge_url:
-                        embed.add_field(
-                            name="🗂️ Knowledge",
-                            value=f"[Draft PRを確認する]({knowledge_url})",
-                            inline=False,
-                        )
+                log.exception(
+                    "Automatic voice delivery failed for guild %s; recording retained",
+                    member.guild.id,
+                )
+                return
 
-                    import io
+            # Notification is best-effort and happens only after every durable
+            # output has been saved and indexed.
+            from bot.discord_visibility import resolve_minutes_notification_channel
 
-                    files = []
-                    if not drive_url:
-                        files.append(
-                            discord.File(
-                                io.BytesIO(minutes.encode("utf-8")),
-                                filename=f"議事録_{session.channel.name}.md",
-                            )
-                        )
-                        embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
-                    if session.transcript_text and not transcript_url:
-                        files.append(
-                            discord.File(
-                                io.BytesIO(session.transcript_text.encode("utf-8")),
-                                filename=f"文字起こし_{session.channel.name}.md",
-                            )
-                        )
+            notify_ch = resolve_minutes_notification_channel(
+                self.config,
+                member.guild,
+                session.channel,
+            )
+            if not notify_ch:
+                log.info(
+                    "Automatic voice delivery completed without a notification channel guild=%s",
+                    member.guild.id,
+                )
+                return
 
-                    send_kwargs = {"embed": embed, "silent": True}
-                    if files:
-                        send_kwargs["files"] = files
-                    await notify_ch.send(**send_kwargs)
-                    session.mark_delivered(drive_url=drive_url, transcript_url=transcript_url)
+            embed = discord.Embed(
+                title=f"📝 議事録（自動生成） - {session.channel.name}",
+                description=summary[:4096],
+                color=discord.Color.blue(),
+            )
+            if drive_url:
+                embed.add_field(
+                    name="📄 全文",
+                    value=f"[Google Docsで見る]({drive_url})",
+                    inline=False,
+                )
+            if transcript_url:
+                embed.add_field(
+                    name="📜 逐語文字起こし",
+                    value=f"[Google Docsで見る]({transcript_url})",
+                    inline=False,
+                )
+            if knowledge_url:
+                embed.add_field(
+                    name="🗂️ Knowledge",
+                    value=f"[Draft PRを確認する]({knowledge_url})",
+                    inline=False,
+                )
+
+            import io
+
+            files = []
+            if not drive_url:
+                files.append(
+                    discord.File(
+                        io.BytesIO(minutes.encode("utf-8")),
+                        filename=f"議事録_{session.channel.name}.md",
+                    )
+                )
+                embed.set_footer(text="⚠️ Google Driveへの保存に失敗したため、ファイルを添付します")
+            if session.transcript_text and not transcript_url:
+                files.append(
+                    discord.File(
+                        io.BytesIO(session.transcript_text.encode("utf-8")),
+                        filename=f"文字起こし_{session.channel.name}.md",
+                    )
+                )
+
+            send_kwargs = {"embed": embed, "silent": True}
+            if files:
+                send_kwargs["files"] = files
+            try:
+                await notify_ch.send(**send_kwargs)
+            except Exception:
+                log.exception(
+                    "Automatic voice delivery completed but notification failed guild=%s",
+                    member.guild.id,
+                )
 
     async def on_message(self, message: discord.Message):
         if message.author == self.user or message.author.bot:
@@ -371,25 +541,17 @@ class YagaPon(discord.Bot):
                 )
             return
 
+        channel_ignored = _is_ignored_with_parent(self.config, guild_id, message.channel)
+
         # VCセッション中のテキストチャットを参考資料として収集
         from bot.voice import get_session
 
         vc_session = get_session(guild_id)
-        if vc_session and vc_session.is_active:
-            # VCのテキストチャンネル or botがいるVCと同じチャンネル
-            vc_text_ch = getattr(vc_session.channel, "id", None)
-            msg_ch_id = message.channel.id
-            # VCチャンネルのテキストチャット、またはボイスチャンネル名と一致するテキストチャンネル
-            is_vc_text = (
-                msg_ch_id == vc_text_ch
-                or getattr(message.channel, "name", "") == getattr(vc_session.channel, "name", "")
-                or (
-                    hasattr(message.channel, "category")
-                    and hasattr(vc_session.channel, "category")
-                    and message.channel.category == vc_session.channel.category
-                )
-            )
-            if is_vc_text and (message.content or message.attachments):
+        if vc_session and vc_session.is_active and not channel_ignored:
+            if _is_voice_reference_channel(
+                message.channel,
+                vc_session.channel,
+            ) and (message.content or message.attachments):
                 await vc_session.add_reference_from_message(message)
 
         # メンション → RAG回答
@@ -398,7 +560,7 @@ class YagaPon(discord.Bot):
             return
 
         # 学習 (ignore/短文/コマンドは除外)
-        if self.config.is_ignored(guild_id, message.channel.id):
+        if channel_ignored:
             return
         learning_content = self.corpus._message_content(message)
         if not learning_content or learning_content.startswith("/"):
@@ -522,6 +684,29 @@ class YagaPon(discord.Bot):
 
         members_info = self._build_members_info(guild_id) if guild_id else ""
         glossary_text = self.config.get_glossary_text(guild_id) if guild_id else ""
+        from bot.discord_visibility import (
+            has_guildwide_rag_access,
+            readable_channel_ids,
+        )
+
+        guild = message.guild or self.get_guild(guild_id)
+        member = message.author if message.guild else (guild.get_member(message.author.id) if guild else None)
+        if message.guild:
+            # A normal message is visible to everyone who can read its output
+            # channel. Restrict raw evidence to that same channel so a member
+            # cannot relay a private channel into a broader audience.
+            visible_channels = readable_channel_ids(
+                guild,
+                member,
+                current_channel=message.channel,
+                limit=1,
+            )
+            guildwide_access = False
+        else:
+            # A DM response is visible only to the requester, so it may use the
+            # requester's current Discord read permissions across the guild.
+            visible_channels = readable_channel_ids(guild, member)
+            guildwide_access = has_guildwide_rag_access(guild, member)
 
         async with message.channel.typing():
             result = await self.corpus.query_with_trace(
@@ -533,6 +718,8 @@ class YagaPon(discord.Bot):
                 members_info=members_info,
                 glossary_text=glossary_text,
                 glossary=self.config.get_glossary(guild_id),
+                allowed_channel_ids=visible_channels,
+                allow_unrestricted_conversations=guildwide_access,
             )
             decorated_answer = _decorate_rag_answer(
                 result.text,
@@ -549,13 +736,10 @@ class YagaPon(discord.Bot):
                     sent_messages[-1].id,
                 )
 
-            # VCにいればTTSも
-            try:
-                from bot.tts import speak_in_vc
-
-                await speak_in_vc(self, message, result.text)
-            except Exception:
-                pass
+            # Text-channel RAG answers are deliberately not relayed into a VC.
+            # The two audiences can differ (for example an officer-only text
+            # channel while the requester is in a public VC), which would leak
+            # channel-scoped evidence. Voice mode has its own in-session TTS.
 
     async def send_split_message(self, destination, text: str):
         """コードブロックを考慮して2000文字制限で分割送信"""
@@ -600,9 +784,17 @@ class YagaPon(discord.Bot):
             try:
                 await checkpoint_voice_sessions_for_shutdown()
             except Exception:
-                log.exception(
-                    "Voice session checkpoint failed during shutdown; continuing cleanup"
-                )
+                log.exception("Voice session checkpoint failed during shutdown; continuing cleanup")
+            try:
+                from bot.reactions import shutdown_reactions
+
+                await asyncio.wait_for(shutdown_reactions(self), timeout=20)
+            except Exception:
+                log.exception("Smart-reaction flush failed during shutdown; continuing cleanup")
+            try:
+                await self.recording_replays.shutdown(timeout=20)
+            except Exception:
+                log.exception("Recording replay shutdown failed; continuing cleanup")
             if self._recording_recovery_task and not self._recording_recovery_task.done():
                 self._recording_recovery_task.cancel()
                 try:
@@ -610,9 +802,7 @@ class YagaPon(discord.Bot):
                 except asyncio.CancelledError:
                     pass
                 except Exception:
-                    log.exception(
-                        "Recording recovery task failed during shutdown; continuing cleanup"
-                    )
+                    log.exception("Recording recovery task failed during shutdown; continuing cleanup")
             # Close the Discord connection before the slower corpus flush so
             # Pycord cannot start a reconnect against an already-closing HTTP
             # session during deployments.

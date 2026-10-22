@@ -203,16 +203,15 @@ YAGAPON_KNOWLEDGE_GCS_BUCKET=yagamiatlas-yagapon-knowledge-intake
 YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true
 YAGAPON_KNOWLEDGE_CURATION_ENABLED=false
 YAGAPON_KNOWLEDGE_CURATION_BATCH=3
+YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS=
 YAGAPON_MAX_RECORDING_BYTES=4294967296
 YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
 YAGAPON_RECORDING_RETENTION_DAYS=7
-YAGAPON_KNOWLEDGE_REPO_PATH=../YagamiFes-IT-Knowledge
-YAGAPON_KNOWLEDGE_BASE_URL=https://github.com/YagamiFes-IT/YagamiFes-IT-Knowledge/blob/main
 YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
 YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS=your_discord_guild_id
+YAGAPON_MEETING_EXPORT_CHANNEL_IDS=
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS=
 YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS=選考
-YAGAPON_KNOWLEDGE_INDEX_STATE=/data/knowledge-index-state.json
 YAGAPON_SOURCE_INDEX_ENABLED=false
 YAGAPON_SOURCE_INDEX_STATE=/data/source-index-state.json
 YAGAPON_SOURCE_GITHUB_TOKEN=
@@ -223,13 +222,17 @@ YAGAPON_FIREBASE_KNOWLEDGE_ENABLED=false
 YAGAPON_FIREBASE_KNOWLEDGE_BACKEND=public
 YAGAPON_FIREBASE_KNOWLEDGE_PROJECT=yagamy26th
 YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=
-YAGAPON_KNOWLEDGE_INDEX_STATUSES=active,historical
 ```
 
 Firebase現在値の`public` backendは未認証RESTを使うため、Firestore Security Rulesが適用される。
 `firestore`を指定した場合はADCがRulesを迂回するため、専用サービスアカウントと最小権限を使う。
 非公開リポジトリをソース索引へ含める場合、`YAGAPON_SOURCE_GITHUB_TOKEN`には対象リポジトリの
 Contents readだけを許可したfine-grained tokenを使う。個人の広権限な`gh` OAuth tokenは本番へ置かない。
+
+会議の共有Drive・Knowledgeへの自動外部化は、`@everyone`が元チャンネルを同等に
+閲覧できる場合、または閲覧者の一致を運用確認したチャンネル/カテゴリIDを
+`YAGAPON_MEETING_EXPORT_CHANNEL_IDS`へ明示した場合だけ行う。未指定の限定チャンネルは、
+ローカル文字起こしとDiscord ACL付きFile Searchに保存する。
 
 `YAGAPON_MINUTES_IMAGE_URL` はGoogle Docs APIから認証なしで取得できる公開URLが必要です。
 既定値は公開リポジトリ上の画像です。リポジトリを非公開化する場合は、Cloud Storageなどの

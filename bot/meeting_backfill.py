@@ -63,6 +63,7 @@ async def backfill_session(guild_id: int, session_id: str, *, upload_missing: bo
                 transcript,
                 artifact.channel_name,
                 meeting_at=meeting_at,
+                session_id=session_id,
             )
             or ""
         )
@@ -74,6 +75,7 @@ async def backfill_session(guild_id: int, session_id: str, *, upload_missing: bo
                 minutes,
                 artifact.channel_name,
                 meeting_at=meeting_at,
+                session_id=session_id,
             )
             or ""
         )
@@ -83,6 +85,11 @@ async def backfill_session(guild_id: int, session_id: str, *, upload_missing: bo
         corpus,
         store_name,
         guild_id=guild_id,
+        channel_id=(
+            artifact.source_channel_id
+            if artifact.source_guild_id == guild_id
+            else None
+        ),
         session_id=session_id,
         channel_name=artifact.channel_name,
         started_at=artifact.started_at or None,

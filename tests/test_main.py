@@ -19,3 +19,20 @@ async def test_shutdown_delegates_resource_cleanup_to_bot_once():
     assert server.should_exit is True
     bot.close.assert_awaited_once_with()
     bot.corpus.shutdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_api_backfills_before_closing_bot(monkeypatch):
+    bot = SimpleNamespace(close=AsyncMock())
+    app = object()
+    server = SimpleNamespace(
+        should_exit=False,
+        config=SimpleNamespace(app=app),
+    )
+    drain = AsyncMock()
+    monkeypatch.setattr("api.server.shutdown_backfill_tasks", drain)
+
+    await shutdown(bot, server)
+
+    drain.assert_awaited_once_with(app)
+    bot.close.assert_awaited_once_with()

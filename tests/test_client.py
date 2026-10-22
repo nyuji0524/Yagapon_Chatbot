@@ -4,7 +4,9 @@ from bot.client import (
     _clean_rag_query,
     _decorate_rag_answer,
     _guild_yagapon_emojis,
+    _is_ignored_with_parent,
     _is_rag_invocation,
+    _is_voice_reference_channel,
     _mentioned_bot_role_ids,
 )
 
@@ -29,10 +31,7 @@ def test_clean_rag_query_removes_mention_variants_and_literal_silent_marker():
 
 
 def test_clean_rag_query_removes_bot_role_mention():
-    assert (
-        _clean_rag_query("@silent <@&456> Driveの保存先は？", 123, (456,))
-        == "Driveの保存先は？"
-    )
+    assert _clean_rag_query("@silent <@&456> Driveの保存先は？", 123, (456,)) == "Driveの保存先は？"
 
 
 def test_same_name_role_assigned_to_bot_is_an_invocation():
@@ -73,6 +72,45 @@ def test_unassigned_or_differently_named_role_does_not_invoke_bot():
     assert _is_rag_invocation(message, bot_user) is False
 
 
+def test_voice_reference_collection_requires_active_vc_identity():
+    category = SimpleNamespace(id=50)
+    voice_channel = SimpleNamespace(id=10, name="会議用", category=category)
+
+    assert _is_voice_reference_channel(
+        SimpleNamespace(id=10, name="会議用", category=category),
+        voice_channel,
+    )
+    assert _is_voice_reference_channel(
+        SimpleNamespace(id=11, parent_id=10, name="資料スレッド"),
+        voice_channel,
+    )
+
+    # Names and categories are presentation details, not channel identity.
+    assert not _is_voice_reference_channel(
+        SimpleNamespace(id=20, name="会議用", category=category),
+        voice_channel,
+    )
+    assert not _is_voice_reference_channel(
+        SimpleNamespace(id=21, name="別チャンネル", category=category),
+        voice_channel,
+    )
+
+
+def test_ignore_is_inherited_by_threads():
+    config = SimpleNamespace(is_ignored=lambda guild_id, channel_id: (guild_id, channel_id) == (1, 10))
+
+    assert _is_ignored_with_parent(
+        config,
+        1,
+        SimpleNamespace(id=11, parent_id=10),
+    )
+    assert not _is_ignored_with_parent(
+        config,
+        1,
+        SimpleNamespace(id=12, parent_id=20),
+    )
+
+
 def test_guild_yagapon_emojis_only_returns_available_usable_custom_emojis():
     guild = SimpleNamespace(
         emojis=[
@@ -87,9 +125,7 @@ def test_guild_yagapon_emojis_only_returns_available_usable_custom_emojis():
 
 
 def test_decorate_rag_answer_uses_happy_and_bow_for_supported_answer():
-    guild = SimpleNamespace(
-        emojis=[FakeEmoji("yagapon_happy", 1), FakeEmoji("yagapon_bow", 2)]
-    )
+    guild = SimpleNamespace(emojis=[FakeEmoji("yagapon_happy", 1), FakeEmoji("yagapon_bow", 2)])
 
     decorated = _decorate_rag_answer("回答だぽん。", guild, no_answer=False)
 
@@ -98,9 +134,7 @@ def test_decorate_rag_answer_uses_happy_and_bow_for_supported_answer():
 
 
 def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
-    guild = SimpleNamespace(
-        emojis=[FakeEmoji("yagapon_happy", 1), FakeEmoji("yagapon_cry", 2)]
-    )
+    guild = SimpleNamespace(emojis=[FakeEmoji("yagapon_happy", 1), FakeEmoji("yagapon_cry", 2)])
 
     decorated = _decorate_rag_answer("見つからなかったぽん。", guild, no_answer=True)
 

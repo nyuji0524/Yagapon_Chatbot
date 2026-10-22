@@ -8,16 +8,25 @@ compose_source=/tmp/compose.yaml
 compose_target="$app_dir/compose.yaml"
 unit_source=/tmp/yagapon.service
 unit_target=/etc/systemd/system/yagapon.service
+rag_eval_source=/tmp/rag-eval-control.sh
+rag_eval_target="$app_dir/deploy/rag-eval-control.sh"
+rag_eval_cases_source=/tmp/rag-eval-cases.yaml
+rag_eval_cases_target="$app_dir/deploy/rag-eval-cases.yaml"
 backup_dir=/var/backups/yagapon/"$(date -u +%Y%m%dT%H%M%SZ)"
 
 if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]; then
   echo "Refusing invalid Artifact Registry image reference" >&2
   exit 2
 fi
-if [[ ! -f "$compose_source" || ! -f /tmp/remote-deploy.sh || ! -f "$unit_source" ]]; then
+if [[ ! -f "$compose_source" || ! -f /tmp/remote-deploy.sh || ! -f "$unit_source" \
+  || ! -f "$rag_eval_source" ]]; then
   echo "Deployment files were not copied to /tmp" >&2
   exit 2
 fi
+[[ -f "$rag_eval_cases_source" ]] || {
+  echo "RAG evaluation cases were not copied to /tmp" >&2
+  exit 2
+}
 if [[ ! -f /etc/yagapon/yagapon.env ]]; then
   echo "Missing /etc/yagapon/yagapon.env" >&2
   exit 2
@@ -30,6 +39,8 @@ flock -n 9 || { echo "Another deployment is running" >&2; exit 3; }
 [[ -f "$compose_target" ]] && cp -a "$compose_target" "$backup_dir/compose.yaml"
 [[ -f "$deploy_env" ]] && cp -a "$deploy_env" "$backup_dir/deploy.env"
 [[ -f "$unit_target" ]] && cp -a "$unit_target" "$backup_dir/yagapon.service"
+[[ -f "$rag_eval_target" ]] && cp -a "$rag_eval_target" "$backup_dir/rag-eval-control.sh"
+[[ -f "$rag_eval_cases_target" ]] && cp -a "$rag_eval_cases_target" "$backup_dir/rag-eval-cases.yaml"
 
 rollback() {
   echo "Deployment failed; restoring the previous Compose configuration" >&2
@@ -39,6 +50,10 @@ rollback() {
   [[ -f "$backup_dir/compose.yaml" ]] && cp -a "$backup_dir/compose.yaml" "$compose_target"
   [[ -f "$backup_dir/deploy.env" ]] && cp -a "$backup_dir/deploy.env" "$deploy_env"
   [[ -f "$backup_dir/yagapon.service" ]] && cp -a "$backup_dir/yagapon.service" "$unit_target"
+  [[ -f "$backup_dir/rag-eval-control.sh" ]] \
+    && install -o root -g root -m 0755 "$backup_dir/rag-eval-control.sh" "$rag_eval_target"
+  [[ -f "$backup_dir/rag-eval-cases.yaml" ]] \
+    && install -o root -g root -m 0644 "$backup_dir/rag-eval-cases.yaml" "$rag_eval_cases_target"
   systemctl daemon-reload
   systemctl restart yagapon || true
 }
@@ -60,6 +75,9 @@ chmod 0640 "$deploy_tmp"
 mv "$deploy_tmp" "$deploy_env"
 install -m 0644 "$compose_source" "$compose_target"
 install -m 0644 "$unit_source" "$unit_target"
+install -d -o root -g root -m 0755 "$app_dir/deploy"
+install -o root -g root -m 0755 "$rag_eval_source" "$rag_eval_target"
+install -o root -g root -m 0644 "$rag_eval_cases_source" "$rag_eval_cases_target"
 systemctl daemon-reload
 
 registry=${image%%/*}

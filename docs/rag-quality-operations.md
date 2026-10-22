@@ -150,7 +150,9 @@ python -m rag_eval \
 メールドメインなど文字列自体を許可できないものは`forbidden_exact`で検査する。モデル変更・
 全backfill・Knowledge大量更新の前後で同じ質問セットを実行して比較する。
 GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のときだけ
-手動または毎週実行される。URL/Guild IDはVariables、API tokenはSecretに保存する。
+手動または毎週実行される。ActionsはOIDC/WIFとIAP SSHで本番コンテナ内の評価CLIを実行し、
+サニタイズ済みJSONレポートだけをartifactへ回収する。API tokenはコンテナ外へ出さない。
+対象Guild IDはRepository Variable `YAGAPON_RAG_EVAL_GUILD_ID` に保存する。
 
 ## 差分同期
 
@@ -159,11 +161,14 @@ GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のとき�
 - Knowledge: Git上のMarkdownのSHA-256とremote document名を状態ファイルへ保存し、
   承認済み文書の変更・削除だけをFile Searchへ反映する。
 
-常駐同期を使う場合は、対象Guild ID、Knowledgeリポジトリの読み取り専用mount、Driveの
-読み取り権限を確認してから有効にする。
+常駐同期を使う場合は、対象Guild ID、署名済みKnowledge snapshot bucketの読み取り権限、
+Driveの読み取り権限を確認してから有効にする。承認済みKnowledgeをFile Searchへ登録する
+経路はACL・日付・年度をfail-closedで付与する`source-index-watch`だけとし、ローカルcloneを
+直接読む旧Knowledge indexerは使用しない。
 
 ```bash
-docker compose --profile knowledge up -d knowledge-sync-watch knowledge-index-watch
+docker compose --profile knowledge up -d knowledge-sync-watch
+docker compose up -d source-index-watch
 ```
 
 Driveから生成したdraftは、人のレビューとstatus変更を経てKnowledgeリポジトリへ入れる。
