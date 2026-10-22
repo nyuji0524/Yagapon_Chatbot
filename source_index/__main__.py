@@ -1556,6 +1556,104 @@ def load_state(path: Path) -> dict:
         raise RuntimeError("Source index state documents must be a JSON object")
     if "repositories" in state and not isinstance(state["repositories"], dict):
         raise RuntimeError("Source index state repositories must be a JSON object")
+
+    document_text_fields = (
+        "authority",
+        "change_status",
+        "commit",
+        "content_sha256",
+        "document_key",
+        "metadata_sha256",
+        "path",
+        "remote_name",
+        "repository",
+        "schema",
+        "sha256",
+        "source_type",
+        "status",
+    )
+    for document_key, entry in state["documents"].items():
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"Source index state document entry must be a JSON object: {document_key}"
+            )
+        for field in document_text_fields:
+            value = entry.get(field)
+            if value is not None and not isinstance(value, str):
+                raise RuntimeError(
+                    f"Source index state document field must be a string: {field}"
+                )
+        for field in ("festival", "policy_version"):
+            value = entry.get(field)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool)
+            ):
+                raise RuntimeError(
+                    f"Source index state document field must be an integer: {field}"
+                )
+
+    repository_text_fields = (
+        "authority",
+        "commit",
+        "generation_id",
+        "history_cursor_sha",
+        "history_settings_digest",
+        "manifest_digest",
+        "source_type",
+        "status",
+    )
+    for repository_name, entry in state.get("repositories", {}).items():
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                "Source index state repository entry must be a JSON object: "
+                f"{repository_name}"
+            )
+        for field in repository_text_fields:
+            value = entry.get(field)
+            if value is not None and not isinstance(value, str):
+                raise RuntimeError(
+                    f"Source index state repository field must be a string: {field}"
+                )
+        for field in (
+            "document_count",
+            "history_document_count",
+            "history_total_commits",
+            "policy_version",
+        ):
+            value = entry.get(field)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise RuntimeError(
+                    "Source index state repository field must be a non-negative integer: "
+                    f"{field}"
+                )
+        history_complete = entry.get("history_complete")
+        if history_complete is not None and not isinstance(history_complete, bool):
+            raise RuntimeError(
+                "Source index state repository field must be a boolean: history_complete"
+            )
+        processed = entry.get("history_processed_commits")
+        if processed is not None and (
+            not isinstance(processed, list)
+            or any(not isinstance(commit, str) for commit in processed)
+        ):
+            raise RuntimeError(
+                "Source index state repository history_processed_commits must be a string list"
+            )
+        counts = entry.get("history_commit_document_counts")
+        if counts is not None and (
+            not isinstance(counts, dict)
+            or any(
+                not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 0
+                for count in counts.values()
+            )
+        ):
+            raise RuntimeError(
+                "Source index state repository history counts must be non-negative integers"
+            )
     return state
 
 

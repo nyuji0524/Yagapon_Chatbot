@@ -1435,6 +1435,60 @@ async def test_source_preflight_rejects_invalid_state_before_network(
         await preflight_once(args)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (
+            {"documents": {"source:one": "broken"}},
+            "document entry must be a JSON object",
+        ),
+        (
+            {"documents": {}, "repositories": {"example/repo": []}},
+            "repository entry must be a JSON object",
+        ),
+        (
+            {
+                "documents": {"source:one": {"repository": ["example/repo"]}},
+            },
+            "document field must be a string: repository",
+        ),
+        (
+            {
+                "documents": {},
+                "repositories": {
+                    "example/repo": {"history_commit_document_counts": {"abc": "1"}}
+                },
+            },
+            "history counts must be non-negative integers",
+        ),
+    ),
+)
+async def test_source_preflight_rejects_nested_corrupt_state_before_network(
+    tmp_path,
+    monkeypatch,
+    payload,
+    message,
+):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: pytest.fail("invalid state must fail before network setup"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=state,
+        guild_id=123,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        await preflight_once(args)
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     (
