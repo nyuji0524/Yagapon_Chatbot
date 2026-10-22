@@ -14,6 +14,7 @@ from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     AnswerStatus,
     CorpusManager,
+    _select_lexical_context_hits,
     answer_declares_missing_knowledge,
     backfill_channel_concurrency,
     calculate_incremental_after,
@@ -37,13 +38,99 @@ from bot.knowledge_pipeline import (
     knowledge_pipeline_lock,
     release_knowledge_pipeline_lock,
 )
-from bot.rag_store import RagStore
+from bot.rag_store import LexicalHit, RagStore
 
 
 @pytest.fixture
 def corpus_manager():
     with patch("bot.corpus.genai.Client"):
         yield CorpusManager()
+
+
+def lexical_hit(
+    key: str,
+    *,
+    score: int,
+    authority: str,
+    source_type: str,
+    status: str = "historical",
+) -> LexicalHit:
+    return LexicalHit(
+        document_key=key,
+        channel_name=key,
+        festival=27,
+        source_url=f"https://example.com/{key}",
+        excerpt=key,
+        score=score,
+        authority=authority,
+        status=status,
+        source_type=source_type,
+    )
+
+
+def test_history_context_reserves_narrative_sources_after_authority_ranking():
+    hits = [
+        lexical_hit(
+            f"commit-{index}",
+            score=500 - index,
+            authority="repository_history",
+            source_type="source_code_history",
+        )
+        for index in range(8)
+    ]
+    hits.extend(
+        [
+            lexical_hit(
+                "discord-operation",
+                score=310,
+                authority="conversation",
+                source_type="discord_conversation",
+                status="raw",
+            ),
+            lexical_hit(
+                "meeting-review",
+                score=300,
+                authority="reviewed_record",
+                source_type="meeting_minutes",
+            ),
+        ]
+    )
+
+    selected = _select_lexical_context_hits(
+        hits,
+        question_kind=QuestionKind.HISTORY,
+        limit=6,
+    )
+
+    assert len(selected) == 6
+    assert {hit.document_key for hit in selected}.issuperset(
+        {"discord-operation", "meeting-review"}
+    )
+
+
+def test_non_history_context_keeps_direct_authority_priority():
+    raw = lexical_hit(
+        "raw-conversation",
+        score=900,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+    )
+    deployed = lexical_hit(
+        "deployed-rules",
+        score=100,
+        authority="deployed_implementation",
+        source_type="source_code",
+        status="deployed",
+    )
+
+    selected = _select_lexical_context_hits(
+        [raw, deployed],
+        question_kind=QuestionKind.AUTHORIZATION,
+        limit=1,
+    )
+
+    assert selected == [deployed]
 
 
 def add_message(manager: CorpusManager, *, content: str = "テストメッセージ", timestamp=None):

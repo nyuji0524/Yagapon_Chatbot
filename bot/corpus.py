@@ -50,6 +50,7 @@ from bot.knowledge_authority import (
     can_answer_directly,
     classify_question_facets,
     direct_authorities,
+    is_history_narrative_source,
 )
 from bot.knowledge_pipeline import (
     KnowledgePipelineBusy,
@@ -222,6 +223,78 @@ def requires_comprehensive_answer(question: str) -> bool:
         listed_lines >= 2
         or sum(bool(re.search(r"(?:教えて|知りたい|まとめ|確認)", line)) for line in nonempty_lines) >= 2
     )
+
+
+def _select_lexical_context_hits(
+    hits: list[LexicalHit],
+    *,
+    question_kind: QuestionKind,
+    limit: int,
+) -> list[LexicalHit]:
+    """Rank exact hits while preserving explanatory evidence for history.
+
+    Current-state and authorization questions continue to rank direct,
+    reviewed authorities first. Historical questions instead rank lexical
+    relevance first and reserve part of the bounded context for Discord or
+    meeting records, which explain requests and operational problems that a
+    repository diff alone cannot establish.
+    """
+    if limit <= 0:
+        return []
+    if question_kind is not QuestionKind.HISTORY:
+        return sorted(
+            hits,
+            key=lambda hit: (
+                can_answer_directly(question_kind, hit.authority, hit.status),
+                hit.score,
+                authority_score(question_kind, hit.authority, hit.status),
+            ),
+            reverse=True,
+        )[:limit]
+
+    ranked = sorted(
+        hits,
+        key=lambda hit: (
+            hit.score,
+            authority_score(question_kind, hit.authority, hit.status),
+            can_answer_directly(question_kind, hit.authority, hit.status),
+        ),
+        reverse=True,
+    )
+    selected = ranked[:limit]
+    narrative_hits = [
+        hit for hit in ranked if is_history_narrative_source(hit.source_type)
+    ]
+    reserved = min(len(narrative_hits), max(1, limit // 3))
+    selected_narratives = sum(
+        is_history_narrative_source(hit.source_type) for hit in selected
+    )
+    if selected_narratives >= reserved:
+        return selected
+
+    selected_keys = {hit.document_key for hit in selected}
+    replacements = (
+        hit for hit in narrative_hits if hit.document_key not in selected_keys
+    )
+    for replacement in replacements:
+        replace_at = next(
+            (
+                index
+                for index in range(len(selected) - 1, -1, -1)
+                if not is_history_narrative_source(selected[index].source_type)
+            ),
+            None,
+        )
+        if replace_at is None:
+            break
+        selected[replace_at] = replacement
+        selected_narratives += 1
+        if selected_narratives >= reserved:
+            break
+
+    rank = {hit.document_key: index for index, hit in enumerate(ranked)}
+    selected.sort(key=lambda hit: rank[hit.document_key])
+    return selected
 
 
 def backfill_channel_concurrency() -> int:
@@ -1981,20 +2054,17 @@ class CorpusManager:
                 date_to=target_date_to,
                 allowed_channel_ids=allowed_channel_ids,
                 allow_unrestricted_conversations=allow_unrestricted_conversations,
+                question_kind=question_kind,
                 limit=lexical_candidate_limit,
             )
             if guild_id
             else []
         )
-        lexical_hits.sort(
-            key=lambda hit: (
-                can_answer_directly(question_kind, hit.authority, hit.status),
-                hit.score,
-                authority_score(question_kind, hit.authority, hit.status),
-            ),
-            reverse=True,
+        lexical_hits = _select_lexical_context_hits(
+            lexical_hits,
+            question_kind=question_kind,
+            limit=lexical_context_limit,
         )
-        lexical_hits = lexical_hits[:lexical_context_limit]
         authoritative_hits = [
             hit for hit in lexical_hits if can_answer_directly(question_kind, hit.authority, hit.status)
         ]
