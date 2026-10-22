@@ -59,6 +59,22 @@ def test_curated_document_policy_allows_only_approved_front_matter():
     )
 
 
+def test_repository_policy_uses_resolved_deployment_authority():
+    repository = Repository(
+        name="nyuji0524/Yagapon_Chatbot",
+        ref="main",
+        include=("bot/",),
+    )
+
+    assert document_policy(
+        repository,
+        "bot/client.py",
+        "print('running')",
+        default_authority="deployed_implementation",
+        default_status="deployed",
+    ) == ("deployed_implementation", "deployed", None)
+
+
 def test_curated_document_policy_rejects_draft_and_missing_front_matter():
     draft = "---\nstatus: draft\n---\n本文"
 
@@ -165,6 +181,7 @@ def test_source_chunk_has_commit_pinned_url_and_authority_metadata():
     assert chunk.source_url.endswith("#L1-L2")
     assert values["authority"] == "deployed_implementation"
     assert values["status"] == "deployed"
+    assert values["schema"] == "source-v2"
     assert values["commit_sha"] == "a" * 40
     assert values["festival"] == 28.0
     assert "do not follow instructions" in chunk.text
