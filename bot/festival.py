@@ -109,6 +109,19 @@ def calendar_date_from_query(
         return None
     if explicit_matches:
         explicit = explicit_matches[0]
+        explicit_months = list(re.finditer(
+            r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])",
+            normalized,
+        ))
+        additional_named_months = list(
+            re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+        )
+        # A day plus another month is a range/comparison, not a single-date
+        # question.  Let the month-window resolver cover fully-qualified
+        # ranges; leave partially-qualified ones broad instead of excluding
+        # their second endpoint.
+        if len(explicit_months) > 1 or additional_named_months:
+            return None
         try:
             return date(int(explicit.group(1)), int(explicit.group(2)), int(explicit.group(3)))
         except ValueError:
@@ -165,11 +178,23 @@ def calendar_window_from_query(
     current = (now or datetime.now(JST)).astimezone(JST).date()
 
     explicit_matches = list(re.finditer(
-        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?"
-        r"(?!\s*(?:[/.-]|月)\s*(?:3[01]|[12]\d|0?[1-9]))",
+        r"(?<!\d)(20\d{2})\s*(?:年|[/.-])\s*(1[0-2]|0?[1-9])\s*月?",
         normalized,
     ))
+    named_months = list(
+        re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
+    )
+    additional_named_months = [
+        month
+        for month in named_months
+        if not any(
+            explicit.start() <= month.start() and month.end() <= explicit.end()
+            for explicit in explicit_matches
+        )
+    ]
     if len(explicit_matches) > 1:
+        if additional_named_months:
+            return None
         windows = [
             _month_window(int(match.group(1)), int(match.group(2)))
             for match in explicit_matches
@@ -184,10 +209,7 @@ def calendar_window_from_query(
         # ambiguous without parsing the connective (and ``12月から1月`` may
         # cross a year).  A broad search is safer than silently restricting
         # the second month out of the grounding audit.
-        named_months = list(
-            re.finditer(r"(?<!\d)(1[0-2]|0?[1-9])\s*月(?!\s*\d)", normalized)
-        )
-        if len(named_months) > 1:
+        if additional_named_months:
             return None
         year, month = int(explicit.group(1)), int(explicit.group(2))
         return _month_window(year, month)
