@@ -1,4 +1,6 @@
 import asyncio
+import io
+import wave
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -7,6 +9,16 @@ import pytest
 from bot import transcription
 from bot.ai_completion import IncompleteModelOutput
 from bot.transcription import transcribe_audio
+
+
+def _wav_with_signal() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16_000)
+        stream.writeframes((1000).to_bytes(2, "little", signed=True) * 2_000)
+    return output.getvalue()
 
 
 class RateLimitError(RuntimeError):
@@ -68,6 +80,29 @@ async def test_dedicated_transcription_rejects_incomplete_interaction_status():
         await transcribe_audio(
             client,
             b"RIFFtest",
+            mime_type="audio/wav",
+            display_name="meeting.wav",
+        )
+
+    client.files.delete.assert_called_once_with(name="files/test")
+
+
+@pytest.mark.asyncio
+async def test_dedicated_transcription_rejects_empty_stop_for_non_silent_audio():
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    client = SimpleNamespace(
+        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
+        aio=SimpleNamespace(
+            interactions=SimpleNamespace(
+                create=AsyncMock(return_value=SimpleNamespace(output_text="", status="completed"))
+            )
+        ),
+    )
+
+    with pytest.raises(IncompleteModelOutput, match="EMPTY_OUTPUT_WITH_AUDIO"):
+        await transcribe_audio(
+            client,
+            _wav_with_signal(),
             mime_type="audio/wav",
             display_name="meeting.wav",
         )

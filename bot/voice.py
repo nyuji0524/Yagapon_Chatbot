@@ -38,7 +38,9 @@ TRANSCRIPTION_CHUNK_BYTES_LISTEN = 50 * 1024 * 1024
 FINAL_REPROCESS_CHUNK_BYTES = 50 * 1024 * 1024
 TRANSCRIPTION_TIMEOUT_SECONDS = 180
 MAX_REFERENCE_DOCUMENTS = 64
-MAX_REFERENCE_CHARACTERS = 120_000
+# Keep a finite in-memory bound, but do not cut ordinary long meeting packs at
+# the old 120k limit. minutes_generation chunks every retained character.
+MAX_REFERENCE_CHARACTERS = 2_000_000
 _transcription_rate_limiter = RateLimitCircuitBreaker()
 
 _VOICE_KNOWLEDGE_CUE = re.compile(
@@ -185,7 +187,16 @@ class VoiceSession:
             "text": material.text,
         }
         self._meeting_materials.append(item)
-        self._reference_docs.append(f"[会議資料: {material.name}]\n原本: {material.url}\n{material.text}")
+        added, truncated = self._append_reference(
+            material.text,
+            f"会議資料: {material.name} / 原本: {material.url}",
+        )
+        if not added or truncated:
+            log.error(
+                "Meeting material exceeded the safe reference limit name=%s chars=%s",
+                material.name,
+                len(material.text),
+            )
         await self._checkpoint_state(meeting_materials=self._meeting_materials)
 
     def _speaker_label(self, user_id: int) -> str:
@@ -1464,10 +1475,11 @@ async def _recover_recording(bot, candidate) -> None:
     session._meeting_materials = [
         item for item in (metadata.get("meeting_materials") or []) if isinstance(item, dict) and item.get("text")
     ]
-    session._reference_docs = [
-        f"[会議資料: {item.get('name') or '名称未設定'}]\n原本: {item.get('url') or ''}\n{item.get('text') or ''}"
-        for item in session._meeting_materials
-    ]
+    for item in session._meeting_materials:
+        session._append_reference(
+            str(item.get("text") or ""),
+            f"会議資料: {item.get('name') or '名称未設定'} / 原本: {item.get('url') or ''}",
+        )
     transcript_path_value = str(metadata.get("transcript_path") or "")
     session._transcript_path = Path(transcript_path_value) if transcript_path_value else None
     existing = load_transcript_content(session._transcript_path)

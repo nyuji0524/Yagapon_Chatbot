@@ -8,7 +8,7 @@ import logging
 import re
 from pathlib import Path
 
-from bot.ai_completion import require_complete_model_output
+from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import retry_rate_limit
 
@@ -157,7 +157,10 @@ async def _generate(client, *, prompt: str, operation_name: str, max_output_toke
     response = await retry_rate_limit(request, operation_name=operation_name)
     log_usage(log, operation_name, model, response)
     require_complete_model_output(response, operation=operation_name)
-    return (response.text or "").strip()
+    text = (response.text or "").strip()
+    if not text:
+        raise IncompleteModelOutput(operation_name, "EMPTY_OUTPUT")
+    return text
 
 
 def _checkpoint_path(checkpoint_dir: Path, index: int, *, namespace: str = "segment") -> Path:
@@ -316,16 +319,22 @@ async def _extract_reference_notes(
                 )
         notes.append(f"### 資料区間 {index}/{len(chunks)}\n{note}")
 
-    reduced = await _reduce_notes(
-        client,
-        notes,
-        operation_name="minutes_reference_reduce",
-        preservation_instruction=(
-            "重複だけを統合し、資料に記載された話題、案、予定、担当候補、期限候補、数値、"
-            "固有名詞、制約、未確認事項を落とさず残してください。資料上の案を決定へ変えず、"
-            "事実を補わないでください。"
-        ),
-    )
+    try:
+        reduced = await _reduce_notes(
+            client,
+            notes,
+            operation_name="minutes_reference_reduce",
+            preservation_instruction=(
+                "重複だけを統合し、資料に記載された話題、案、予定、担当候補、期限候補、数値、"
+                "固有名詞、制約、未確認事項を落とさず残してください。資料上の案を決定へ変えず、"
+                "事実を補わないでください。"
+            ),
+        )
+    except Exception:
+        log.exception("Reference-note integration failed; preserving every reference note")
+        # Do not inject an unbounded failed-reduction payload into the final
+        # model call.  Every note still appears verbatim in the appendix.
+        return "会議資料の統合に失敗したため、本文末尾の全区間メモを参照してください。", notes
     return "\n\n".join(reduced), notes
 
 
@@ -336,6 +345,19 @@ def _coverage_appendix(title: str, notes: list[str], description: str) -> str:
         f"\n\n---\n\n## {title}\n\n"
         f"> {description}\n\n"
         + "\n\n".join(notes)
+    )
+
+
+def _integration_fallback(*, title: str, meeting_date: str) -> str:
+    heading = " ".join(part for part in (meeting_date, title or "会議") if part)
+    heading = " ".join(heading.replace("\r", " ").replace("\n", " ").split())[:200]
+    return (
+        f"# {heading}\n\n"
+        "> ⚠️ 統合版議事録の自動生成が完了しませんでした。"
+        "情報を落とさないため、全区間の自動抽出メモを未統合のまま保存しています。"
+        "この文書は完成版議事録ではなく、人による確認と整形が必要です。\n\n"
+        "## 今日の議題\n\n"
+        "- 自動統合未完了。以下の「区間別詳細」を順に確認してください。"
     )
 
 
@@ -417,20 +439,24 @@ async def generate_minutes(
         notes.append(f"### 区間 {index}/{len(chunks)}\n{note}")
 
     log.info("Combining %s transcript segment notes", len(notes))
-    overview_notes = await _reduce_notes(client, notes)
-    minutes = await _generate(
-        client,
-        prompt=(
-            f"{instruction}\n"
-            "以下は会議の全区間から抽出した統合用メモです。議題ごとに節を分け、重複だけを統合し、"
-            "後半の議題や少数意見も落とさず、区間をまたぐ決定の変化が分かるように記録してください。"
-            "内容が多ければ無理に短くしないでください。区間別詳細は本文末尾にも残るため、"
-            "異なる事実を一つへ圧縮しないでください。\n\n"
-            + _untrusted_data("segment_notes", "\n\n".join(overview_notes))
-        ),
-        operation_name="minutes_combine",
-        max_output_tokens=8192,
-    )
+    try:
+        overview_notes = await _reduce_notes(client, notes)
+        minutes = await _generate(
+            client,
+            prompt=(
+                f"{instruction}\n"
+                "以下は会議の全区間から抽出した統合用メモです。議題ごとに節を分け、重複だけを統合し、"
+                "後半の議題や少数意見も落とさず、区間をまたぐ決定の変化が分かるように記録してください。"
+                "内容が多ければ無理に短くしないでください。区間別詳細は本文末尾にも残るため、"
+                "異なる事実を一つへ圧縮しないでください。\n\n"
+                + _untrusted_data("segment_notes", "\n\n".join(overview_notes))
+            ),
+            operation_name="minutes_combine",
+            max_output_tokens=8192,
+        )
+    except Exception:
+        log.exception("Minutes integration failed; returning complete segment-note fallback")
+        minutes = _integration_fallback(title=title, meeting_date=meeting_date)
     minutes += _coverage_appendix(
         "区間別詳細（自動抽出・未統合）",
         notes,

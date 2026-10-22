@@ -95,18 +95,35 @@ def test_long_curation_source_is_split_deterministically_without_dropping_tail()
     second = expand_curation_documents([document])
 
     assert first == second
-    assert len(first) == 3
+    assert len(first) > 3
     assert first[0]["source_document_key"] == document["document_key"]
     assert first[0]["source_segment_start"] == 0
     assert first[-1]["source_segment_end"] == len(document["body"])
     assert "末尾の重要な決定" in first[-1]["body"]
-    assert [item["source_segment_index"] for item in first] == [1, 2, 3]
+    assert [item["source_segment_index"] for item in first] == list(range(1, len(first) + 1))
     # Every original character belongs to the non-overlap core of one segment.
     cores = [
         document["body"][item["source_segment_start"] : item["source_segment_end"]]
         for item in first
     ]
     assert "".join(cores) == document["body"]
+
+
+def test_long_curation_uses_small_units_so_distant_topics_do_not_share_one_plan():
+    document = source_document()
+    document["body"] = "新歓Webの決定" + ("A" * 12_000) + "整理券の決定" + ("B" * 2_000)
+
+    segments = expand_curation_documents([document])
+    welcome = [item for item in segments if "新歓Webの決定" in item["body"]]
+    standby = [item for item in segments if "整理券の決定" in item["body"]]
+
+    assert welcome and standby
+    assert {item["document_key"] for item in welcome}.isdisjoint(
+        {item["document_key"] for item in standby}
+    )
+    assert max(len(item["body"]) for item in segments) <= (
+        curation.CURATION_SEGMENT_CHARS + 2 * curation.CURATION_SEGMENT_OVERLAP_CHARS
+    )
 
 
 def test_topic_identity_is_normalized_deterministic_and_filesystem_safe():
@@ -254,6 +271,25 @@ def test_legacy_json_state_is_backed_up_and_imported(tmp_path):
     assert path.with_suffix(".json.legacy.json").is_file()
 
 
+def test_legacy_json_migration_keeps_original_when_import_crashes(tmp_path, monkeypatch):
+    path = tmp_path / "knowledge-curation-state.json"
+    original = json.dumps(
+        {"schema_version": 1, "documents": {"old": {"sha256": "abc"}}}
+    )
+    path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        TopicStateStore,
+        "_import_legacy",
+        lambda _self, _payload: (_ for _ in ()).throw(RuntimeError("crash")),
+    )
+
+    with pytest.raises(RuntimeError, match="crash"):
+        TopicStateStore(path)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert json.loads(path.read_text(encoding="utf-8"))["documents"]["old"]["sha256"] == "abc"
+
+
 def test_collect_topic_evidence_keeps_discord_code_and_knowledge_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
     store = RagStore(tmp_path / "rag.sqlite3")
@@ -272,6 +308,7 @@ def test_collect_topic_evidence_keeps_discord_code_and_knowledge_sources(tmp_pat
             10,
         ),
         ("code-related", "source_code", 0, "deployed_implementation", "active", "guild", None),
+        ("code-history", "source_code_history", 0, "repository_history", "historical", "guild", None),
         ("knowledge-related", "knowledge_repository", 0, "curated", "active", "guild", None),
     )
     for key, source_type, guild_id, authority, status, scope, channel_id in records:
@@ -295,9 +332,54 @@ def test_collect_topic_evidence_keeps_discord_code_and_knowledge_sources(tmp_pat
     assert {item.source_type for item in result} >= {
         "discord_conversation",
         "source_code",
+        "source_code_history",
         "knowledge_repository",
     }
     assert intersect_access_scopes(result) == AccessDecision("channel", 10, "single-private-channel")
+
+
+def test_curation_deny_policy_wins_over_guild_and_channel_allowlists(monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10,20")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", "10")
+    denied_by_id = source_document()
+
+    assert curation.curation_document_allowed(denied_by_id) is False
+
+    denied_by_term = source_document() | {
+        "channel_id": 20,
+        "access_scope": "guild",
+        "category": "28th 選考会議",
+    }
+    assert curation.curation_document_allowed(denied_by_term) is False
+
+
+def test_collect_topic_evidence_excludes_related_protected_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
+    store = RagStore(tmp_path / "rag.sqlite3")
+    for key, category in (("safe", "28th IT局"), ("protected", "選考委員会")):
+        store.upsert_document(
+            f"documents/{key}",
+            "新歓Webページの証拠 " * 30,
+            [
+                {"key": "document_key", "string_value": key},
+                {"key": "source_type", "string_value": "discord_conversation"},
+                {"key": "guild_id", "numeric_value": 123},
+                {"key": "channel_id", "numeric_value": 10},
+                {"key": "channel_name", "string_value": key},
+                {"key": "category", "string_value": category},
+                {"key": "festival", "numeric_value": 28},
+                {"key": "authority", "string_value": "conversation"},
+                {"key": "status", "string_value": "raw"},
+                {"key": "access_scope", "string_value": "channel"},
+            ],
+        )
+
+    result = collect_topic_evidence(store, source_document(), ["新歓Webページ"])
+
+    assert "safe" in {item.document_key for item in result}
+    assert "protected" not in {item.document_key for item in result}
 
 
 def test_rag_store_finds_only_reviewed_approved_topic(tmp_path):
@@ -411,6 +493,11 @@ def checkpoint_payload(now: datetime) -> dict:
         "started_at": (now - timedelta(minutes=5)).isoformat(),
         "completed_at": now.isoformat(),
         "status": "completed",
+        "configured_guild_ids": ["123"],
+        "configured_channel_ids": ["10", "20", "30", "40"],
+        "discovered_channel_ids": ["10", "20", "30", "40"],
+        "eligible_channel_ids": ["10", "20", "30", "40"],
+        "missing_channel_ids": [],
         "guilds": {
             "123": {
                 "status": "completed",
@@ -421,6 +508,11 @@ def checkpoint_payload(now: datetime) -> dict:
                 "documents_uploaded": 3,
                 "documents_replaced": 1,
                 "failures": [],
+                "configured_channel_ids": ["10", "20", "30", "40"],
+                "discovered_channel_ids": ["10", "20", "30", "40"],
+                "eligible_channel_ids": ["10", "20", "30", "40"],
+                "missing_channel_ids": [],
+                "completed_channel_ids": ["10", "20", "30", "40"],
             }
         },
     }
@@ -458,6 +550,10 @@ def test_backfill_checkpoint_gate_allows_unset_or_fresh_complete_state(tmp_path,
         ),
         (lambda value: value.update(schema_version=2), "checkpoint-unsupported-schema"),
         (lambda value: value.pop("started_at"), "checkpoint-missing-time-range"),
+        (
+            lambda value: value.update(missing_channel_ids=["99"]),
+            "checkpoint-missing-configured-channels",
+        ),
     ],
 )
 def test_backfill_checkpoint_gate_fails_closed_for_partial_or_failed_cycles(
@@ -554,3 +650,34 @@ async def test_curate_once_keeps_pending_topic_retryable_without_regeneration(tm
     assert second["backpressured"] == 1
     assert draft_mock.await_count == 1
     assert publish_mock.await_count == 1
+
+
+def test_failed_delivery_remains_open_and_cannot_be_replaced_by_new_evidence(tmp_path):
+    store = TopicStateStore(tmp_path / "topics.sqlite3")
+    identity = store.resolve_identity(festival=28, bureau="it", topic="新歓Web")
+    store.observe_topic(
+        identity,
+        title="新歓Web",
+        aliases=[],
+        fingerprint="one",
+        access=AccessDecision("guild", None, "guild-evidence-only"),
+    )
+    failed = store.record_delivery(
+        identity.topic_id,
+        fingerprint="one",
+        bundle_id="bundle-one",
+        status="failed",
+    )
+
+    assert failed.has_open_bundle is True
+    assert store.count_open_bundles() == 1
+    updated = store.observe_topic(
+        identity,
+        title="新歓Web",
+        aliases=[],
+        fingerprint="two",
+        access=AccessDecision("guild", None, "guild-evidence-only"),
+    )
+    assert updated.bundle_id == "bundle-one"
+    assert updated.delivery_status == "failed"
+    assert updated.dirty is True

@@ -1,14 +1,17 @@
 """Gemini 3.5 Transcribeを使う共通文字起こし処理。"""
 
+import array
 import asyncio
 import io
 import logging
 import re
+import sys
+import wave
 from pathlib import Path
 
 from google.genai import types
 
-from bot.ai_completion import require_complete_model_output
+from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
 from bot.ai_models import (
     generation_config,
     log_usage,
@@ -23,6 +26,68 @@ log = logging.getLogger("yagapon.transcription")
 # response model. Once it reports 429, keep all voice sessions on the fallback
 # for a while rather than making every speaker/session probe the exhausted quota.
 _dedicated_transcription_rate_limiter = RateLimitCircuitBreaker()
+
+
+def _pcm_chunk_has_signal(data: bytes, sample_width: int) -> bool:
+    """Conservatively distinguish digital silence from recorded PCM."""
+    if not data:
+        return False
+    if sample_width == 1:
+        return any(abs(sample - 128) > 2 for sample in data)
+    if sample_width == 2:
+        usable = len(data) - (len(data) % 2)
+        samples = array.array("h")
+        samples.frombytes(data[:usable])
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return any(abs(sample) > 32 for sample in samples)
+    if sample_width == 3:
+        return any(
+            abs(int.from_bytes(data[index : index + 3], "little", signed=True)) > 8192
+            for index in range(0, len(data) - 2, 3)
+        )
+    if sample_width == 4:
+        usable = len(data) - (len(data) % 4)
+        samples = array.array("i")
+        samples.frombytes(data[:usable])
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return any(abs(sample) > 2_097_152 for sample in samples)
+    # Unknown PCM layouts are unsafe to call silent when they carry payload.
+    return bool(data)
+
+
+def _audio_has_nontrivial_signal(audio_bytes: bytes, mime_type: str) -> bool:
+    """Return true when an empty STT result would risk dropping real audio."""
+    if len(audio_bytes) < 1000:
+        return False
+    if "wav" not in mime_type.casefold() and not audio_bytes.startswith(b"RIFF"):
+        return True
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as stream:
+            sample_width = stream.getsampwidth()
+            while chunk := stream.readframes(8192):
+                if _pcm_chunk_has_signal(chunk, sample_width):
+                    return True
+            return False
+    except (EOFError, ValueError, wave.Error):
+        # A sizeable malformed/unknown payload is not proof of silence.  Fail
+        # closed so callers retain it for recovery rather than advancing the
+        # durable offset and deleting the recording.
+        return True
+
+
+def _require_transcription_text(
+    text: str,
+    *,
+    audio_bytes: bytes,
+    mime_type: str,
+    operation: str,
+) -> str:
+    normalized = text.strip()
+    if not normalized and _audio_has_nontrivial_signal(audio_bytes, mime_type):
+        raise IncompleteModelOutput(operation, "EMPTY_OUTPUT_WITH_AUDIO")
+    return normalized
 
 
 def _fallback_prompt(*, diarization: bool, custom_vocabulary: list[str] | None) -> str:
@@ -141,7 +206,12 @@ async def transcribe_audio(
                 model = transcribe_model()
                 log_usage(log, "transcription", model, response)
                 require_complete_model_output(response, operation="transcription_create")
-                return (response.output_text or "").strip()
+                return _require_transcription_text(
+                    response.output_text or "",
+                    audio_bytes=audio_bytes,
+                    mime_type=mime_type,
+                    operation="transcription_create",
+                )
             except RateLimitExceeded as exc:
                 cooldown = _dedicated_transcription_rate_limiter.trip(
                     retry_after=exc.retry_after
@@ -265,7 +335,12 @@ async def transcribe_audio(
             fallback_response,
             operation="transcription_fallback",
         )
-        text = (fallback_response.text or "").strip()
+        text = _require_transcription_text(
+            fallback_response.text or "",
+            audio_bytes=audio_bytes,
+            mime_type=mime_type,
+            operation="transcription_fallback",
+        )
         return _replace_registered_labels(text, voiceprint_labels)
     finally:
         for temporary in [uploaded, *uploaded_voiceprints]:

@@ -28,6 +28,14 @@ SENSITIVE_PATTERNS = {
     "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "github-token": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
     "google-api-key": re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),
+    "discord-token": re.compile(
+        r"\bmfa\.[A-Za-z0-9_-]{20,}\b|\b[MN][A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{20,}\b"
+    ),
+    "cloud-access-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    "oauth-token": re.compile(r"\b(?:ya29\.[A-Za-z0-9_-]{20,}|1//[A-Za-z0-9_-]{20,})\b"),
+    "webhook-url": re.compile(
+        r"https://(?:discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+|hooks\.slack\.com/services/[A-Za-z0-9_/-]+)"
+    ),
     "credential-assignment": re.compile(
         r"(?i)(?:password|passwd|secret|api[_ -]?key|token|パスワード)\s*[:=]\s*[^\s]{8,}"
     ),

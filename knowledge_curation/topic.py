@@ -12,14 +12,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Literal
 
-OPEN_DELIVERY_STATUSES = frozenset({"pending", "queued", "published"})
+OPEN_DELIVERY_STATUSES = frozenset({"pending", "failed", "queued", "published"})
 RETRYABLE_DELIVERY_STATUSES = frozenset({"pending", "failed"})
 TERMINAL_SOURCE_STATUSES = frozenset(
     {"no-knowledge", "delivered", "blocked-sensitive-content", "blocked-access", "blocked-routing"}
@@ -199,9 +201,10 @@ class TopicStateStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         legacy = self._extract_legacy_json()
-        self._initialize()
-        if legacy:
-            self._import_legacy(legacy)
+        if legacy is None:
+            self._initialize()
+        else:
+            self._migrate_legacy(legacy)
 
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=5)
@@ -222,11 +225,51 @@ class TopicStateStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        backup = self.path.with_suffix(self.path.suffix + ".legacy.json")
-        if backup.exists():
-            backup = self.path.with_name(f"{self.path.name}.{int(_utc_now().timestamp())}.legacy.json")
-        os.replace(self.path, backup)
         return payload if isinstance(payload, dict) else None
+
+    def _migrate_legacy(self, payload: dict) -> None:
+        """Build the replacement database before atomically replacing JSON.
+
+        The old implementation renamed the only state file before SQLite was
+        initialized/imported.  A crash in between left the configured path
+        missing.  Here the JSON remains authoritative until a complete SQLite
+        file is ready, while a separate backup preserves the human-readable
+        source after the atomic swap.
+        """
+        original_path = self.path
+        backup = original_path.with_suffix(original_path.suffix + ".legacy.json")
+        if backup.exists():
+            backup = original_path.with_name(
+                f"{original_path.name}.{int(_utc_now().timestamp())}.{uuid.uuid4().hex[:8]}.legacy.json"
+            )
+        backup_temporary = backup.with_suffix(backup.suffix + ".tmp")
+        shutil.copyfile(original_path, backup_temporary)
+        with backup_temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(backup_temporary, backup)
+
+        temporary = original_path.with_name(f".{original_path.name}.{uuid.uuid4().hex}.migrating")
+        try:
+            self.path = temporary
+            self._initialize()
+            self._import_legacy(payload)
+            with self._connect() as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.path = original_path
+            os.replace(temporary, original_path)
+        except BaseException:
+            self.path = original_path
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    Path(f"{temporary}{suffix}").unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        finally:
+            try:
+                backup_temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -397,12 +440,12 @@ class TopicStateStore:
                 connection.execute(
                     """UPDATE topics SET title=?, aliases_json=?, access_scope=?, channel_id=?,
                        observed_fingerprint=?, delivery_status=CASE
-                           WHEN ? AND delivery_status NOT IN ('pending','queued','published') THEN 'dirty'
+                           WHEN ? AND delivery_status NOT IN ('pending','failed','queued','published') THEN 'dirty'
                            ELSE delivery_status END,
-                       attempts=CASE WHEN ? AND delivery_status NOT IN ('pending','queued','published') THEN 0 ELSE attempts END,
-                       next_attempt_at=CASE WHEN ? AND delivery_status NOT IN ('pending','queued','published') THEN NULL ELSE next_attempt_at END,
-                       bundle_id=CASE WHEN ? AND delivery_status NOT IN ('pending','queued','published') THEN NULL ELSE bundle_id END,
-                       bundle_fingerprint=CASE WHEN ? AND delivery_status NOT IN ('pending','queued','published') THEN NULL ELSE bundle_fingerprint END,
+                       attempts=CASE WHEN ? AND delivery_status NOT IN ('pending','failed','queued','published') THEN 0 ELSE attempts END,
+                       next_attempt_at=CASE WHEN ? AND delivery_status NOT IN ('pending','failed','queued','published') THEN NULL ELSE next_attempt_at END,
+                       bundle_id=CASE WHEN ? AND delivery_status NOT IN ('pending','failed','queued','published') THEN NULL ELSE bundle_id END,
+                       bundle_fingerprint=CASE WHEN ? AND delivery_status NOT IN ('pending','failed','queued','published') THEN NULL ELSE bundle_fingerprint END,
                        updated_at=? WHERE topic_id=?""",
                     (
                         title,
@@ -601,7 +644,7 @@ class TopicStateStore:
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT count(*) AS count FROM topics
-                   WHERE delivery_status IN ('pending','queued','published') AND bundle_id IS NOT NULL"""
+                   WHERE delivery_status IN ('pending','failed','queued','published') AND bundle_id IS NOT NULL"""
             ).fetchone()
         return int(row["count"])
 

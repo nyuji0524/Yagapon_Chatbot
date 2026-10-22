@@ -101,6 +101,22 @@ async def test_voice_reference_collection_truncates_at_character_limit():
 
 
 @pytest.mark.asyncio
+async def test_voice_reference_keeps_material_beyond_old_120k_limit():
+    session = VoiceSession(
+        _realtime_bot(),
+        28,
+        SimpleNamespace(id=999),
+        VoiceMode.MEETING,
+    )
+    content = "長期会議資料" * 30_000
+
+    assert len(content) > 120_000
+    assert await session.add_reference(content)
+    assert content in session._reference_docs[0]
+    assert "[資料上限により以降を省略]" not in session._reference_docs[0]
+
+
+@pytest.mark.asyncio
 async def test_factual_voice_question_uses_guarded_corpus_path(monkeypatch):
     query = AsyncMock(
         return_value=SimpleNamespace(

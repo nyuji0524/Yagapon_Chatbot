@@ -170,10 +170,12 @@ async def test_long_minutes_reuses_completed_segment_checkpoints(tmp_path, monke
     monkeypatch.setattr("bot.minutes_generation.TRANSCRIPT_CHUNK_CHARS", 40)
     transcript = "[Speaker 1]: 最初の議題について詳しく話します\n[Speaker 2]: 次の議題について詳しく話します"
 
-    with pytest.raises(RuntimeError, match="combine failed"):
-        await generate_minutes(first_client, transcript, checkpoint_dir=tmp_path)
+    fallback = await generate_minutes(first_client, transcript, checkpoint_dir=tmp_path)
 
     assert len(list(tmp_path.glob("segment-*.json"))) == 2
+    assert "統合版議事録の自動生成が完了しません" in fallback
+    assert "### 区間 1/2\n区間1" in fallback
+    assert "### 区間 2/2\n区間2" in fallback
     resumed_generate = AsyncMock(return_value=SimpleNamespace(text="# 復旧した議事録"))
     resumed_client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=resumed_generate)))
 
@@ -197,6 +199,20 @@ async def test_minutes_rejects_explicitly_truncated_model_output():
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
 
     with pytest.raises(IncompleteModelOutput, match="minutes_format.*MAX_TOKENS"):
+        await generate_minutes(client, "Speaker 1: 長い会議の内容")
+
+
+@pytest.mark.asyncio
+async def test_minutes_rejects_empty_success_response():
+    generated = AsyncMock(
+        return_value=SimpleNamespace(
+            text="",
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+    )
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated)))
+
+    with pytest.raises(IncompleteModelOutput, match="minutes_format.*EMPTY_OUTPUT"):
         await generate_minutes(client, "Speaker 1: 長い会議の内容")
 
 

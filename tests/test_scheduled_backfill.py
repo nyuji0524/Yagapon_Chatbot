@@ -87,6 +87,9 @@ async def test_scheduled_cycle_is_incremental_and_checkpoints_after_completion(
     assert guild["channels_total"] == 2
     assert guild["channels_completed"] == 2
     assert guild["messages_indexed"] == 30
+    assert guild["discovered_channel_ids"] == ["10", "20", "30"]
+    assert guild["eligible_channel_ids"] == ["10", "20"]
+    assert guild["completed_channel_ids"] == ["10", "20"]
     assert bot.config.set_backfill_cursor.await_count == 2
     assert bot.corpus.finish_backfill.call_args_list == [((1,), {})]
     assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "completed"
@@ -131,7 +134,7 @@ async def test_scheduled_cycle_defers_when_manual_backfill_owns_lock(
     ).run_once()
 
     guild = result["guilds"]["1"]
-    assert result["status"] == "completed"
+    assert result["status"] == "failed"
     assert guild["status"] == "deferred"
     bot.corpus.backfill_channel.assert_not_awaited()
     bot.corpus.finish_backfill.assert_not_called()
@@ -149,3 +152,54 @@ async def test_scheduler_stop_cancels_sleeping_loop(tmp_path, monkeypatch):
     await manager.stop()
 
     assert manager.running is False
+
+
+@pytest.mark.asyncio
+async def test_scheduled_cycle_rejects_missing_configured_channel_and_releases_lock(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10,999")
+    bot = _bot()
+
+    result = await ScheduledBackfillManager(
+        bot,
+        state_path=tmp_path / "scheduled.json",
+    ).run_once()
+
+    assert result["status"] == "failed"
+    assert result["configured_channel_ids"] == ["10", "999"]
+    assert result["discovered_channel_ids"] == ["10", "20", "30"]
+    assert result["eligible_channel_ids"] == ["10"]
+    assert result["missing_channel_ids"] == ["999"]
+    bot.corpus.finish_backfill.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_cycle_persists_running_then_interrupted_atomically(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    state_path = tmp_path / "scheduled.json"
+    manager = ScheduledBackfillManager(_bot(), state_path=state_path)
+    entered = asyncio.Event()
+
+    async def wait_forever(_guild_id):
+        assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "running"
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "_refresh_guild", wait_forever)
+    task = asyncio.create_task(manager.run_once())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == "interrupted"
+    assert checkpoint["completed_at"]
+    assert checkpoint["error_type"] == "CancelledError"
+    assert not state_path.with_suffix(".json.tmp").exists()

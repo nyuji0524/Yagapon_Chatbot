@@ -139,63 +139,97 @@ class ScheduledBackfillManager:
 
     async def run_once(self) -> dict:
         started_at = datetime.now(timezone.utc).isoformat()
+        guild_ids = configured_guild_ids()
+        selected_channel_ids = configured_channel_ids()
         result = {
             "schema_version": 1,
             "started_at": started_at,
             "completed_at": None,
             "status": "running",
+            "configured_guild_ids": [str(value) for value in guild_ids],
+            "configured_channel_ids": [str(value) for value in sorted(selected_channel_ids)],
+            "discovered_channel_ids": [],
+            "eligible_channel_ids": [],
+            "missing_channel_ids": [],
             "guilds": {},
         }
-        for guild_id in configured_guild_ids():
-            result["guilds"][str(guild_id)] = await self._refresh_guild(guild_id)
-        failed = any(
-            item["status"] == "failed" for item in result["guilds"].values()
-        )
-        result["status"] = "failed" if failed else "completed"
+        # Persist the in-progress marker before touching Discord. A crash or
+        # forced stop must never leave yesterday's successful checkpoint looking
+        # current to the downstream curation worker.
+        _write_state(self.state_path, result)
+        try:
+            if not guild_ids:
+                raise RuntimeError("no-configured-guilds")
+            for guild_id in guild_ids:
+                result["guilds"][str(guild_id)] = await self._refresh_guild(guild_id)
+
+            discovered = {
+                value
+                for item in result["guilds"].values()
+                for value in item.get("discovered_channel_ids", [])
+            }
+            eligible = {
+                value
+                for item in result["guilds"].values()
+                for value in item.get("eligible_channel_ids", [])
+            }
+            configured = {str(value) for value in selected_channel_ids}
+            result["discovered_channel_ids"] = sorted(discovered, key=int)
+            result["eligible_channel_ids"] = sorted(eligible, key=int)
+            result["missing_channel_ids"] = sorted(configured - eligible, key=int)
+            failed = any(item.get("status") != "completed" for item in result["guilds"].values())
+            if result["missing_channel_ids"]:
+                failed = True
+            result["status"] = "failed" if failed else "completed"
+        except asyncio.CancelledError:
+            result["status"] = "interrupted"
+            result["error_type"] = "CancelledError"
+            result["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _write_state(self.state_path, result)
+            raise
+        except Exception as exc:
+            result["status"] = "failed"
+            result["error_type"] = type(exc).__name__
+            result["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _write_state(self.state_path, result)
+            raise
         result["completed_at"] = datetime.now(timezone.utc).isoformat()
-        await asyncio.to_thread(_write_state, self.state_path, result)
+        _write_state(self.state_path, result)
         return result
 
     async def _refresh_guild(self, guild_id: int) -> dict:
         guild = self.bot.get_guild(guild_id)
         corpus_store = self.bot.config.get_corpus(guild_id)
-        if guild is None or not corpus_store:
-            return {
-                "status": "failed",
-                "reason": "guild-or-corpus-unavailable",
-                "channels_total": 0,
-                "channels_completed": 0,
-                "failures": [],
-            }
-        if not self.bot.corpus.start_backfill(guild_id):
-            # A manual or API run owns the same lock. This is a normal deferred
-            # cycle, not a second concurrent refresh.
-            return {
-                "status": "deferred",
-                "reason": "backfill-already-running",
-                "channels_total": 0,
-                "channels_completed": 0,
-                "failures": [],
-            }
-
         selected_ids = configured_channel_ids()
-        channels = [
-            channel
-            for channel in guild.text_channels
-            if channel.permissions_for(guild.me).read_message_history
-            and not self.bot.config.is_ignored(guild_id, channel.id)
-            and (not selected_ids or channel.id in selected_ids)
-        ]
-        summary = {
-            "status": "running",
+        base_summary = {
+            "status": "failed",
             "reason": None,
-            "channels_total": len(channels),
+            "configured_channel_ids": [],
+            "discovered_channel_ids": [],
+            "eligible_channel_ids": [],
+            "missing_channel_ids": [],
+            "channels_total": 0,
             "channels_completed": 0,
+            "completed_channel_ids": [],
             "messages_indexed": 0,
             "documents_uploaded": 0,
             "documents_replaced": 0,
             "failures": [],
         }
+        if guild is None or not corpus_store:
+            return base_summary | {
+                "reason": "guild-or-corpus-unavailable",
+                "missing_channel_ids": [str(value) for value in sorted(selected_ids)],
+            }
+        if not self.bot.corpus.start_backfill(guild_id):
+            # A manual or API run owns the same lock. This is a normal deferred
+            # cycle, not a second concurrent refresh.
+            return base_summary | {
+                "status": "deferred",
+                "reason": "backfill-already-running",
+            }
+
+        summary = dict(base_summary)
         summary_lock = asyncio.Lock()
 
         async def process_channel(channel) -> None:
@@ -223,6 +257,7 @@ class ScheduledBackfillManager:
                     summary["messages_indexed"] += channel_result.messages_indexed
                     summary["documents_uploaded"] += channel_result.documents_uploaded
                     summary["documents_replaced"] += channel_result.documents_replaced
+                    summary["completed_channel_ids"].append(str(channel.id))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -243,6 +278,40 @@ class ScheduledBackfillManager:
                     summary["channels_completed"] += 1
 
         try:
+            discovered_channels = list(guild.text_channels)
+            discovered_ids = {int(channel.id) for channel in discovered_channels}
+            readable_channels = [
+                channel
+                for channel in discovered_channels
+                if channel.permissions_for(guild.me).read_message_history
+                and not self.bot.config.is_ignored(guild_id, channel.id)
+            ]
+            channels = [
+                channel
+                for channel in readable_channels
+                if not selected_ids or channel.id in selected_ids
+            ]
+            eligible_ids = {int(channel.id) for channel in channels}
+            local_configured = selected_ids & discovered_ids
+            local_missing = local_configured - eligible_ids
+            summary.update(
+                {
+                    "status": "running",
+                    "configured_channel_ids": [str(value) for value in sorted(local_configured)],
+                    "discovered_channel_ids": [str(value) for value in sorted(discovered_ids)],
+                    "eligible_channel_ids": [str(value) for value in sorted(eligible_ids)],
+                    "missing_channel_ids": [str(value) for value in sorted(local_missing)],
+                    "channels_total": len(channels),
+                }
+            )
+            if not channels:
+                summary["status"] = "failed"
+                summary["reason"] = "no-eligible-channels"
+                return summary
+            if local_missing:
+                summary["status"] = "failed"
+                summary["reason"] = "configured-channels-not-readable"
+                return summary
             await run_backfill_channels(
                 channels,
                 process_channel,
@@ -255,24 +324,28 @@ class ScheduledBackfillManager:
         except asyncio.CancelledError:
             summary["status"] = "interrupted"
             raise
+        except Exception as exc:
+            summary["status"] = "failed"
+            summary["reason"] = "guild-refresh-error"
+            summary["failures"].append({"channel_id": None, "error_type": type(exc).__name__})
+            log.exception("Scheduled backfill failed while preparing guild=%s", guild_id)
         finally:
             self.bot.corpus.finish_backfill(guild_id)
-
-        operations = getattr(self.bot, "operations", None)
-        if operations is not None and hasattr(operations, "record_event"):
-            try:
-                operations.record_event(
-                    "backfill",
-                    "scheduled_refresh",
-                    summary["status"],
-                    guild_id=guild_id,
-                    details={
-                        key: value
-                        for key, value in summary.items()
-                        if key not in {"failures", "reason"}
-                    }
-                    | {"failure_count": len(summary["failures"])},
-                )
-            except Exception:
-                log.exception("Could not record scheduled backfill telemetry")
+            operations = getattr(self.bot, "operations", None)
+            if operations is not None and hasattr(operations, "record_event"):
+                try:
+                    operations.record_event(
+                        "backfill",
+                        "scheduled_refresh",
+                        summary["status"],
+                        guild_id=guild_id,
+                        details={
+                            key: value
+                            for key, value in summary.items()
+                            if key not in {"failures", "reason"}
+                        }
+                        | {"failure_count": len(summary["failures"])},
+                    )
+                except Exception:
+                    log.exception("Could not record scheduled backfill telemetry")
         return summary
