@@ -32,6 +32,7 @@ def test_bot_and_worker_receive_the_same_curation_policy():
         "YAGAPON_SCHEDULED_BACKFILL_ENABLED",
         "YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS",
         "YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS",
+        "YAGAPON_SCHEDULED_BACKFILL_STATE",
     }
 
     assert shared_policy <= set(bot_environment)

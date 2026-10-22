@@ -3479,8 +3479,14 @@ class CorpusManager:
         dry_run: bool = False,
         session: BackfillSession | None = None,
         complete_session_channel: bool = True,
+        full_history: bool = False,
+        authorize_history_promotion: bool = False,
     ) -> BackfillResult:
         """履歴を再現可能な文書へ変換し、成功後に同範囲の旧文書を置換する。"""
+        if authorize_history_promotion and not full_history:
+            raise ValueError(
+                "authorize_history_promotion requires full_history=True"
+            )
         if session is not None:
             if int(channel.guild.id) != session.guild_id:
                 raise ValueError("Backfill session guild does not match channel")
@@ -3545,13 +3551,14 @@ class CorpusManager:
                     progress_callback = None
 
         # Discord exposes only the current ACL, not the ACL that protected an
-        # old message when it was written. Backfilled history must therefore
-        # never autonomously become a repository Knowledge Draft. Operators
-        # can still opt specific reviewed channels in at the curation boundary.
+        # old message when it was written. Backfilled history therefore stays
+        # ineligible by default. The administrator-only full-history command
+        # may explicitly re-evaluate the current audience, while the shared
+        # policy still rejects role-private and protected channels.
         documents = self._build_knowledge_documents(
             channel,
             messages,
-            allow_automatic_promotion=False,
+            allow_automatic_promotion=authorize_history_promotion,
         )
         if dry_run:
             # Keep this explicit even though the counter is incremented above;

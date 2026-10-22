@@ -109,9 +109,11 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
   Forum親はpublic投稿へ展開し、private threadはそのthread ID自体を明示した場合だけ扱う。
 - Raw索引とGitHub Knowledgeへの外部化は別境界である。全readable履歴は`access_scope=channel`のまま
   RAGへ登録する。リアルタイム受信は、その時点でguild全員が読めると検証できた場合だけ自動Draft候補にする。
-  過去ログは投稿当時のACLをDiscordから証明できないため、現在公開チャンネルでもbackfill由来の
-  `auto_promote`を常にfalseにする。過去ログをKnowledge化する場合は、
-  `YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`による明示許可または管理者の明示申請を使う。
+  定期・差分backfill由来の過去ログは、投稿当時のACLをDiscordから証明できないため`auto_promote=false`
+  のままにする。管理者が全期間モードを明示実行した場合だけ、実行元Guildの現在ACLを再評価し、全員が
+  読める履歴へ`auto_promote=true`を付ける。同時に再構築される他の設定済みGuildへこの同意は波及しない。
+  `YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`は、役職限定チャンネルも対象にできる意図的な固定overrideである。
+  値は正のDiscord channel IDだけを許可し、不正値や正しいIDとの混在は空設定へ読み替えず整理全体を保留する。
 
 ### 旧outboxを移行する
 
@@ -200,17 +202,38 @@ YAGAPON_KNOWLEDGE_BACKFILL_MAX_AGE_SECONDS=28800
 YAGAPON_SCHEDULED_BACKFILL_ENABLED=false
 YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS=<差分取得を許可するGuild ID>
 YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS=<任意の限定Channel/Forum親ID。空なら動的全対象>
+YAGAPON_SCHEDULED_BACKFILL_STATE=/data/scheduled-backfill-state.json
 YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
 YAGAPON_SCHEDULED_BACKFILL_RETRY_SECONDS=900
 YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
 ```
 
-`YAGAPON_KNOWLEDGE_BACKFILL_STATE`は任意である。未設定なら従来どおり独立して整理する。設定時は、
-指定時刻以内に完了したschema v1のcheckpointについて、対象guildがすべて`status=completed`、
+schedulerを使わない単独curatorだけは`YAGAPON_KNOWLEDGE_BACKFILL_STATE`未設定で独立実行できる。
+scheduler有効時と権限者による全期間取得時は同設定が必須であり、解決後のパスがproducer側の
+`YAGAPON_SCHEDULED_BACKFILL_STATE`と一致しなければ、全期間取得も整理も開始せずfail closedとする。
+一致する設定では、
+指定時刻以内に完了したschema v2のcheckpointについて、対象guildがすべて`status=completed`、
 `failures=[]`、`channels_completed == channels_total`の場合だけ整理を開始する。ファイル欠落、古い時刻、
 `failed`、`deferred`、`interrupted`、一部チャンネル失敗はいずれもfail closedとなり、古いコーパスから
 新しい草案を生成しない。workerへscheduler設定が渡されている場合はschedulerが有効で、かつ
 checkpoint内のGuild inventoryと、動的に検出したeligible/completed inventoryが整合することも必須とする。
+schedulerは取得開始時のbot-readableな`eligible_channel_ids`とは別に、全Guildの処理完了直前にACLを
+再評価した`current_curation_eligible_channel_ids`（botが現在読め、ignore/deny/protectedでない実対象）と
+`current_public_curation_channel_ids`（そのうちguild全員へ公開中の実対象）を保存する。整理側は固定overrideが
+空の場合、保存済み`auto_promote=true`と最新current-public inventoryの両方を要求する。公開チャンネルを
+役職限定へ変更すると、以前の資料に`auto_promote=true`が残っていても次の正常checkpointから候補資格を失う。
+固定overrideは公開・`auto_promote`条件だけを意図的に上書きし、最新current-eligible inventoryには必ず
+含まれなければならない。したがって役職限定は許可できるが、後からignore/protected/閲覧不能になった対象は
+送信しない。
+キャッシュ外のpublic archived threadは完了直前に現在の親から再列挙し、削除済みthreadや親が解決できない
+threadは古い取得時objectへfallbackせず除外する。整理workerは再送時にもbundleの全出典を現行RagStoreから
+再読込し、digest一致とcurrent-public資格を
+再確認する。欠落・変更・権限失効があれば外部送信せず`blocked-access`として保留する。
+初回送信でも、モデル生成後かつbundle作成直前に全出典を現行RagStoreへ再bindし、本文hash、trusted metadata、
+最新ACLを再確認する。長文のvirtual segmentは元documentを再読込して同じ区間を再構成し、元documentの
+key/versionを再送lineageへ保存する。
+新規bundleは全出典lineageのschema・完全性・件数をSQLiteへ保存する。upgrade前のbundleやlineage metadataが
+欠けたbundleは、主資料だけの記録を完全な出典一覧とみなさず、再送せず`retry_blocked`として保留する。
 schedulerの無効化や
 設定変更前の成功checkpointは再利用しない。
 
@@ -221,9 +244,18 @@ KnowledgeリポジトリのOrganization/Repository Actions設定では、Workflo
 `YAGAPON_KNOWLEDGE_CURATION_ENABLED=false`のままにする。
 
 Discord会話は検索上 `access_scope=channel` を維持する。`YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS`が
-空の場合、取り込み時にguild全員が読めることをDiscord権限から検証し、`auto_promote=true`を付けた資料だけが
-非公開Knowledgeリポジトリの確認待ち草案になる。IDを設定した場合はその明示subsetだけに限定する。
+空の場合、取り込み時にguild全員が読めることをDiscord権限から検証して`auto_promote=true`を付け、かつ
+最新checkpointでも全員に公開中と確認できた資料だけが非公開Knowledgeリポジトリの確認待ち草案になる。
+IDを設定した場合はその明示subsetだけに限定し、current-public判定と`auto_promote`を意図的にoverrideするため、
+役職限定チャンネルも対象にできる。
 deny対象と`restricted`資料は、どちらの場合も自動送信しない。
+
+定期・差分バックフィルは、過去の投稿時点のACLをDiscordから復元できないため、履歴を自動では
+`auto_promote=true`にしない。管理者が`/knowledge refresh historical`を明示実行した場合に限り、
+実行元Guildの現在Discord ACLを再評価し、`@everyone`が閲覧と履歴参照の両方を持つ非保護チャンネルの
+履歴だけを候補化する。明示overrideを除く役職限定の通常チャンネルは検索コーパスだけに残り、private
+threadはthread ID自体をbackfill設定へ明示した場合だけ検索対象になる。`/ignore`とdeny/protected対象は
+検索取得からも除外する。これらをGCSやGitHubへ自動送信しない。
 
 承認後にKnowledge PRがmainへ入ると、`source-index-watch`がcommit SHAの変更を検出する。
 front matterのstatusが`active`または`historical`の文書だけを

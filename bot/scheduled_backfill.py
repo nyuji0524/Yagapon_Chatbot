@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -25,7 +26,11 @@ from bot.corpus import (
     run_backfill_channels,
 )
 from bot.festival import JST, festival_number, festival_period
-from bot.knowledge_policy import protected_channel
+from bot.knowledge_pipeline import KnowledgePipelineBusy, knowledge_pipeline_lock
+from bot.knowledge_policy import (
+    automatic_knowledge_promotion_allowed,
+    protected_channel,
+)
 
 log = logging.getLogger("yagapon.scheduled_backfill")
 
@@ -33,6 +38,9 @@ DEFAULT_INTERVAL_SECONDS = 6 * 60 * 60
 MIN_INTERVAL_SECONDS = 6 * 60 * 60
 DEFAULT_INITIAL_DELAY_SECONDS = 5 * 60
 DEFAULT_RETRY_SECONDS = 15 * 60
+CHECKPOINT_WRITER_RETRY_SECONDS = 0.1
+CHECKPOINT_SCHEMA_VERSION = 2
+DEFAULT_STATE_PATH = Path("/data/scheduled-backfill-state.json")
 
 
 class ScheduledBackfillConfigurationError(ValueError):
@@ -94,6 +102,12 @@ def configured_inventory() -> tuple[tuple[int, ...], frozenset[int]]:
     return configured_guild_ids(), configured_channel_ids()
 
 
+def scheduled_backfill_state_path() -> Path:
+    """Return the producer checkpoint path used by the live scheduler."""
+    configured = os.environ.get("YAGAPON_SCHEDULED_BACKFILL_STATE", "").strip()
+    return Path(configured) if configured else DEFAULT_STATE_PATH
+
+
 def scheduler_enabled() -> bool:
     if not scheduler_requested():
         return False
@@ -152,12 +166,18 @@ def next_backfill_delay(interval: int, retry_interval: int, result: dict | None)
 
 def _write_state(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    # Multiple bot processes can briefly coexist during a restart.  A fixed
+    # ``.tmp`` name lets their atomic writers corrupt or delete one another's
+    # staging file even when the final publication is otherwise serialized.
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _channel_parent(channel, parents_by_id: dict[int, object]):
@@ -171,6 +191,102 @@ def _channel_parent(channel, parents_by_id: dict[int, object]):
         return parents_by_id.get(int(parent_id))
     except (TypeError, ValueError):
         return None
+
+
+def _cached_guild_channel(guild, channel_id: int):
+    """Resolve a currently cached message target, or fail closed if deleted.
+
+    Captured channel objects can outlive a Discord delete event. The final ACL
+    snapshot therefore requires the guild's current cache to resolve the ID.
+    Archived public threads and explicitly selected private threads are handled
+    separately by re-listing their live parent's archive rather than trusting
+    this cache lookup.
+    """
+    if guild is None:
+        return None
+    for method_name in ("get_channel_or_thread", "get_channel", "get_thread"):
+        method = getattr(guild, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            resolved = method(channel_id)
+        except Exception:
+            return None
+        if resolved is not None:
+            return resolved
+    return None
+
+
+async def _resolve_current_message_target(
+    guild,
+    channel,
+    captured_parent,
+    archived_threads_cache: dict[tuple[int, int, bool], dict[int, object]],
+):
+    """Resolve a target from current guild state, including archived threads.
+
+    Pycord does not generally retain ``ThreadIterator`` results in the guild
+    cache. Re-list the matching public/private archive from the currently
+    cached parent so those targets can still be authorized, while a deleted
+    thread or parent fails closed instead of falling back to a stale captured
+    object.
+    """
+    channel_id = int(channel.id)
+    current_channel = _cached_guild_channel(guild, channel_id)
+    parent_id = getattr(current_channel or channel, "parent_id", None)
+    if parent_id is None:
+        parent_id = getattr(captured_parent, "id", None)
+
+    if current_channel is not None:
+        if parent_id is None:
+            return current_channel, None
+        current_parent = _cached_guild_channel(guild, int(parent_id))
+        if current_parent is None:
+            return None, None
+        return current_channel, current_parent
+
+    if captured_parent is None:
+        return None, None
+    try:
+        parent_id = int(parent_id)
+    except (TypeError, ValueError):
+        return None, None
+    current_parent = _cached_guild_channel(guild, parent_id)
+    archived_threads = getattr(current_parent, "archived_threads", None)
+    if current_parent is None or not callable(archived_threads):
+        return None, None
+
+    private = _private_thread(channel)
+    cache_key = (int(guild.id), parent_id, private)
+    if cache_key not in archived_threads_cache:
+        try:
+            current_archives = await _materialize_threads(
+                archived_threads(
+                    private=private,
+                    joined=private,
+                    limit=None,
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception(
+                "Scheduled backfill could not revalidate archived threads "
+                "guild=%s parent=%s",
+                guild.id,
+                parent_id,
+            )
+            current_archives = []
+        archived_threads_cache[cache_key] = {
+            int(thread.id): thread
+            for thread in current_archives
+            if getattr(thread, "id", None) is not None
+            and _private_thread(thread) is private
+        }
+    current_channel = archived_threads_cache[cache_key].get(channel_id)
+    if current_channel is None:
+        return None, None
+    return current_channel, current_parent
 
 
 def _readable_channel(config, guild_id: int, channel, member, *, parent=None) -> bool:
@@ -240,16 +356,17 @@ class ScheduledBackfillManager:
 
     def __init__(self, bot, *, state_path: Path | None = None):
         self.bot = bot
-        self.state_path = state_path or Path(
-            os.environ.get(
-                "YAGAPON_SCHEDULED_BACKFILL_STATE",
-                "/data/scheduled-backfill-state.json",
-            )
-        )
+        self.state_path = state_path or scheduled_backfill_state_path()
         self._task: asyncio.Task | None = None
         # The scheduled loop and an administrator-triggered refresh share this
         # manager. Only one of them may own the durable checkpoint at a time.
         self._run_lock = asyncio.Lock()
+        # Ephemeral Discord objects used to take one final ACL snapshot after
+        # every configured guild finishes. They are never serialized.
+        self._completed_message_targets: dict[
+            int,
+            list[tuple[object, object | None]],
+        ] = {}
         # Invalidate a previous process's successful checkpoint while the bot
         # is still being constructed. The HTTP server can become healthy
         # before Discord's on_ready event, so waiting until start() would let a
@@ -276,9 +393,9 @@ class ScheduledBackfillManager:
     def start(self) -> bool:
         if not scheduler_enabled() or self.running:
             return False
-        self._write_waiting_checkpoint("initial-delay")
+        waiting_checkpoint_ready = self._write_waiting_checkpoint("initial-delay")
         self._task = asyncio.create_task(
-            self._run_loop(),
+            self._run_loop(waiting_checkpoint_ready=waiting_checkpoint_ready),
             name="scheduled-discord-backfill",
         )
         return True
@@ -290,10 +407,10 @@ class ScheduledBackfillManager:
         reason: str,
         guild_ids: Iterable[int] = (),
         channel_ids: Iterable[int] = (),
-    ) -> None:
+    ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         payload = {
-            "schema_version": 1,
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "started_at": now,
             "completed_at": None,
             "status": status,
@@ -302,20 +419,38 @@ class ScheduledBackfillManager:
             "configured_channel_ids": [str(value) for value in sorted(channel_ids)],
             "discovered_channel_ids": [],
             "eligible_channel_ids": [],
+            "current_curation_eligible_channel_ids": [],
+            "current_public_curation_channel_ids": [],
             "container_channel_ids": [],
             "missing_channel_ids": [],
             "guilds": {},
         }
         try:
-            _write_state(self.state_path, payload)
-        except Exception:
-            # If replacement itself fails, remove the exact checkpoint rather
-            # than leaving a previous successful cycle available during boot.
-            try:
-                self.state_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+            # Startup/waiting/configuration-error markers are checkpoint
+            # writers too.  They must share the same publication lock as
+            # running and terminal states; otherwise a newly constructed bot
+            # can replace ``running`` after an older cycle's ownership check
+            # and that older cycle can then publish ``completed`` over it.
+            with knowledge_pipeline_lock():
+                try:
+                    _write_state(self.state_path, payload)
+                except Exception:
+                    # If replacement itself fails, remove the exact checkpoint
+                    # while still owning the writer lock rather than leaving a
+                    # previous successful cycle available during boot.
+                    try:
+                        self.state_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
+        except KnowledgePipelineBusy:
+            log.debug(
+                "Scheduled backfill checkpoint writer deferred status=%s reason=%s",
+                status,
+                reason,
+            )
+            return False
+        return True
 
     def _write_waiting_checkpoint(
         self,
@@ -323,20 +458,43 @@ class ScheduledBackfillManager:
         *,
         guild_ids: Iterable[int] | None = None,
         channel_ids: Iterable[int] | None = None,
-    ) -> None:
+    ) -> bool:
         if guild_ids is None or channel_ids is None:
             configured_guilds, configured_channels = configured_inventory()
             guild_ids = configured_guilds
             channel_ids = configured_channels
-        self._write_checkpoint(
+        return self._write_checkpoint(
             status="waiting",
             reason=reason,
             guild_ids=guild_ids,
             channel_ids=channel_ids,
         )
 
-    def _write_configuration_error_checkpoint(self, reason: str) -> None:
-        self._write_checkpoint(status="failed", reason=reason)
+    def _write_configuration_error_checkpoint(self, reason: str) -> bool:
+        return self._write_checkpoint(status="failed", reason=reason)
+
+    def _owns_running_checkpoint(self, cycle_id: str) -> bool:
+        """Return whether this cycle still owns the durable running marker."""
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("status") == "running"
+            and payload.get("cycle_id") == cycle_id
+        )
+
+    def _write_terminal_checkpoint_if_owned(self, result: dict) -> bool:
+        """CAS one failed/interrupted terminal state under the pipeline lock."""
+        try:
+            with knowledge_pipeline_lock():
+                if not self._owns_running_checkpoint(str(result["cycle_id"])):
+                    return False
+                _write_state(self.state_path, result)
+                return True
+        except KnowledgePipelineBusy:
+            return False
 
     async def stop(self) -> None:
         if self._task is None:
@@ -350,7 +508,16 @@ class ScheduledBackfillManager:
         finally:
             self._task = None
 
-    async def _run_loop(self) -> None:
+    async def _run_loop(self, *, waiting_checkpoint_ready: bool) -> None:
+        # A curator or an older scheduler process can own the publication lock
+        # during startup.  Do not enter the initial delay while its old success
+        # checkpoint is still reusable: publish our waiting marker as soon as
+        # the shared lock becomes available, then begin the normal cadence.
+        while not waiting_checkpoint_ready:
+            await asyncio.sleep(CHECKPOINT_WRITER_RETRY_SECONDS)
+            waiting_checkpoint_ready = self._write_waiting_checkpoint(
+                "initial-delay"
+            )
         initial_delay = _positive_int_env(
             "YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS",
             DEFAULT_INITIAL_DELAY_SECONDS,
@@ -381,47 +548,106 @@ class ScheduledBackfillManager:
                 next_backfill_delay(interval, retry_interval, result)
             )
 
-    async def run_once(self, *, full_history: bool = False) -> dict:
+    async def run_once(
+        self,
+        *,
+        full_history: bool = False,
+        history_promotion_guild_id: int | None = None,
+    ) -> dict:
+        if history_promotion_guild_id is not None and not full_history:
+            raise ValueError(
+                "history_promotion_guild_id requires full_history=True"
+            )
+        if history_promotion_guild_id is not None:
+            history_promotion_guild_id = int(history_promotion_guild_id)
+            if history_promotion_guild_id <= 0:
+                raise ValueError("history_promotion_guild_id must be positive")
         if self._run_lock.locked():
             now = datetime.now(timezone.utc).isoformat()
             return {
-                "schema_version": 1,
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
                 "started_at": now,
                 "completed_at": now,
                 "status": "deferred",
                 "reason": "backfill-already-running",
                 "mode": "historical" if full_history else "incremental",
+                "history_promotion_guild_id": (
+                    str(history_promotion_guild_id)
+                    if history_promotion_guild_id is not None
+                    else None
+                ),
                 "configured_guild_ids": [str(value) for value in configured_guild_ids()],
                 "configured_channel_ids": [str(value) for value in sorted(configured_channel_ids())],
                 "discovered_channel_ids": [],
                 "eligible_channel_ids": [],
+                "current_curation_eligible_channel_ids": [],
+                "current_public_curation_channel_ids": [],
                 "missing_channel_ids": [],
                 "guilds": {},
             }
         async with self._run_lock:
-            return await self._run_once_locked(full_history=full_history)
+            return await self._run_once_locked(
+                full_history=full_history,
+                history_promotion_guild_id=history_promotion_guild_id,
+            )
 
-    async def _run_once_locked(self, *, full_history: bool = False) -> dict:
+    async def _run_once_locked(
+        self,
+        *,
+        full_history: bool = False,
+        history_promotion_guild_id: int | None = None,
+    ) -> dict:
+        if history_promotion_guild_id is not None and not full_history:
+            raise ValueError(
+                "history_promotion_guild_id requires full_history=True"
+            )
         started_at = datetime.now(timezone.utc).isoformat()
         guild_ids = configured_guild_ids()
         selected_channel_ids = configured_channel_ids()
+        if (
+            history_promotion_guild_id is not None
+            and history_promotion_guild_id not in guild_ids
+        ):
+            raise ValueError(
+                "history_promotion_guild_id must be in the configured guild allowlist"
+            )
         result = {
-            "schema_version": 1,
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "cycle_id": uuid.uuid4().hex,
             "started_at": started_at,
             "completed_at": None,
             "status": "running",
             "mode": "historical" if full_history else "incremental",
+            "history_promotion_guild_id": (
+                str(history_promotion_guild_id)
+                if history_promotion_guild_id is not None
+                else None
+            ),
             "configured_guild_ids": [str(value) for value in guild_ids],
             "configured_channel_ids": [str(value) for value in sorted(selected_channel_ids)],
             "discovered_channel_ids": [],
             "eligible_channel_ids": [],
+            "current_curation_eligible_channel_ids": [],
+            "current_public_curation_channel_ids": [],
             "missing_channel_ids": [],
             "guilds": {},
         }
+        self._completed_message_targets.clear()
         # Persist the in-progress marker before touching Discord. A crash or
         # forced stop must never leave yesterday's successful checkpoint looking
         # current to the downstream curation worker.
-        _write_state(self.state_path, result)
+        try:
+            # Serialize the completed -> running handoff with curation's corpus
+            # snapshot. A curator that already validated the completed state
+            # must finish before this checkpoint can be invalidated.
+            with knowledge_pipeline_lock():
+                _write_state(self.state_path, result)
+        except KnowledgePipelineBusy:
+            return result | {
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "status": "deferred",
+                "reason": "knowledge-pipeline-busy",
+            }
         try:
             if not guild_ids:
                 raise RuntimeError("no-configured-guilds")
@@ -430,40 +656,170 @@ class ScheduledBackfillManager:
                     guild_result = await self._refresh_guild(
                         guild_id,
                         full_history=True,
+                        history_promotion_guild_id=history_promotion_guild_id,
                     )
                 else:
                     guild_result = await self._refresh_guild(guild_id)
                 result["guilds"][str(guild_id)] = guild_result
 
-            discovered = {
-                value for item in result["guilds"].values() for value in item.get("discovered_channel_ids", [])
+            # Final ACL validation and checkpoint publication are one critical
+            # section. A second scheduler cannot publish a new running marker
+            # between this snapshot and our completed write, and this cycle
+            # never overwrites a marker whose cycle_id it no longer owns.
+            with knowledge_pipeline_lock():
+                if not self._owns_running_checkpoint(str(result["cycle_id"])):
+                    self._completed_message_targets.clear()
+                    return result | {
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "status": "deferred",
+                        "reason": "checkpoint-ownership-lost",
+                    }
+
+                # Guilds are refreshed sequentially and one guild can take
+                # hours. Re-evaluate every successful target together now so
+                # an ACL or /ignore change in an earlier guild is reflected in
+                # the checkpoint carrying this completed_at timestamp.
+                archived_threads_cache: dict[
+                    tuple[int, int, bool], dict[int, object]
+                ] = {}
+                for guild_id, guild_result in result["guilds"].items():
+                    guild = self.bot.get_guild(int(guild_id))
+                    member = getattr(guild, "me", None)
+                    completed_ids = {
+                        int(value)
+                        for value in guild_result.get("completed_channel_ids", [])
+                    }
+                    current_eligible_ids = []
+                    current_public_ids = []
+                    for channel, captured_parent in self._completed_message_targets.get(
+                        int(guild_id),
+                        [],
+                    ):
+                        if int(channel.id) not in completed_ids:
+                            continue
+                        current_channel, parent = await _resolve_current_message_target(
+                            guild,
+                            channel,
+                            captured_parent,
+                            archived_threads_cache,
+                        )
+                        if current_channel is None:
+                            continue
+                        # The resolver returns current lineage so moving a
+                        # parent into a protected category is observed.
+                        category = (
+                            getattr(current_channel, "category", None)
+                            or getattr(parent, "category", None)
+                        )
+                        currently_eligible = _readable_channel(
+                            self.bot.config,
+                            int(guild_id),
+                            current_channel,
+                            member,
+                            parent=parent,
+                        )
+                        if not currently_eligible:
+                            continue
+                        current_eligible_ids.append(str(current_channel.id))
+                        if automatic_knowledge_promotion_allowed(
+                            current_channel, parent=parent, category=category
+                        ):
+                            current_public_ids.append(str(current_channel.id))
+                    guild_result["current_curation_eligible_channel_ids"] = (
+                        current_eligible_ids
+                    )
+                    guild_result["current_public_curation_channel_ids"] = (
+                        current_public_ids
+                    )
+                self._completed_message_targets.clear()
+
+                discovered = {
+                    value
+                    for item in result["guilds"].values()
+                    for value in item.get("discovered_channel_ids", [])
+                }
+                eligible = {
+                    value
+                    for item in result["guilds"].values()
+                    for value in item.get("eligible_channel_ids", [])
+                }
+                current_eligible = {
+                    value
+                    for item in result["guilds"].values()
+                    for value in item.get(
+                        "current_curation_eligible_channel_ids",
+                        [],
+                    )
+                }
+                current_public = {
+                    value
+                    for item in result["guilds"].values()
+                    for value in item.get(
+                        "current_public_curation_channel_ids",
+                        [],
+                    )
+                }
+                configured = {str(value) for value in selected_channel_ids}
+                result["discovered_channel_ids"] = sorted(discovered, key=int)
+                result["eligible_channel_ids"] = sorted(eligible, key=int)
+                result["current_curation_eligible_channel_ids"] = sorted(
+                    current_eligible,
+                    key=int,
+                )
+                result["current_public_curation_channel_ids"] = sorted(
+                    current_public,
+                    key=int,
+                )
+                result["missing_channel_ids"] = sorted(
+                    configured - eligible,
+                    key=int,
+                )
+                failed = any(
+                    item.get("status") != "completed"
+                    for item in result["guilds"].values()
+                )
+                if result["missing_channel_ids"]:
+                    failed = True
+                result["status"] = "failed" if failed else "completed"
+                result["completed_at"] = datetime.now(timezone.utc).isoformat()
+                _write_state(self.state_path, result)
+                return result
+        except KnowledgePipelineBusy:
+            self._completed_message_targets.clear()
+            return result | {
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "status": "deferred",
+                "reason": "final-checkpoint-busy",
             }
-            eligible = {value for item in result["guilds"].values() for value in item.get("eligible_channel_ids", [])}
-            configured = {str(value) for value in selected_channel_ids}
-            result["discovered_channel_ids"] = sorted(discovered, key=int)
-            result["eligible_channel_ids"] = sorted(eligible, key=int)
-            result["missing_channel_ids"] = sorted(configured - eligible, key=int)
-            failed = any(item.get("status") != "completed" for item in result["guilds"].values())
-            if result["missing_channel_ids"]:
-                failed = True
-            result["status"] = "failed" if failed else "completed"
         except asyncio.CancelledError:
+            self._completed_message_targets.clear()
             result["status"] = "interrupted"
             result["error_type"] = "CancelledError"
             result["completed_at"] = datetime.now(timezone.utc).isoformat()
-            _write_state(self.state_path, result)
+            self._write_terminal_checkpoint_if_owned(result)
             raise
         except Exception as exc:
+            self._completed_message_targets.clear()
             result["status"] = "failed"
             result["error_type"] = type(exc).__name__
             result["completed_at"] = datetime.now(timezone.utc).isoformat()
-            _write_state(self.state_path, result)
+            self._write_terminal_checkpoint_if_owned(result)
             raise
-        result["completed_at"] = datetime.now(timezone.utc).isoformat()
-        _write_state(self.state_path, result)
-        return result
 
-    async def _refresh_guild(self, guild_id: int, *, full_history: bool = False) -> dict:
+    async def _refresh_guild(
+        self,
+        guild_id: int,
+        *,
+        full_history: bool = False,
+        history_promotion_guild_id: int | None = None,
+    ) -> dict:
+        if history_promotion_guild_id is not None and not full_history:
+            raise ValueError(
+                "history_promotion_guild_id requires full_history=True"
+            )
+        authorize_history_promotion = (
+            full_history and history_promotion_guild_id == guild_id
+        )
         guild = self.bot.get_guild(guild_id)
         corpus_store = self.bot.config.get_corpus(guild_id)
         selected_ids = configured_channel_ids()
@@ -473,6 +829,8 @@ class ScheduledBackfillManager:
             "configured_channel_ids": [],
             "discovered_channel_ids": [],
             "eligible_channel_ids": [],
+            "current_curation_eligible_channel_ids": [],
+            "current_public_curation_channel_ids": [],
             "container_channel_ids": [],
             "missing_channel_ids": [],
             "channels_total": 0,
@@ -491,6 +849,7 @@ class ScheduledBackfillManager:
                 "missing_channel_ids": [str(value) for value in sorted(selected_ids)],
             }
         summary = dict(base_summary)
+        self._completed_message_targets[guild_id] = []
         summary_lock = asyncio.Lock()
         session = None
 
@@ -514,6 +873,8 @@ class ScheduledBackfillManager:
                             dry_run=False,
                             session=session,
                             complete_session_channel=index == len(festivals) - 1,
+                            full_history=True,
+                            authorize_history_promotion=authorize_history_promotion,
                         )
                         if channel_result.latest_message_id and channel_result.latest_message_at:
                             latest_message_id = channel_result.latest_message_id
@@ -827,6 +1188,14 @@ class ScheduledBackfillManager:
                     backfill_channel_concurrency(),
                 ),
             )
+            completed_ids = {int(value) for value in summary["completed_channel_ids"]}
+            completed_targets = []
+            for channel in channels:
+                if int(channel.id) not in completed_ids:
+                    continue
+                parent = _channel_parent(channel, thread_parents_by_id)
+                completed_targets.append((channel, parent))
+            self._completed_message_targets[guild_id] = completed_targets
             summary["status"] = "failed" if summary["failures"] else "completed"
         except asyncio.CancelledError:
             summary["status"] = "interrupted"

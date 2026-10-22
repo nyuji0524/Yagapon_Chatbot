@@ -23,6 +23,7 @@ from typing import Iterable, Literal
 
 OPEN_DELIVERY_STATUSES = frozenset({"pending", "failed", "queued", "published"})
 RETRYABLE_DELIVERY_STATUSES = frozenset({"pending", "failed"})
+BUNDLE_LINEAGE_SCHEMA_VERSION = 1
 TERMINAL_SOURCE_STATUSES = frozenset(
     {"no-knowledge", "delivered", "blocked-sensitive-content", "blocked-access", "blocked-routing"}
 )
@@ -328,6 +329,16 @@ class TopicStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS bundle_sources_topic
                     ON bundle_sources(topic_id, bundle_id);
+                CREATE TABLE IF NOT EXISTS bundle_lineage (
+                    bundle_id TEXT PRIMARY KEY,
+                    topic_id TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    complete INTEGER NOT NULL,
+                    source_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS bundle_lineage_topic
+                    ON bundle_lineage(topic_id, bundle_id);
                 """
             )
 
@@ -592,6 +603,30 @@ class TopicStateStore:
             ).fetchall()
         return [(str(row["document_key"]), str(row["source_sha256"])) for row in rows]
 
+    def bundle_lineage_status(self, bundle_id: str) -> tuple[bool, str]:
+        """Validate that a bundle captured every source under the current schema."""
+        with self._connect() as connection:
+            metadata = connection.execute(
+                """SELECT schema_version, complete, source_count
+                   FROM bundle_lineage WHERE bundle_id=?""",
+                (bundle_id,),
+            ).fetchone()
+            actual_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM bundle_sources WHERE bundle_id=?",
+                    (bundle_id,),
+                ).fetchone()[0]
+            )
+        if metadata is None:
+            return False, "lineage-metadata-missing"
+        if int(metadata["schema_version"]) != BUNDLE_LINEAGE_SCHEMA_VERSION:
+            return False, "lineage-schema-unsupported"
+        if not bool(metadata["complete"]):
+            return False, "lineage-incomplete"
+        if actual_count <= 0 or int(metadata["source_count"]) != actual_count:
+            return False, "lineage-source-count-mismatch"
+        return True, "lineage-complete"
+
     @staticmethod
     def _retry_at(topic_id: str, attempts: int, now: datetime) -> datetime:
         base = max(60, int(os.environ.get("YAGAPON_KNOWLEDGE_CURATION_RETRY_BASE_SECONDS", "900")))
@@ -612,6 +647,8 @@ class TopicStateStore:
         error: str = "",
         now: datetime | None = None,
         source_versions: Iterable[tuple[str, str]] | None = None,
+        lineage_schema_version: int | None = None,
+        lineage_complete: bool = False,
     ) -> TopicRecord:
         current = _as_utc(now)
         topic = self.get_topic(topic_id)
@@ -641,6 +678,15 @@ class TopicStateStore:
                        FROM bundle_sources WHERE bundle_id=?""",
                     (bundle_id, current.isoformat(), topic.bundle_id),
                 )
+                connection.execute(
+                    """INSERT OR REPLACE INTO bundle_lineage
+                       (bundle_id, topic_id, schema_version, complete,
+                        source_count, created_at)
+                       SELECT ?, topic_id, schema_version, complete,
+                              source_count, ?
+                       FROM bundle_lineage WHERE bundle_id=?""",
+                    (bundle_id, current.isoformat(), topic.bundle_id),
+                )
             connection.execute(
                 """UPDATE topics SET delivered_fingerprint=?, delivery_status=?, bundle_id=?,
                    bundle_fingerprint=?, attempts=?, next_attempt_at=?, last_error=?,
@@ -661,15 +707,46 @@ class TopicStateStore:
                     topic_id,
                 ),
             )
-            connection.executemany(
-                """INSERT OR IGNORE INTO bundle_sources
-                   (bundle_id, topic_id, document_key, source_sha256, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    (bundle_id, topic_id, document_key, source_sha256, current.isoformat())
-                    for document_key, source_sha256 in captured_sources
-                ),
-            )
+            if source_versions is not None:
+                connection.execute(
+                    "DELETE FROM bundle_sources WHERE bundle_id=?",
+                    (bundle_id,),
+                )
+                connection.executemany(
+                    """INSERT INTO bundle_sources
+                       (bundle_id, topic_id, document_key, source_sha256, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        (
+                            bundle_id,
+                            topic_id,
+                            document_key,
+                            source_sha256,
+                            current.isoformat(),
+                        )
+                        for document_key, source_sha256 in captured_sources
+                    ),
+                )
+                schema_version = int(lineage_schema_version or 0)
+                complete = bool(
+                    lineage_complete
+                    and schema_version == BUNDLE_LINEAGE_SCHEMA_VERSION
+                    and captured_sources
+                )
+                connection.execute(
+                    """INSERT OR REPLACE INTO bundle_lineage
+                       (bundle_id, topic_id, schema_version, complete,
+                        source_count, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        bundle_id,
+                        topic_id,
+                        schema_version,
+                        int(complete),
+                        len(captured_sources),
+                        current.isoformat(),
+                    ),
+                )
         result = self.get_topic(topic_id)
         assert result is not None
         return result

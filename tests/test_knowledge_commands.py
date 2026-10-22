@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 from google.auth.exceptions import RefreshError
 
@@ -77,6 +78,143 @@ def test_knowledge_refresh_embed_never_splits_annual_result_lines():
         )
 
 
+def test_policy_excluded_sources_are_reported_as_orange_policy_hold():
+    result = {
+        "mode": "historical",
+        "backfill": {
+            "status": "completed",
+            "history_promotion_guild_id": "1",
+            "guilds": {},
+        },
+        "curation": {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "checkpoint_reason": "fresh-success",
+            "source": 4,
+            "eligible": 0,
+            "policy_excluded": 4,
+            "actionable": 0,
+            "processed": 0,
+            "queued": 0,
+            "skipped": 0,
+            "failed": 0,
+            "open_bundles": 1,
+            "max_open_bundles": 5,
+            "backpressured": 0,
+        },
+    }
+
+    assert _knowledge_refresh_status(result) == "policy-held"
+    embed = _knowledge_refresh_embed(result)
+    curation_value = next(
+        field.value for field in embed.fields if field.name == "議題別Knowledge整理"
+    )
+
+    assert embed.color == discord.Color.orange()
+    assert "ポリシーで保留" in embed.title
+    assert "候補元: 4 / 対象: 0 / ポリシー除外: 4 / 開始時未処理: 0" in curation_value
+    assert "未確認bundle: 1 / 上限: 5 / 今回保留: 0" in curation_value
+    assert "PR待ち" not in curation_value
+
+
+def test_access_blocked_retry_is_reported_as_orange_policy_hold():
+    result = {
+        "mode": "full",
+        "backfill": {"status": "completed", "guilds": {}},
+        "curation": {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "checkpoint_reason": "fresh-success",
+            "source": 1,
+            "eligible": 1,
+            "policy_excluded": 0,
+            "actionable": 0,
+            "processed": 0,
+            "queued": 0,
+            "skipped": 0,
+            "failed": 0,
+            "retried": 0,
+            "retry_blocked": 1,
+            "open_bundles": 1,
+            "max_open_bundles": 5,
+            "backpressured": 0,
+        },
+    }
+
+    assert _knowledge_refresh_status(result) == "policy-held"
+    embed = _knowledge_refresh_embed(result)
+    curation_value = next(
+        field.value for field in embed.fields if field.name == "議題別Knowledge整理"
+    )
+
+    assert embed.color == discord.Color.orange()
+    assert "権限再確認で再送保留: 1" in curation_value
+
+
+def test_blocked_evidence_is_reported_as_orange_policy_hold():
+    result = {
+        "mode": "full",
+        "backfill": {"status": "completed", "guilds": {}},
+        "curation": {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "processed": 1,
+            "blocked_access": 1,
+            "failed": 0,
+        },
+    }
+
+    assert _knowledge_refresh_status(result) == "policy-held"
+    embed = _knowledge_refresh_embed(result)
+    curation_value = next(
+        field.value for field in embed.fields if field.name == "議題別Knowledge整理"
+    )
+
+    assert embed.color == discord.Color.orange()
+    assert "権限保留: 1" in curation_value
+
+
+def test_failed_curation_takes_precedence_over_access_blocked_retry():
+    result = {
+        "mode": "full",
+        "backfill": {"status": "completed", "guilds": {}},
+        "curation": {
+            "enabled": True,
+            "checkpoint_ready": True,
+            "failed": 1,
+            "retry_blocked": 1,
+        },
+    }
+
+    assert _knowledge_refresh_status(result) == "partial"
+
+    result["curation"]["failed"] = 0
+    result["curation"]["retry_failed"] = 1
+    assert _knowledge_refresh_status(result) == "partial"
+
+
+def test_deferred_refresh_does_not_report_unknown_candidate_counts_as_zero():
+    embed = _knowledge_refresh_embed(
+        {
+            "mode": "full",
+            "backfill": {"status": "failed", "guilds": {}},
+            "curation": {
+                "enabled": True,
+                "checkpoint_ready": False,
+                "checkpoint_reason": "manual-backfill-not-completed",
+            },
+        }
+    )
+    value = next(
+        field.value
+        for field in embed.fields
+        if field.name == "議題別Knowledge整理"
+    )
+
+    assert "候補元:" not in value
+    assert "ポリシー除外:" not in value
+
+
 def test_registered_refresh_exposes_runtime_option_type_to_pycord():
     """Pycord invokes ``issubclass`` on option annotations at command runtime."""
 
@@ -104,7 +242,10 @@ def test_registered_refresh_exposes_runtime_option_type_to_pycord():
 
 
 @pytest.mark.asyncio
-async def test_registered_refresh_acknowledges_then_reports_to_channel(monkeypatch):
+async def test_registered_refresh_acknowledges_then_reports_to_channel(
+    tmp_path,
+    monkeypatch,
+):
     class Group:
         def __init__(self):
             self.callbacks = {}
@@ -122,14 +263,25 @@ async def test_registered_refresh_acknowledges_then_reports_to_channel(monkeypat
         create_group=Mock(return_value=group),
         knowledge_refresh_tasks=tasks,
         operations=SimpleNamespace(record_event=Mock()),
+        scheduled_backfill=SimpleNamespace(
+            state_path=tmp_path / "scheduled.json"
+        ),
     )
     register(bot)
     result = {
-        "mode": "full",
-        "backfill": {"status": "completed", "guilds": {}},
+        "mode": "historical",
+        "backfill": {
+            "status": "completed",
+            "history_promotion_guild_id": "1",
+            "guilds": {},
+        },
         "curation": {
             "enabled": True,
             "checkpoint_ready": True,
+            "source": 2,
+            "eligible": 2,
+            "policy_excluded": 0,
+            "actionable": 1,
             "processed": 1,
             "queued": 1,
             "failed": 0,
@@ -143,32 +295,61 @@ async def test_registered_refresh_acknowledges_then_reports_to_channel(monkeypat
         "bot.commands.knowledge._require_knowledge_guild",
         AsyncMock(return_value=True),
     )
+    run_refresh = AsyncMock(return_value=result)
     monkeypatch.setattr(
         "bot.commands.knowledge._run_knowledge_refresh",
-        AsyncMock(return_value=result),
+        run_refresh,
     )
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "10")
+    monkeypatch.setenv(
+        "YAGAPON_SCHEDULED_BACKFILL_STATE",
+        str(tmp_path / "scheduled.json"),
+    )
+    monkeypatch.setenv(
+        "YAGAPON_KNOWLEDGE_BACKFILL_STATE",
+        str(tmp_path / "scheduled.json"),
+    )
     channel = SimpleNamespace(send=AsyncMock())
     ctx = SimpleNamespace(
         guild=SimpleNamespace(id=1),
         guild_id=1,
         channel=channel,
-        author=SimpleNamespace(display_name="管理者", name="admin"),
+        author=SimpleNamespace(id=999, display_name="管理者", name="admin"),
         respond=AsyncMock(),
     )
 
-    await group.callbacks["refresh"](ctx, mode="full")
+    await group.callbacks["refresh"](ctx, mode="historical")
     await asyncio.gather(*tuple(tasks))
 
     ctx.respond.assert_awaited_once()
     assert ctx.respond.await_args.kwargs["ephemeral"] is True
+    assert "明示的なチャンネルoverrideを除き" in ctx.respond.await_args.args[0]
     channel.send.assert_awaited_once()
     assert channel.send.await_args.kwargs["silent"] is True
     assert channel.send.await_args.kwargs["embed"].title.startswith("✅")
+    curation_value = next(
+        field.value
+        for field in channel.send.await_args.kwargs["embed"].fields
+        if field.name == "議題別Knowledge整理"
+    )
+    assert "開始時未処理: 1" in curation_value
+    backfill_value = next(
+        field.value
+        for field in channel.send.await_args.kwargs["embed"].fields
+        if field.name == "Discord全期間取得"
+    )
+    assert "明示overrideを除き" in backfill_value
     bot.operations.record_event.assert_called_once()
+    run_refresh.assert_awaited_once_with(bot, mode="historical", guild_id=1)
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "requester_user_id"
+    ] == "999"
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "history_promotion_guild_id"
+    ] == "1"
 
 
 @pytest.mark.asyncio
@@ -193,6 +374,7 @@ async def test_full_knowledge_refresh_runs_backfill_before_curation(monkeypatch)
     result = await _run_knowledge_refresh(
         SimpleNamespace(scheduled_backfill=Backfill()),
         mode="full",
+        guild_id=123,
     )
 
     assert calls == ["backfill", "curation"]
@@ -210,6 +392,7 @@ async def test_full_knowledge_refresh_does_not_curate_failed_checkpoint(monkeypa
     result = await _run_knowledge_refresh(
         SimpleNamespace(scheduled_backfill=Backfill()),
         mode="full",
+        guild_id=123,
     )
 
     curate.assert_not_awaited()
@@ -218,7 +401,10 @@ async def test_full_knowledge_refresh_does_not_curate_failed_checkpoint(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_historical_knowledge_refresh_requests_all_history_before_curation(monkeypatch):
+async def test_historical_knowledge_refresh_requests_all_history_before_curation(
+    tmp_path,
+    monkeypatch,
+):
     backfill = AsyncMock(
         return_value={
             "status": "completed",
@@ -235,16 +421,56 @@ async def test_historical_knowledge_refresh_requests_all_history_before_curation
         }
     )
     monkeypatch.setattr("bot.commands.knowledge._run_curation_cycle", curate)
+    checkpoint = tmp_path / "scheduled.json"
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_STATE", str(checkpoint))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(checkpoint))
 
     result = await _run_knowledge_refresh(
-        SimpleNamespace(scheduled_backfill=SimpleNamespace(run_once=backfill)),
+        SimpleNamespace(
+            scheduled_backfill=SimpleNamespace(
+                run_once=backfill,
+                state_path=checkpoint,
+            )
+        ),
         mode="historical",
+        guild_id=123,
     )
 
-    backfill.assert_awaited_once_with(full_history=True)
+    backfill.assert_awaited_once_with(
+        full_history=True,
+        history_promotion_guild_id=123,
+    )
     curate.assert_awaited_once()
     assert result["mode"] == "historical"
     assert _knowledge_refresh_status(result) == "completed"
+
+
+@pytest.mark.asyncio
+async def test_historical_refresh_fails_before_backfill_when_checkpoint_paths_differ(
+    tmp_path,
+    monkeypatch,
+):
+    backfill = AsyncMock()
+    producer = tmp_path / "producer.json"
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_STATE", str(producer))
+    monkeypatch.setenv(
+        "YAGAPON_KNOWLEDGE_BACKFILL_STATE",
+        str(tmp_path / "other.json"),
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint path"):
+        await _run_knowledge_refresh(
+            SimpleNamespace(
+                scheduled_backfill=SimpleNamespace(
+                    run_once=backfill,
+                    state_path=producer,
+                )
+            ),
+            mode="historical",
+            guild_id=123,
+        )
+
+    backfill.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -253,6 +479,7 @@ async def test_knowledge_refresh_rejects_unknown_internal_mode():
         await _run_knowledge_refresh(
             SimpleNamespace(scheduled_backfill=SimpleNamespace()),
             mode="everything",
+            guild_id=123,
         )
 
 
@@ -271,6 +498,7 @@ async def test_curation_only_refresh_does_not_run_discord_backfill(monkeypatch):
     result = await _run_knowledge_refresh(
         SimpleNamespace(scheduled_backfill=SimpleNamespace(run_once=backfill)),
         mode="curation",
+        guild_id=123,
     )
 
     backfill.assert_not_awaited()

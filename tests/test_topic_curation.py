@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from knowledge_curation.__main__ import (
     validate_topic_draft,
 )
 from knowledge_curation.topic import (
+    BUNDLE_LINEAGE_SCHEMA_VERSION,
     AccessDecision,
     EvidenceItem,
     TopicStateStore,
@@ -163,6 +165,23 @@ def source_document() -> dict:
     }
 
 
+def upsert_source_document(store: RagStore, document: dict) -> dict:
+    metadata = []
+    for key, value in document.items():
+        if key == "body" or value is None:
+            continue
+        field = "numeric_value" if isinstance(value, int) else "string_value"
+        metadata.append({"key": key, field: value})
+    store.upsert_document(
+        f"documents/{document['document_key']}",
+        document["body"],
+        metadata,
+    )
+    stored = store.get_document(str(document["document_key"]))
+    assert stored is not None
+    return stored
+
+
 def test_long_curation_source_is_split_deterministically_without_dropping_tail():
     document = source_document()
     document["source_type"] = "meeting_transcript"
@@ -201,6 +220,39 @@ def test_long_curation_uses_small_units_so_distant_topics_do_not_share_one_plan(
     assert max(len(item["body"]) for item in segments) <= (
         curation.CURATION_SEGMENT_CHARS + 2 * curation.CURATION_SEGMENT_OVERLAP_CHARS
     )
+
+
+def test_virtual_segment_lineage_reloads_and_hashes_current_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
+    rag = RagStore(tmp_path / "rag.sqlite3")
+    source = source_document() | {
+        "body": "先頭の議題" + ("A" * (curation.CURATION_SEGMENT_CHARS * 2)),
+    }
+    stored = upsert_source_document(rag, source)
+    segment = expand_curation_documents([stored])[0]
+    evidence_items = collect_topic_evidence(rag, segment, [])
+
+    versions = curation._bundle_source_versions(
+        rag,
+        evidence_items,
+        {segment["document_key"]: segment},
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids=set(),
+    )
+
+    assert versions == [(source["document_key"], curation._digest(stored))]
+    upsert_source_document(
+        rag,
+        source | {"body": "改変された議題" + source["body"][6:]},
+    )
+    assert curation._bundle_source_versions(
+        rag,
+        evidence_items,
+        {segment["document_key"]: segment},
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids=set(),
+    ) is None
 
 
 def test_topic_identity_is_normalized_deterministic_and_filesystem_safe():
@@ -393,6 +445,150 @@ def test_bundle_completion_marks_captured_source_when_digest_is_unchanged(tmp_pa
     assert store.mark_bundle_sources("bundle-one", "delivered") == 1
     assert store.source_observation("source-one")["status"] == "delivered"
     assert store.source_actionable("source-one", "hash-one") is False
+
+
+def test_retry_bundle_authorization_requires_present_unchanged_current_source(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    store = TopicStateStore(tmp_path / "topics.sqlite3")
+    rag = RagStore(tmp_path / "rag.sqlite3")
+    identity = store.resolve_identity(festival=28, bureau="it", topic="再送検証")
+    store.observe_topic(
+        identity,
+        title="再送検証",
+        aliases=[],
+        fingerprint="one",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+    document = source_document() | {"auto_promote": True}
+    stored = upsert_source_document(rag, document)
+    digest = curation._digest(stored)
+    store.record_delivery(
+        identity.topic_id,
+        fingerprint="one",
+        bundle_id="bundle-one",
+        status="failed",
+        source_versions=[(document["document_key"], digest)],
+        lineage_schema_version=BUNDLE_LINEAGE_SCHEMA_VERSION,
+        lineage_complete=True,
+    )
+    assert store.bundle_lineage_status("bundle-one") == (
+        True,
+        "lineage-complete",
+    )
+
+    assert curation._retry_bundle_sources_authorized(
+        store,
+        "bundle-one",
+        rag,
+        {},
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids={10},
+    ) is True
+    # A stale run-start cache must not override the current RagStore row.
+    assert curation._retry_bundle_sources_authorized(
+        store,
+        "bundle-one",
+        rag,
+        {document["document_key"]: document | {"body": "stale-cache"}},
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids={10},
+    ) is True
+    changed = upsert_source_document(rag, document | {"body": "changed" * 100})
+    assert curation._digest(changed) != digest
+    assert curation._retry_bundle_sources_authorized(
+        store,
+        "bundle-one",
+        rag,
+        {document["document_key"]: stored},
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids={10},
+    ) is False
+
+
+def test_bundle_retry_revalidates_every_related_evidence_source(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10,20")
+    rag = RagStore(tmp_path / "rag.sqlite3")
+    related = source_document() | {
+        "document_key": "discord-related",
+        "channel_id": 20,
+        "channel_name": "関連ログ",
+        "body": "関連する役職限定ログ" * 30,
+    }
+    upsert_source_document(rag, related)
+    primary = source_document()
+    primary_stored = upsert_source_document(rag, primary)
+    documents = {primary["document_key"]: primary_stored}
+    evidence_items = [
+        evidence(
+            "D01",
+            primary["document_key"],
+            channel_id=10,
+            content_sha256=hashlib.sha256(primary["body"].encode()).hexdigest(),
+        ),
+        evidence(
+            "D02",
+            related["document_key"],
+            channel_id=20,
+            content_sha256=hashlib.sha256(related["body"].encode()).hexdigest(),
+        ),
+    ]
+    versions = curation._bundle_source_versions(
+        rag,
+        evidence_items,
+        documents,
+        current_curation_eligible_channel_ids={10, 20},
+        current_public_channel_ids=set(),
+    )
+
+    assert versions is not None
+    assert {key for key, _digest in versions} == {
+        "discord-primary",
+        "discord-related",
+    }
+
+    ledger = TopicStateStore(tmp_path / "topics.sqlite3")
+    identity = ledger.resolve_identity(festival=28, bureau="it", topic="関連再送検証")
+    ledger.observe_topic(
+        identity,
+        title="関連再送検証",
+        aliases=[],
+        fingerprint="bundle",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+    ledger.record_delivery(
+        identity.topic_id,
+        fingerprint="bundle",
+        bundle_id="bundle-related",
+        status="failed",
+        source_versions=versions,
+        lineage_schema_version=BUNDLE_LINEAGE_SCHEMA_VERSION,
+        lineage_complete=True,
+    )
+
+    assert curation._retry_bundle_sources_authorized(
+        ledger,
+        "bundle-related",
+        rag,
+        documents,
+        current_curation_eligible_channel_ids={10, 20},
+        current_public_channel_ids=set(),
+    ) is True
+    assert curation._retry_bundle_sources_authorized(
+        ledger,
+        "bundle-related",
+        rag,
+        documents,
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids=set(),
+    ) is False
 
 
 def test_legacy_json_state_is_backed_up_and_imported(tmp_path):
@@ -631,7 +827,7 @@ def test_restricted_topic_cannot_be_rendered():
 
 def checkpoint_payload(now: datetime) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at": (now - timedelta(minutes=5)).isoformat(),
         "completed_at": now.isoformat(),
         "status": "completed",
@@ -639,6 +835,8 @@ def checkpoint_payload(now: datetime) -> dict:
         "configured_channel_ids": ["10", "20", "30", "40"],
         "discovered_channel_ids": ["10", "20", "30", "40"],
         "eligible_channel_ids": ["10", "20", "30", "40"],
+        "current_curation_eligible_channel_ids": ["10", "20", "30", "40"],
+        "current_public_curation_channel_ids": ["10", "20", "30", "40"],
         "missing_channel_ids": [],
         "guilds": {
             "123": {
@@ -653,6 +851,18 @@ def checkpoint_payload(now: datetime) -> dict:
                 "configured_channel_ids": ["10", "20", "30", "40"],
                 "discovered_channel_ids": ["10", "20", "30", "40"],
                 "eligible_channel_ids": ["10", "20", "30", "40"],
+                "current_curation_eligible_channel_ids": [
+                    "10",
+                    "20",
+                    "30",
+                    "40",
+                ],
+                "current_public_curation_channel_ids": [
+                    "10",
+                    "20",
+                    "30",
+                    "40",
+                ],
                 "container_channel_ids": [],
                 "missing_channel_ids": [],
                 "completed_channel_ids": ["10", "20", "30", "40"],
@@ -672,6 +882,13 @@ def test_backfill_checkpoint_gate_allows_unset_or_fresh_complete_state(tmp_path,
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
     assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
 
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", raising=False)
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-path-unconfigured",
+    )
+
 
 def test_backfill_checkpoint_must_match_current_scheduler_inventory(
     tmp_path,
@@ -683,6 +900,7 @@ def test_backfill_checkpoint_must_match_current_scheduler_inventory(
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_STATE", str(path))
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "123")
     monkeypatch.setenv(
         "YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS",
@@ -716,6 +934,15 @@ def test_backfill_checkpoint_must_match_current_scheduler_inventory(
         "checkpoint-channel-configuration-changed",
     )
 
+    monkeypatch.setenv(
+        "YAGAPON_SCHEDULED_BACKFILL_STATE",
+        str(tmp_path / "other-state.json"),
+    )
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-invalid-current-configuration",
+    )
+
 
 def test_backfill_checkpoint_accepts_dynamic_all_readable_channel_inventory(
     tmp_path,
@@ -730,6 +957,7 @@ def test_backfill_checkpoint_accepts_dynamic_all_readable_channel_inventory(
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_STATE", str(path))
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "123")
     monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_CHANNEL_IDS", "")
 
@@ -745,10 +973,14 @@ def test_backfill_checkpoint_accepts_forum_parent_container_plus_completed_threa
     payload["configured_channel_ids"] = ["40"]
     payload["discovered_channel_ids"] = ["40", "41", "42"]
     payload["eligible_channel_ids"] = ["40", "41", "42"]
+    payload["current_curation_eligible_channel_ids"] = ["41", "42"]
+    payload["current_public_curation_channel_ids"] = ["41", "42"]
     payload["guilds"]["123"].update(
         configured_channel_ids=["40"],
         discovered_channel_ids=["40", "41", "42"],
         eligible_channel_ids=["40", "41", "42"],
+        current_curation_eligible_channel_ids=["41", "42"],
+        current_public_curation_channel_ids=["41", "42"],
         container_channel_ids=["40"],
         completed_channel_ids=["41", "42"],
         channels_total=2,
@@ -769,10 +1001,14 @@ def test_backfill_checkpoint_accepts_a_readable_empty_forum(tmp_path, monkeypatc
     payload["configured_channel_ids"] = ["40"]
     payload["discovered_channel_ids"] = ["40"]
     payload["eligible_channel_ids"] = ["40"]
+    payload["current_curation_eligible_channel_ids"] = []
+    payload["current_public_curation_channel_ids"] = []
     payload["guilds"]["123"].update(
         configured_channel_ids=["40"],
         discovered_channel_ids=["40"],
         eligible_channel_ids=["40"],
+        current_curation_eligible_channel_ids=[],
+        current_public_curation_channel_ids=[],
         container_channel_ids=["40"],
         completed_channel_ids=[],
         channels_total=0,
@@ -810,6 +1046,23 @@ def test_backfill_checkpoint_requires_curation_and_candidate_channels(tmp_path, 
         "checkpoint-missing-curation-channel:99",
     )
 
+    # A fixed-ID override can admit a role-limited channel, but not one that
+    # became ignored/protected/unreadable before the producer's final snapshot.
+    payload = checkpoint_payload(now)
+    payload["current_curation_eligible_channel_ids"].remove("10")
+    payload["current_public_curation_channel_ids"].remove("10")
+    payload["guilds"]["123"]["current_curation_eligible_channel_ids"].remove(
+        "10"
+    )
+    payload["guilds"]["123"]["current_public_curation_channel_ids"].remove(
+        "10"
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert backfill_checkpoint_status(now=now) == (
+        False,
+        "checkpoint-missing-curation-channel:10",
+    )
+
 
 @pytest.mark.parametrize(
     ("mutation", "reason"),
@@ -829,7 +1082,21 @@ def test_backfill_checkpoint_requires_curation_and_candidate_channels(tmp_path, 
             lambda value: value["guilds"]["123"].update(channels_completed=3),
             "checkpoint-incomplete-guild:123",
         ),
-        (lambda value: value.update(schema_version=2), "checkpoint-unsupported-schema"),
+        (lambda value: value.update(schema_version=1), "checkpoint-unsupported-schema"),
+        (
+            lambda value: value.pop("current_curation_eligible_channel_ids"),
+            "checkpoint-missing-current-eligible-inventory",
+        ),
+        (
+            lambda value: value.pop("current_public_curation_channel_ids"),
+            "checkpoint-missing-current-public-inventory",
+        ),
+        (
+            lambda value: value["guilds"]["123"].update(
+                current_public_curation_channel_ids=["99"]
+            ),
+            "checkpoint-invalid-current-public-inventory:123",
+        ),
         (lambda value: value.pop("started_at"), "checkpoint-missing-time-range"),
         (
             lambda value: value.update(missing_channel_ids=["99"]),
@@ -874,6 +1141,348 @@ async def test_curate_once_stops_before_rag_when_checkpoint_is_not_ready(tmp_pat
     assert not (tmp_path / "curation.sqlite3").exists()
 
 
+@pytest.mark.parametrize(
+    "configured_channels",
+    ["invalid", "0", "10,invalid"],
+)
+@pytest.mark.asyncio
+async def test_curate_once_rejects_invalid_explicit_channel_configuration(
+    tmp_path,
+    monkeypatch,
+    configured_channels,
+):
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv(
+        "YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS",
+        configured_channels,
+    )
+
+    result = await curation.curate_once(state_path=state, limit=3)
+
+    assert result["checkpoint_ready"] is False
+    assert result["checkpoint_reason"] == (
+        "curation-channel-configuration-invalid"
+    )
+    assert result["processed"] == 0
+    assert not state.exists()
+
+
+@pytest.mark.asyncio
+async def test_curate_once_revokes_stale_auto_promotion_when_channel_is_no_longer_public(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime.now(timezone.utc)
+    payload = checkpoint_payload(now)
+    payload["current_public_curation_channel_ids"] = ["20", "30", "40"]
+    payload["guilds"]["123"]["current_public_curation_channel_ids"] = [
+        "20",
+        "30",
+        "40",
+    ]
+    checkpoint = tmp_path / "scheduled-backfill-state.json"
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+    database = tmp_path / "rag.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(checkpoint))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    RagStore(database).upsert_document(
+        "documents/formerly-public",
+        "公開後に役職限定へ変更された会話" * 100,
+        [
+            {"key": "document_key", "string_value": "formerly-public"},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 10},
+            {"key": "channel_name", "string_value": "旧公開チャンネル"},
+            {"key": "category", "string_value": "28th IT局"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "auto_promote", "string_value": "true"},
+        ],
+    )
+
+    result = await curation.curate_once(
+        state_path=tmp_path / "curation.sqlite3",
+        limit=3,
+    )
+
+    assert result["checkpoint_ready"] is True
+    assert result["checkpoint_reason"] == "fresh-success"
+    assert result["source"] == 1
+    assert result["eligible"] == 0
+    assert result["policy_excluded"] == 1
+    assert result["processed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_is_quarantined_when_bundle_source_loses_public_access(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime.now(timezone.utc)
+    payload = checkpoint_payload(now)
+    payload["current_public_curation_channel_ids"] = ["20", "30", "40"]
+    payload["guilds"]["123"]["current_public_curation_channel_ids"] = [
+        "20",
+        "30",
+        "40",
+    ]
+    checkpoint = tmp_path / "scheduled-backfill-state.json"
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+    database = tmp_path / "rag.sqlite3"
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(checkpoint))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    rag = RagStore(database)
+    rag.upsert_document(
+        "documents/retry-source",
+        "再送待ちの公開会話が後から役職限定になった" * 100,
+        [
+            {"key": "document_key", "string_value": "retry-source"},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 10},
+            {"key": "channel_name", "string_value": "旧公開チャンネル"},
+            {"key": "category", "string_value": "28th IT局"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "auto_promote", "string_value": "true"},
+        ],
+    )
+    stored = rag.list_curation_documents()[0]
+    digest = curation._digest(stored)
+    ledger = TopicStateStore(state)
+    identity = ledger.resolve_identity(
+        festival=28,
+        bureau="it",
+        topic="再送ACL検証",
+    )
+    ledger.observe_topic(
+        identity,
+        title="再送ACL検証",
+        aliases=[],
+        fingerprint="bundle-fingerprint",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+    ledger.record_source(
+        "retry-source",
+        digest,
+        status="pending-delivery",
+        topic_id=identity.topic_id,
+    )
+    ledger.record_delivery(
+        identity.topic_id,
+        fingerprint="bundle-fingerprint",
+        bundle_id="retry-bundle",
+        status="failed",
+        now=now - timedelta(hours=1),
+        source_versions=[("retry-source", digest)],
+        lineage_schema_version=BUNDLE_LINEAGE_SCHEMA_VERSION,
+        lineage_complete=True,
+    )
+    retry = AsyncMock()
+    monkeypatch.setattr(curation, "retry_knowledge_delivery", retry)
+
+    result = await curation.curate_once(state_path=state, limit=3)
+
+    retry.assert_not_awaited()
+    assert result["retried"] == 0
+    assert result["retry_blocked"] == 1
+    assert result["open_bundles"] == 0
+    quarantined = TopicStateStore(state).get_topic(identity.topic_id)
+    assert quarantined is not None
+    assert quarantined.delivery_status == "blocked-access"
+
+
+@pytest.mark.asyncio
+async def test_pre_upgrade_retry_without_lineage_metadata_is_blocked(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime.now(timezone.utc)
+    checkpoint = tmp_path / "scheduled-backfill-state.json"
+    checkpoint.write_text(
+        json.dumps(checkpoint_payload(now)),
+        encoding="utf-8",
+    )
+    database = tmp_path / "rag.sqlite3"
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(checkpoint))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    rag = RagStore(database)
+    rag.upsert_document(
+        "documents/legacy-retry-source",
+        "旧bundleの主資料だけが記録されている公開会話" * 100,
+        [
+            {"key": "document_key", "string_value": "legacy-retry-source"},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 10},
+            {"key": "channel_name", "string_value": "公開チャンネル"},
+            {"key": "category", "string_value": "28th IT局"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "auto_promote", "string_value": "true"},
+        ],
+    )
+    stored = rag.list_curation_documents()[0]
+    digest = curation._digest(stored)
+    ledger = TopicStateStore(state)
+    identity = ledger.resolve_identity(
+        festival=28,
+        bureau="it",
+        topic="旧再送lineage検証",
+    )
+    ledger.observe_topic(
+        identity,
+        title="旧再送lineage検証",
+        aliases=[],
+        fingerprint="legacy-bundle-fingerprint",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+    ledger.record_source(
+        "legacy-retry-source",
+        digest,
+        status="delivered",
+        topic_id=identity.topic_id,
+    )
+    ledger.record_delivery(
+        identity.topic_id,
+        fingerprint="legacy-bundle-fingerprint",
+        bundle_id="legacy-retry-bundle",
+        status="failed",
+        now=now - timedelta(hours=1),
+        # This is the old primary-only shape. Simulate upgrade by removing the
+        # metadata table while retaining its bundle_sources row.
+        source_versions=[("legacy-retry-source", digest)],
+    )
+    with ledger._connect() as connection:
+        connection.execute("DROP TABLE bundle_lineage")
+    upgraded = TopicStateStore(state)
+    assert upgraded.bundle_source_versions("legacy-retry-bundle") == [
+        ("legacy-retry-source", digest)
+    ]
+    assert upgraded.bundle_lineage_status("legacy-retry-bundle") == (
+        False,
+        "lineage-metadata-missing",
+    )
+    authorized, reason = curation._retry_bundle_sources_authorization(
+        upgraded,
+        "legacy-retry-bundle",
+        rag,
+        {"legacy-retry-source": stored},
+        current_curation_eligible_channel_ids={10},
+        current_public_channel_ids={10},
+    )
+    assert authorized is False
+    assert reason == "lineage-metadata-missing"
+    retry = AsyncMock()
+    monkeypatch.setattr(curation, "retry_knowledge_delivery", retry)
+
+    result = await curation.curate_once(state_path=state, limit=3)
+
+    retry.assert_not_awaited()
+    assert result["retried"] == 0
+    assert result["retry_blocked"] == 1
+    assert TopicStateStore(state).get_topic(identity.topic_id).delivery_status == (
+        "blocked-access"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_exception_is_reported_as_retry_failure(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime.now(timezone.utc)
+    checkpoint = tmp_path / "scheduled-backfill-state.json"
+    checkpoint.write_text(
+        json.dumps(checkpoint_payload(now)),
+        encoding="utf-8",
+    )
+    database = tmp_path / "rag.sqlite3"
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(checkpoint))
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+    rag = RagStore(database)
+    rag.upsert_document(
+        "documents/retry-source",
+        "再送時の一時障害を報告する公開会話" * 100,
+        [
+            {"key": "document_key", "string_value": "retry-source"},
+            {"key": "guild_id", "numeric_value": 123},
+            {"key": "channel_id", "numeric_value": 10},
+            {"key": "channel_name", "string_value": "公開チャンネル"},
+            {"key": "category", "string_value": "28th IT局"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "auto_promote", "string_value": "true"},
+        ],
+    )
+    stored = rag.list_curation_documents()[0]
+    digest = curation._digest(stored)
+    ledger = TopicStateStore(state)
+    identity = ledger.resolve_identity(
+        festival=28,
+        bureau="it",
+        topic="再送失敗検証",
+    )
+    ledger.observe_topic(
+        identity,
+        title="再送失敗検証",
+        aliases=[],
+        fingerprint="bundle-fingerprint",
+        access=AccessDecision("channel", 10, "single-private-channel"),
+    )
+    ledger.record_source(
+        "retry-source",
+        digest,
+        status="delivered",
+        topic_id=identity.topic_id,
+    )
+    ledger.record_delivery(
+        identity.topic_id,
+        fingerprint="bundle-fingerprint",
+        bundle_id="retry-bundle",
+        status="failed",
+        now=now - timedelta(hours=1),
+        source_versions=[("retry-source", digest)],
+        lineage_schema_version=BUNDLE_LINEAGE_SCHEMA_VERSION,
+        lineage_complete=True,
+    )
+    retry = AsyncMock(side_effect=RuntimeError("temporary"))
+    monkeypatch.setattr(curation, "retry_knowledge_delivery", retry)
+
+    result = await curation.curate_once(state_path=state, limit=3)
+
+    retry.assert_awaited_once_with("retry-bundle")
+    assert result["retried"] == 1
+    assert result["retry_failed"] == 1
+    assert result["failed"] == 0
+
+
 @pytest.mark.asyncio
 async def test_curate_once_requires_every_candidate_channel_in_successful_cycle(tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
@@ -910,6 +1519,57 @@ async def test_curate_once_requires_every_candidate_channel_in_successful_cycle(
     assert result["checkpoint_reason"] == "checkpoint-missing-curation-channel:99"
     assert result["processed"] == 0
     assert not state.exists()
+
+
+@pytest.mark.parametrize("mutation", ["body", "acl"])
+@pytest.mark.asyncio
+async def test_curate_once_revalidates_live_evidence_before_initial_publish(
+    tmp_path,
+    monkeypatch,
+    mutation,
+):
+    database = tmp_path / "rag.sqlite3"
+    state = tmp_path / "curation.sqlite3"
+    monkeypatch.setenv("YAGAPON_RAG_DB_PATH", str(database))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", "10")
+    store = RagStore(database)
+    document = source_document()
+    upsert_source_document(store, document)
+    plan = CurationPlan(
+        has_knowledge_value=True,
+        topic="新歓Webページ",
+        aliases=["新歓サイト"],
+        search_terms=["新歓Webページ"],
+    )
+    draft = TopicDraft(
+        title="新歓Webページ",
+        summary=[EvidenceClaim(text="公開前レビューを検討した。", evidence_ids=["D01"])],
+    )
+
+    async def mutate_during_generation(*_args, **_kwargs):
+        if mutation == "body":
+            replacement = document | {"body": "生成中に差し替えられた会話" * 30}
+        else:
+            replacement = document | {"category": "選考"}
+        upsert_source_document(store, replacement)
+        return draft
+
+    monkeypatch.setattr(curation, "new_genai_client", lambda _key: object())
+    monkeypatch.setattr(curation, "plan_document", AsyncMock(return_value=plan))
+    monkeypatch.setattr(curation, "draft_topic", mutate_during_generation)
+    publish_mock = AsyncMock()
+    monkeypatch.setattr(curation, "publish_knowledge_bundle", publish_mock)
+
+    result = await curation.curate_once(state_path=state, limit=3)
+
+    publish_mock.assert_not_awaited()
+    assert result["processed"] == 1
+    assert result["queued"] == 0
+    assert result["failed"] == 0
+    assert result["blocked_access"] == 1
+    assert result["open_bundles"] == 0
 
 
 @pytest.mark.asyncio
@@ -968,7 +1628,13 @@ async def test_curate_once_keeps_pending_topic_retryable_without_regeneration(tm
     second = await curation.curate_once(state_path=state, limit=3)
 
     assert second["processed"] == 0
+    assert second["source"] == 1
+    assert second["eligible"] == 1
+    assert second["policy_excluded"] == 0
+    assert second["actionable"] == 1
     assert second["backpressured"] == 1
+    assert second["open_bundles"] == 1
+    assert second["max_open_bundles"] == 1
     assert second["retryable"] == 1
     assert second["next_retry_at"] == first["next_retry_at"]
     assert draft_mock.await_count == 1

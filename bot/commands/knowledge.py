@@ -33,7 +33,11 @@ from bot.knowledge_publish import (
     publish_knowledge_bundle,
     retry_knowledge_delivery,
 )
-from bot.scheduled_backfill import configured_guild_ids, scheduler_enabled
+from bot.scheduled_backfill import (
+    configured_guild_ids,
+    scheduled_backfill_state_path,
+    scheduler_enabled,
+)
 from knowledge_sync.draft import redact_credentials, structure_source
 from knowledge_sync.drive import DriveReader
 
@@ -75,14 +79,35 @@ async def _run_curation_cycle() -> dict:
     return await asyncio.to_thread(_run_curation_cycle_sync)
 
 
-async def _run_knowledge_refresh(bot, *, mode: str) -> dict:
+def _curation_checkpoint_matches_scheduler(bot) -> bool:
+    configured = os.environ.get("YAGAPON_KNOWLEDGE_BACKFILL_STATE", "").strip()
+    manager = getattr(bot, "scheduled_backfill", None)
+    state_path = getattr(manager, "state_path", None)
+    if not configured or state_path is None:
+        return False
+    return (
+        Path(configured).resolve()
+        == Path(state_path).resolve()
+        == scheduled_backfill_state_path().resolve()
+    )
+
+
+async def _run_knowledge_refresh(bot, *, mode: str, guild_id: int) -> dict:
     """Run the operator-triggered pipeline without bypassing production gates."""
     if mode not in {"full", "historical", "curation"}:
         raise ValueError(f"Unsupported Knowledge refresh mode: {mode}")
+    if mode == "historical" and not _curation_checkpoint_matches_scheduler(bot):
+        raise RuntimeError(
+            "Historical promotion requires the curation checkpoint path to "
+            "match the scheduled backfill state"
+        )
     result: dict[str, object] = {"mode": mode}
     if mode in {"full", "historical"}:
         if mode == "historical":
-            backfill = await bot.scheduled_backfill.run_once(full_history=True)
+            backfill = await bot.scheduled_backfill.run_once(
+                full_history=True,
+                history_promotion_guild_id=guild_id,
+            )
         else:
             backfill = await bot.scheduled_backfill.run_once()
         result["backfill"] = backfill
@@ -112,8 +137,25 @@ def _knowledge_refresh_status(result: dict) -> str:
         return "disabled"
     if not curation.get("checkpoint_ready", True):
         return "deferred"
-    if int(curation.get("failed") or 0) > 0:
+    if (
+        int(curation.get("failed") or 0) > 0
+        or int(curation.get("retry_failed") or 0) > 0
+    ):
         return "partial"
+    if (
+        int(curation.get("retry_blocked") or 0) > 0
+        or int(curation.get("blocked_access") or 0) > 0
+    ):
+        return "policy-held"
+    source = int(curation.get("source") or 0)
+    eligible = int(curation.get("eligible") or 0)
+    policy_excluded = int(curation.get("policy_excluded") or 0)
+    if (
+        eligible == 0
+        and policy_excluded > 0
+        and (source == 0 or policy_excluded >= source)
+    ):
+        return "policy-held"
     return "completed"
 
 
@@ -142,6 +184,10 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
     presentations = {
         "completed": ("✅ Knowledge更新が完了したぽん", discord.Color.green()),
         "partial": ("⚠️ Knowledge更新が一部失敗したぽん", discord.Color.orange()),
+        "policy-held": (
+            "🛡️ Knowledge候補をポリシーで保留したぽん",
+            discord.Color.orange(),
+        ),
         "deferred": ("⏳ Knowledge更新を保留したぽん", discord.Color.orange()),
         "disabled": ("⏸️ Knowledge整理は無効だぽん", discord.Color.light_grey()),
         "busy": ("⏳ 別のKnowledge更新が実行中だぽん", discord.Color.orange()),
@@ -157,6 +203,13 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
             name=backfill_label,
             value=(
                 f"状態: `{backfill.get('status', 'unknown')}`\n"
+                + (
+                    "履歴の候補化: `明示overrideを除き、実行サーバーの現在公開のみ`\n"
+                    if result.get("mode") == "historical"
+                    and backfill.get("history_promotion_guild_id")
+                    else ""
+                )
+                +
                 f"チャンネル: {sum(int(item.get('channels_completed') or 0) for item in guilds)} / "
                 f"{sum(int(item.get('channels_total') or 0) for item in guilds)}\n"
                 f"メッセージ: {sum(int(item.get('messages_indexed') or 0) for item in guilds)}\n"
@@ -193,17 +246,32 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
             )
     curation = result.get("curation") or {}
     checkpoint = str(curation.get("checkpoint_reason") or "ready")
+    max_open_bundles = int(curation.get("max_open_bundles") or 0)
+    open_bundle_cap = str(max_open_bundles) if max_open_bundles else "不明"
+    candidate_counts = ""
+    if "source" in curation:
+        candidate_counts = (
+            f"候補元: {int(curation.get('source') or 0)} / "
+            f"対象: {int(curation.get('eligible') or 0)} / "
+            f"ポリシー除外: {int(curation.get('policy_excluded') or 0)} / "
+            f"開始時未処理: {int(curation.get('actionable') or 0)}\n"
+        )
     embed.add_field(
         name="議題別Knowledge整理",
         value=(
             f"checkpoint: `{checkpoint}`\n"
+            f"{candidate_counts}"
             f"処理: {int(curation.get('processed') or 0)} / "
             f"Draft送信: {int(curation.get('queued') or 0)} / "
             f"見送り: {int(curation.get('skipped') or 0)} / "
+            f"権限保留: {int(curation.get('blocked_access') or 0)} / "
             f"失敗: {int(curation.get('failed') or 0)}\n"
             f"再送: {int(curation.get('retried') or 0)} / "
+            f"権限再確認で再送保留: {int(curation.get('retry_blocked') or 0)} / "
+            f"再送失敗: {int(curation.get('retry_failed') or 0)} / "
             f"未確認bundle: {int(curation.get('open_bundles') or 0)} / "
-            f"PR待ち: {int(curation.get('backpressured') or 0)}"
+            f"上限: {open_bundle_cap} / "
+            f"今回保留: {int(curation.get('backpressured') or 0)}"
         ),
         inline=False,
     )
@@ -386,7 +454,10 @@ def register(bot):
         description="差分・全期間・整理のみのどれを実行するか",
         choices=[
             discord.OptionChoice("Discord差分取得 → Knowledge整理（推奨）", "full"),
-            discord.OptionChoice("全期間を年度別に再構築 → Knowledge整理", "historical"),
+            discord.OptionChoice(
+                "全期間を年度別に再構築（明示override以外は現在公開のみ候補化）",
+                "historical",
+            ),
             discord.OptionChoice("Knowledge整理のみ", "curation"),
         ],
         default="full",
@@ -417,6 +488,12 @@ def register(bot):
                 ephemeral=True,
             )
             return
+        if mode == "historical" and not _curation_checkpoint_matches_scheduler(bot):
+            await ctx.respond(
+                "⏸️ 全期間の候補化には、履歴取得とKnowledge整理で同じcheckpoint pathの設定が必要だぽん。",
+                ephemeral=True,
+            )
+            return
         if manual_refresh_lock.locked():
             await ctx.respond(
                 "⏳ このBotでは別のKnowledge即時更新が実行中だぽん。完了後に試してほしいぽん。",
@@ -425,7 +502,14 @@ def register(bot):
             return
         await manual_refresh_lock.acquire()
         try:
-            duration_note = "全期間を年度別に確認するため、かなり時間がかかる場合があるぽん。" if mode == "historical" else ""
+            duration_note = (
+                "全期間を年度別に確認するため、かなり時間がかかる場合があるぽん。"
+                "明示的なチャンネルoverrideを除き、実行したサーバーで現在全員が閲覧できる"
+                "チャンネルだけをKnowledge候補にし、役職限定チャンネルは検索用のまま"
+                "外部送信しないぽん。"
+                if mode == "historical"
+                else ""
+            )
             await ctx.respond(
                 "🚀 Knowledge更新を開始したぽん。" + duration_note + "長時間かかっても処理を継続し、"
                 "完了結果をこのチャンネルへ表示するぽん。",
@@ -436,12 +520,17 @@ def register(bot):
             raise
         channel = ctx.channel
         guild_id = ctx.guild.id
+        requester_user_id = str(ctx.author.id)
         requester = getattr(ctx.author, "display_name", None) or getattr(ctx.author, "name", "管理者")
 
         async def run_and_report() -> None:
             try:
                 try:
-                    result = await _run_knowledge_refresh(bot, mode=mode)
+                    result = await _run_knowledge_refresh(
+                        bot,
+                        mode=mode,
+                        guild_id=guild_id,
+                    )
                 except KnowledgePipelineBusy:
                     result = {
                         "mode": mode,
@@ -487,8 +576,15 @@ def register(bot):
                             guild_id=guild_id,
                             details={
                                 "mode": mode,
+                                "requester_user_id": requester_user_id,
+                                "history_promotion_guild_id": (
+                                    str(guild_id) if mode == "historical" else None
+                                ),
                                 "backfill_status": (result.get("backfill") or {}).get("status"),
                                 "checkpoint_ready": curation.get("checkpoint_ready"),
+                                "eligible": int(curation.get("eligible") or 0),
+                                "policy_excluded": int(curation.get("policy_excluded") or 0),
+                                "actionable": int(curation.get("actionable") or 0),
                                 "processed": int(curation.get("processed") or 0),
                                 "queued": int(curation.get("queued") or 0),
                                 "failed": int(curation.get("failed") or 0),
