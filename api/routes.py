@@ -46,8 +46,11 @@ class BackfillRequest(BaseModel):
 
 class EvaluateRagRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
-    answer: str = Field(min_length=1, max_length=12000)
-    sources: list[str] = Field(default_factory=list, max_length=20)
+    # Completeness-first RAG answers may span several Discord messages.  Keep
+    # the operator-only evaluator able to judge the same full answer rather
+    # than forcing callers to truncate it before quality checks.
+    answer: str = Field(min_length=1, max_length=64000)
+    sources: list[str] = Field(default_factory=list, max_length=50)
     reference_facts: list[str] = Field(default_factory=list, max_length=30)
     expected_no_answer: bool = False
     category: str = Field(default="general", max_length=100)

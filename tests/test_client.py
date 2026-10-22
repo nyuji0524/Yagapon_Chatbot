@@ -39,6 +39,14 @@ def test_clean_rag_query_removes_bot_role_mention():
     assert _clean_rag_query("@silent <@&456> Driveの保存先は？", 123, (456,)) == "Driveの保存先は？"
 
 
+def test_clean_rag_query_preserves_numbered_multiline_structure():
+    content = "<@123> 次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題\n@silent"
+
+    assert _clean_rag_query(content, 123) == (
+        "次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題"
+    )
+
+
 def test_same_name_role_assigned_to_bot_is_an_invocation():
     role = SimpleNamespace(id=456, name="おしゃべりやがぽん")
     bot_member = SimpleNamespace(display_name="おしゃべりやがぽん", roles=[role])

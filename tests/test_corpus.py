@@ -13,6 +13,7 @@ from bot.corpus import (
     backfill_channel_concurrency,
     calculate_incremental_after,
     calculate_resumable_incremental_after,
+    requires_comprehensive_answer,
     retrieval_metadata_filter,
     run_backfill_channels,
     sensitive_request_response,
@@ -273,6 +274,33 @@ def test_answer_declares_missing_knowledge_checks_the_entire_answer():
     assert answer_declares_missing_knowledge("該当する情報は見つかりませんでした。")
     assert answer_declares_missing_knowledge("記録は確認できませんでした。")
     assert answer_declares_missing_knowledge("回答だぽん。" + "x" * 500 + "記録は確認できなかったぽん。")
+    assert answer_declares_missing_knowledge("確認するぽん。" + "x" * 9000 + "記録は確認できなかったぽん。")
+
+
+def test_answer_declares_missing_knowledge_keeps_supported_sibling_sections():
+    answer = (
+        "## 権限\n整理券管理者が全体管理できるぽん。\n\n"
+        "## 過去の障害\nこの項目を裏付ける記録は確認できなかったぽん。"
+    )
+
+    assert answer_declares_missing_knowledge(answer) is False
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "整理券の権限、データ構造、運用上の問題点を詳しく教えてください",
+        "1. 権限\n2. データ構造",
+        "権限は誰にありますか？過去に何が問題になりましたか？",
+        "長い質問 " + "詳細 " * 50,
+    ],
+)
+def test_requires_comprehensive_answer_detects_broad_requests(question):
+    assert requires_comprehensive_answer(question) is True
+
+
+def test_requires_comprehensive_answer_keeps_single_fact_query_normal():
+    assert requires_comprehensive_answer("11-21の読み方は？") is False
 
 
 @pytest.mark.parametrize(
@@ -364,6 +392,133 @@ async def test_rag_failure_does_not_disclose_internal_exception(corpus_manager):
     assert "もう一度" in result.text
 
 
+@pytest.mark.asyncio
+async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_manager):
+    exact_hit = SimpleNamespace(
+        document_key="knowledge:standby-pass",
+        channel_name="整理券仕様",
+        festival=None,
+        source_url="https://knowledge.example/standby-pass",
+        excerpt="整理券管理者が全体管理を行う。",
+        score=500,
+        authority="curated",
+        status="verified",
+        source_type="knowledge_repository",
+        access_scope="guild",
+        channel_id=None,
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["整理券", "権限", "問題点"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[exact_hit])
+    corpus_manager.rag_store.record_query = Mock(return_value="query-comprehensive")
+
+    contexts = []
+    for index in range(7):
+        contexts.append(
+            SimpleNamespace(
+                retrieved_context=SimpleNamespace(
+                    title=f"運用記録{index}",
+                    uri=f"https://knowledge.example/operations/{index}",
+                    custom_metadata=[
+                        {"key": "channel_name", "string_value": f"operations/{index}.md"},
+                        {"key": "authority", "string_value": "curated"},
+                        {"key": "status", "string_value": "active"},
+                        {"key": "source_type", "string_value": "knowledge_repository"},
+                        {"key": "access_scope", "string_value": "guild"},
+                    ],
+                )
+            )
+        )
+    response = SimpleNamespace(
+        text=(
+            "## 権限\n整理券管理者が全体管理を行うぽん。\n\n"
+            "## 運用上の問題\n確認できた問題を整理したぽん。\n\n"
+            "## 未確認事項\n一部の時期については記録を確認できなかったぽん。"
+        ),
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                grounding_metadata=SimpleNamespace(grounding_chunks=contexts),
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
+
+    result = await corpus_manager.query_with_trace(
+        "整理券の権限と運用上の問題点を詳しく教えてください",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "## 権限" in result.text
+    assert "## 運用上の問題" in result.text
+    assert len(result.citations) == 8
+    call = corpus_manager._client.aio.models.generate_content.await_args
+    assert call.kwargs["config"].max_output_tokens == 8192
+    assert call.kwargs["config"].tools[0].file_search.top_k == 20
+    assert "短さより完全性" in call.kwargs["config"].system_instruction
+    assert corpus_manager.rag_store.search_exact.call_args.kwargs["limit"] == 32
+
+
+@pytest.mark.asyncio
+async def test_incomplete_rag_output_is_never_returned_as_an_answer(corpus_manager):
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="公開してはいけない途中回答",
+            usage_metadata=None,
+            candidates=[SimpleNamespace(finish_reason="MAX_TOKENS", grounding_metadata=None)],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "整理券機能の全体像を詳しく教えてください",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    assert "途中回答" not in result.text
+    assert "もう一度" in result.text
+    config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
+    assert config.max_output_tokens == 8192
+
+
+def test_expanded_citation_limit_still_enforces_channel_acl(corpus_manager):
+    chunks = []
+    for index in range(8):
+        channel_id = 10 if index < 6 else 99
+        chunks.append(
+            SimpleNamespace(
+                retrieved_context=SimpleNamespace(
+                    title=f"記録{index}",
+                    uri=f"https://discord.example/{index}",
+                    custom_metadata=[
+                        {"key": "channel_name", "string_value": f"記録{index}"},
+                        {"key": "access_scope", "string_value": "channel"},
+                        {"key": "channel_id", "string_value": str(channel_id)},
+                    ],
+                )
+            )
+        )
+    response = SimpleNamespace(
+        candidates=[SimpleNamespace(grounding_metadata=SimpleNamespace(grounding_chunks=chunks))]
+    )
+
+    sources = corpus_manager._response_sources(
+        response,
+        limit=20,
+        allowed_channel_ids=(10,),
+    )
+
+    assert len(sources) == 6
+    assert all("/6" not in source and "/7" not in source for source in sources)
+
+
 def test_lexical_sources_deduplicates_the_same_channel_label(corpus_manager):
     hits = [
         SimpleNamespace(channel_name="仕事", source_url="https://discord.example/1"),
@@ -440,6 +595,42 @@ async def test_query_marks_model_declared_missing_knowledge_as_no_answer(corpus_
     assert result.no_answer is True
     assert result.citations == ()
     assert "**参照**" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_global_no_evidence_marker_is_never_exposed(corpus_manager, tmp_path):
+    corpus_manager.rag_store = RagStore(tmp_path / "rag.sqlite3")
+    context = SimpleNamespace(
+        title="周辺資料",
+        uri=None,
+        custom_metadata=[{"key": "channel_name", "string_value": "開発"}],
+    )
+    response = SimpleNamespace(
+        text=(
+            "[[YAGAPON_NO_RELEVANT_EVIDENCE]]\n"
+            "その件に関する情報は、今のボクの記憶には見当たらないぽん。"
+        ),
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                ),
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(return_value=response)
+
+    result = await corpus_manager.query_with_trace(
+        "整理券の未確認仕様は？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert "YAGAPON_NO_RELEVANT_EVIDENCE" not in result.text
+    assert result.citations == ()
 
 
 @pytest.mark.asyncio

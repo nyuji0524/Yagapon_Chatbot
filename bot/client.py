@@ -27,14 +27,27 @@ def _clean_rag_query(
     bot_user_id: int | None,
     bot_role_ids: tuple[int, ...] = (),
 ) -> str:
-    """Remove Discord addressing helpers that should not become search terms."""
-    query = content
+    """Remove addressing helpers while preserving the user's question structure."""
+    query = content.replace("\r\n", "\n").replace("\r", "\n")
     if bot_user_id:
         query = query.replace(f"<@{bot_user_id}>", "").replace(f"<@!{bot_user_id}>", "")
     for role_id in bot_role_ids:
         query = query.replace(f"<@&{role_id}>", "")
     query = re.sub(r"(?i)(?<!\S)@silent(?!\S)", "", query)
-    return " ".join(query.split())
+    normalized_lines = []
+    previous_blank = True
+    for raw_line in query.split("\n"):
+        line = re.sub(r"[\t\f\v ]+", " ", raw_line).strip()
+        if not line:
+            if not previous_blank:
+                normalized_lines.append("")
+            previous_blank = True
+            continue
+        normalized_lines.append(line)
+        previous_blank = False
+    while normalized_lines and not normalized_lines[-1]:
+        normalized_lines.pop()
+    return "\n".join(normalized_lines)
 
 
 def _mentioned_bot_role_ids(message: discord.Message, bot_user) -> tuple[int, ...]:

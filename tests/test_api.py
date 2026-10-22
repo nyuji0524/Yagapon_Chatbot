@@ -191,6 +191,37 @@ def test_rag_evaluate_requires_token_and_uses_server_side_judge(monkeypatch):
     assert bot.corpus.evaluate_answer_quality.await_args.args[0]["question"] == "11-21の読みは？"
 
 
+def test_rag_evaluate_accepts_complete_long_form_answer(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    judgment = QualityJudgment(
+        factual_accuracy=4,
+        completeness=4,
+        directness=4,
+        citation_relevance=4,
+        safety=4,
+        passed=True,
+        issues=[],
+        rationale="全論点を確認済み",
+    )
+    client, bot = make_client()
+    bot.corpus.evaluate_answer_quality.return_value = judgment
+    body = {
+        "question": "複数論点を詳しく教えてください",
+        "answer": "長文回答" * 5000,
+        "sources": [f"source-{index}" for index in range(25)],
+        "reference_facts": ["全論点を回答する"],
+    }
+
+    response = client.post(
+        "/rag/evaluate",
+        headers={"Authorization": "Bearer secret"},
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert bot.corpus.evaluate_answer_quality.await_args.args[0]["answer"] == body["answer"]
+
+
 def test_backfill_exposes_job_progress(monkeypatch):
     monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
     client, bot = make_client()
