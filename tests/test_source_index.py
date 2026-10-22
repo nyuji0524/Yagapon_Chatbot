@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import source_index.__main__ as source_index_module
 from bot.rag_store import RagStore
@@ -16,6 +17,7 @@ from source_index.__main__ import (
     SourceHistoryCommit,
     SourceHistorySettings,
     chunks_for,
+    contains_history_secret,
     contains_secret,
     deployed_refs,
     document_policy,
@@ -77,6 +79,21 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert not contains_secret('token = os.environ.get("GITHUB_TOKEN", "")')
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')
     assert contains_secret('{"client_secret": "1234567890abcdefghijklmnop"}')
+
+
+def test_history_secret_scanner_fails_closed_for_removed_credentials():
+    # Assemble unmistakably synthetic values at runtime so the repository does
+    # not itself contain a contiguous token/private-key fixture.
+    unquoted = "+client_secret: " + "fixture-value-" * 2
+    jwt = "+authorization: Bearer " + ".".join(
+        ("eyJfixtureHeader", "fixturePayload", "fixtureSignature")
+    )
+    pem = "+-----BEGIN " + "PRIVATE KEY-----\nfixture-only"
+
+    assert not contains_secret(unquoted)
+    assert contains_history_secret(unquoted)
+    assert contains_history_secret(jwt)
+    assert contains_history_secret(pem)
 
 
 def test_curated_document_policy_allows_only_approved_front_matter():
@@ -340,6 +357,14 @@ def test_missing_manifest_uses_builtin_approved_repositories(tmp_path):
     assert support.private
     assert support.history
     assert support.fetch == "archive"
+    web = next(
+        repository
+        for repository in repositories
+        if repository.name == "YagamiFes-IT/Yagamifes_Web_2025"
+    )
+    assert web.private
+    assert web.history
+    assert web.fetch == "tree"
 
 
 def test_checked_in_manifest_indexes_history_only_for_three_code_repositories():
@@ -353,11 +378,42 @@ def test_checked_in_manifest_indexes_history_only_for_three_code_repositories():
         "YagamiFes-IT/yagamifes-firebase",
         "YagamiFes-IT/Yagamifes_Web_2025",
     }
-    assert all(
-        repository.fetch == "archive"
-        for repository in repositories
-        if repository.private
+    fetches = {repository.name: repository.fetch for repository in repositories}
+    assert fetches["YagamiFes-IT/Yagamifes_Web_2025"] == "tree"
+    assert fetches["YagamiFes-IT/Yaga_Support"] == "archive"
+    assert fetches["YagamiFes-IT/yagamifes-firebase"] == "archive"
+    assert fetches["YagamiFes-IT/YagamiFes-IT-Knowledge"] == "archive"
+
+
+def test_repository_env_can_only_narrow_reviewed_manifest(monkeypatch, tmp_path):
+    manifest = tmp_path / "repositories.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "repositories": [
+                    {
+                        "name": "example/approved",
+                        "ref": "main",
+                        "include": ["src/"],
+                    },
+                    {
+                        "name": "example/also-approved",
+                        "ref": "main",
+                        "include": ["app/"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
     )
+    monkeypatch.setenv(
+        "YAGAPON_SOURCE_REPOSITORIES",
+        "example/approved,example/not-in-manifest",
+    )
+
+    repositories = load_repositories(manifest)
+
+    assert [repository.name for repository in repositories] == ["example/approved"]
 
 
 def _history_settings(**overrides) -> SourceHistorySettings:
@@ -400,6 +456,79 @@ def test_source_history_settings_default_supports_measured_repository_size(monke
     assert settings.max_commits == 2_000
     assert settings.max_pages * 100 >= settings.max_commits
     assert settings.commits_per_cycle == 100
+
+
+def test_source_history_digest_tracks_snapshot_fallback_coverage():
+    assert _history_settings(
+        max_snapshot_fallbacks_per_repository=10
+    ).digest != _history_settings(
+        max_snapshot_fallbacks_per_repository=11
+    ).digest
+
+
+def test_private_tree_fetch_reads_only_allowlisted_blobs_and_preserves_rate_reserve(
+    monkeypatch,
+):
+    client = GitHubSourceClient(lambda _repository: "installation-token")
+    allowed = b"export const current = true;\n"
+    responses = [
+        (
+            {
+                "truncated": False,
+                "tree": [
+                    {
+                        "path": "src/current.ts",
+                        "type": "blob",
+                        "size": len(allowed),
+                        "sha": "a" * 40,
+                    },
+                    {
+                        "path": "large/private.bin",
+                        "type": "blob",
+                        "size": 200_000_000,
+                        "sha": "b" * 40,
+                    },
+                ],
+            },
+            {"X-RateLimit-Remaining": "900"},
+        ),
+        (
+            {
+                "encoding": "base64",
+                "content": source_index_module.base64.b64encode(allowed).decode(),
+            },
+            {"X-RateLimit-Remaining": "899"},
+        ),
+    ]
+    monkeypatch.setattr(
+        client,
+        "_request_with_headers",
+        lambda *_args: responses.pop(0),
+    )
+
+    assert client.selected_files(
+        "example/private",
+        "c" * 40,
+        ("src/",),
+        _history_settings(),
+    ) == [("src/current.ts", allowed)]
+    assert responses == []
+
+    monkeypatch.setattr(
+        client,
+        "_request_with_headers",
+        lambda *_args: (
+            {"truncated": False, "tree": []},
+            {"X-RateLimit-Remaining": "200"},
+        ),
+    )
+    with pytest.raises(GitHubRateLimitError, match="existing indexed generation"):
+        client.selected_files(
+            "example/private",
+            "c" * 40,
+            ("src/",),
+            _history_settings(),
+        )
 
 
 def test_github_app_token_is_cached_and_restricted(monkeypatch):
@@ -514,16 +643,20 @@ def test_github_app_router_is_anonymous_for_public_repository(monkeypatch):
         "read_secret",
         lambda name: secrets.get(name, ""),
     )
-    monkeypatch.setattr(
-        source_index_module,
-        "GitHubAppTokenProvider",
-        lambda **_kwargs: lambda: "installation-token",
-    )
+    provider_kwargs = {}
+
+    def provider(**kwargs):
+        provider_kwargs.update(kwargs)
+        return lambda: "installation-token"
+
+    monkeypatch.setattr(source_index_module, "GitHubAppTokenProvider", provider)
 
     router = github_token_provider(repositories)
 
+    assert provider_kwargs["repositories"] == ("private",)
     assert router("public/repo") == ""
     assert router("org/private") == "installation-token"
+    assert router("org/not-allowlisted") == ""
 
 
 def test_private_repository_without_credentials_fails_clearly(monkeypatch):
@@ -593,6 +726,11 @@ def test_history_listing_pages_and_stops_at_rate_reserve(monkeypatch):
 def test_history_details_records_omitted_patch_and_exact_sha_source(monkeypatch):
     client = GitHubSourceClient("")
     content = "def current():\n    return True\n"
+    unquoted_patch = "+client_secret: " + "fixture-value-" * 2
+    jwt_patch = "+authorization: Bearer " + ".".join(
+        ("eyJfixtureHeader", "fixturePayload", "fixtureSignature")
+    )
+    pem_patch = "+-----BEGIN " + "PRIVATE KEY-----\n+fixture-only"
 
     def request(_repository, path):
         if path.startswith("/commits/"):
@@ -617,6 +755,27 @@ def test_history_details_records_omitted_patch_and_exact_sha_source(monkeypatch)
                             "status": "modified",
                             "patch": "+SECRET=value",
                             "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": "src/config.yaml",
+                            "status": "modified",
+                            "patch": unquoted_patch,
+                            "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": "src/auth.py",
+                            "status": "modified",
+                            "patch": jwt_patch,
+                            "additions": 1,
+                            "deletions": 0,
+                        },
+                        {
+                            "filename": "src/key.py",
+                            "status": "modified",
+                            "patch": pem_patch,
+                            "additions": 2,
                             "deletions": 0,
                         },
                     ]
@@ -645,13 +804,16 @@ def test_history_details_records_omitted_patch_and_exact_sha_source(monkeypatch)
         _history_settings(),
     )
 
-    assert len(details[0].changes) == 2
-    current, secret = details[0].changes
+    assert len(details[0].changes) == 5
+    current, secret, unquoted, jwt, pem = details[0].changes
     assert current.patch_state == "omitted"
     assert "patch omitted" in current.patch
     assert current.source_excerpt == content
     assert secret.patch_state == "redacted_secret"
     assert "credential-like" in secret.patch
+    for redacted in (unquoted, jwt, pem):
+        assert redacted.patch_state == "redacted_secret"
+        assert redacted.patch == "[patch redacted by credential-like content policy]"
 
 
 def test_history_chunk_has_exact_sha_citation_and_mandatory_fields():

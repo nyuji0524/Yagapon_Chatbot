@@ -15,6 +15,12 @@ rag_eval_target="$app_dir/deploy/rag-eval-control.sh"
 rag_eval_cases_source="$staging_dir/rag-eval-cases.yaml"
 rag_eval_cases_target="$app_dir/deploy/rag-eval-cases.yaml"
 backup_dir=/var/backups/yagapon/"$(date -u +%Y%m%dT%H%M%SZ)"
+github_app_key_path=/etc/yagapon/secrets/github-app-private-key.pem
+github_app_key_existed=false
+github_app_key_installed=false
+github_app_key_backup=
+github_app_key_tmp=
+oauth_tmp=
 
 if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]; then
   echo "Refusing invalid Artifact Registry image reference" >&2
@@ -61,6 +67,13 @@ rollback() {
     && install -o root -g root -m 0755 "$backup_dir/rag-eval-control.sh" "$rag_eval_target"
   [[ -f "$backup_dir/rag-eval-cases.yaml" ]] \
     && install -o root -g root -m 0644 "$backup_dir/rag-eval-cases.yaml" "$rag_eval_cases_target"
+  if [[ -n "$github_app_key_backup" && -f "$github_app_key_backup" ]]; then
+    install -d -o root -g root -m 0700 "$(dirname "$github_app_key_path")"
+    install -o 10001 -g 10001 -m 0600 \
+      "$github_app_key_backup" "$github_app_key_path"
+  elif [[ "$github_app_key_installed" == true && "$github_app_key_existed" == false ]]; then
+    rm -f -- "$github_app_key_path"
+  fi
   systemctl daemon-reload
   systemctl restart yagapon || true
 }
@@ -71,6 +84,11 @@ cleanup_staging() {
     fi
   fi
 }
+cleanup_secret_temps() {
+  [[ -z "$oauth_tmp" ]] || rm -f -- "$oauth_tmp"
+  [[ -z "$github_app_key_tmp" ]] || rm -f -- "$github_app_key_tmp"
+  [[ -z "$github_app_key_backup" ]] || rm -f -- "$github_app_key_backup"
+}
 handle_error() {
   status=$?
   trap - ERR
@@ -79,6 +97,7 @@ handle_error() {
   exit "$status"
 }
 trap handle_error ERR
+trap cleanup_secret_temps EXIT
 
 deploy_tmp=$(mktemp /etc/yagapon/deploy.env.XXXXXX)
 if [[ -f "$deploy_env" ]]; then
@@ -118,7 +137,6 @@ if [[ -n "$oauth_secret" ]]; then
     false
   fi
   oauth_tmp=$(mktemp /var/lib/yagapon/google-drive-oauth.json.XXXXXX)
-  trap '[[ -z "${oauth_tmp:-}" ]] || rm -f "$oauth_tmp"' EXIT
   gcloud secrets versions access latest \
     --project "$oauth_project" \
     --secret "$oauth_secret" > "$oauth_tmp"
@@ -154,19 +172,25 @@ fi
 github_app_key_secret=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=//p' "$deploy_env" | tail -1)
 github_app_id=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_ID=//p' "$deploy_env" | tail -1)
 github_app_installation_id=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=//p' "$deploy_env" | tail -1)
-github_app_key_file=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=//p' "$deploy_env" | tail -1)
-if [[ -n "$github_app_key_secret$github_app_id$github_app_installation_id$github_app_key_file" ]]; then
+github_app_key_host_file=$(sed -n 's/^YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=//p' "$deploy_env" | tail -1)
+if [[ -n "$github_app_key_secret$github_app_id$github_app_installation_id$github_app_key_host_file" ]]; then
   if [[ -z "$oauth_project" \
     || ! "$github_app_key_secret" =~ ^[a-zA-Z0-9_-]+$ \
     || ! "$github_app_id" =~ ^[a-zA-Z0-9]+$ \
     || ! "$github_app_installation_id" =~ ^[0-9]+$ \
     || "$github_app_installation_id" == 0 \
-    || "$github_app_key_file" != /data/github-app-private-key.pem ]]; then
+    || "$github_app_key_host_file" != "$github_app_key_path" ]]; then
     echo "Invalid GitHub App Secret Manager configuration" >&2
     false
   fi
-  github_app_key_tmp=$(mktemp /var/lib/yagapon/github-app-private-key.pem.XXXXXX)
-  trap '[[ -z "${github_app_key_tmp:-}" ]] || rm -f "$github_app_key_tmp"' EXIT
+  install -d -o root -g root -m 0700 /etc/yagapon/secrets
+  if [[ -f "$github_app_key_path" ]]; then
+    github_app_key_backup=$(mktemp /etc/yagapon/secrets/github-app-private-key.pem.rollback.XXXXXX)
+    install -o root -g root -m 0600 \
+      "$github_app_key_path" "$github_app_key_backup"
+    github_app_key_existed=true
+  fi
+  github_app_key_tmp=$(mktemp /etc/yagapon/secrets/github-app-private-key.pem.XXXXXX)
   gcloud secrets versions access latest \
     --project "$oauth_project" \
     --secret "$github_app_key_secret" > "$github_app_key_tmp"
@@ -175,7 +199,8 @@ if [[ -n "$github_app_key_secret$github_app_id$github_app_installation_id$github
     false
   fi
   install -o 10001 -g 10001 -m 0600 \
-    "$github_app_key_tmp" /var/lib/yagapon/github-app-private-key.pem
+    "$github_app_key_tmp" "$github_app_key_host_file"
+  github_app_key_installed=true
   rm -f "$github_app_key_tmp"
   github_app_key_tmp=
 fi
@@ -222,6 +247,12 @@ for _ in $(seq 1 48); do
     chmod 0640 "$data_path/releases/current.json"
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     docker image prune --force --filter 'until=168h' >/dev/null
+    if [[ "$github_app_key_installed" == true ]]; then
+      # The former location was part of the shared /data bind and therefore
+      # visible to every Compose service running as UID 10001. Keep it until
+      # the new generation is healthy so a failed migration can still roll back.
+      rm -f -- /var/lib/yagapon/github-app-private-key.pem
+    fi
     cleanup_staging
     echo "Deployment healthy: $image (container: $container_id)"
     exit 0

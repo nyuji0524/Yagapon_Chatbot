@@ -39,7 +39,7 @@ YAGAPON_KNOWLEDGE_GCS_BUCKET=PROJECT-yagapon-knowledge-intake
 YAGAPON_SOURCE_GITHUB_APP_ID=123456
 YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=78901234
 YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=yagapon-github-app-private-key
-YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=/data/github-app-private-key.pem
+YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=/etc/yagapon/secrets/github-app-private-key.pem
 YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025,YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_SOURCE_HISTORY_SINCE=2024-10-01T00:00:00+09:00
 YAGAPON_SOURCE_INDEX_ENABLED=true
@@ -118,20 +118,28 @@ OAuth同意画面がTestingの間はrefresh tokenが7日で失効するため、
 
 ソースコードの正本は複製snapshotではなくGitHubとする。組織所有の専用GitHub Appを作成し、
 webhookを無効、Repository permissionsは`Contents: Read-only`（`Metadata: Read-only`は自動）だけ、
-Repository accessは上の4 private repositoryだけに限定してインストールする。個人PATや書き込み権限を
-本番Botへ渡さない。
+Repository accessは`All repositories`としてインストールする。Appは組織の全repositoryを読めるが、
+source workerは`source_index/repositories.yaml`にあり、かつ`YAGAPON_SOURCE_REPOSITORIES`で選択された
+明示allowlistだけをinstallation tokenへ指定して取り込む。GitHub Appからrepositoryを列挙して未知の
+repositoryを自動索引する処理はない。環境変数が空でもmanifest内の全entryだけが対象である。
+個人PATや書き込み権限を本番Botへ渡さない。
 
 GitHub Appのprivate key PEMはSecret Managerの`yagapon-github-app-private-key`へ保存する。
 VMサービスアカウントにはこのSecretだけの`roles/secretmanager.secretAccessor`を付与する。
-デプロイ時に`/var/lib/yagapon/github-app-private-key.pem`へUID 10001、mode `0600`で展開される。
-App IDとinstallation IDは秘密ではないため`deploy.env`に置く。BotはPEMから短命なinstallation tokenを
-発行し、有効期限前に更新する。発行されたtokenはログ、状態ファイル、File Searchへ保存しない。
+デプロイ時に共有data path外の`/etc/yagapon/secrets/github-app-private-key.pem`へUID 10001、
+mode `0600`で展開し、`source-index-watch`だけへ
+`/run/secrets/github-app-private-key.pem:ro`としてbind mountする。他のBot/同期workerからはmountしない。
+App IDとinstallation IDは秘密ではないため`deploy.env`に置く。source workerはPEMから短命な
+installation tokenを発行し、有効期限前に更新する。発行されたtokenはログ、状態ファイル、
+File Searchへ保存しない。鍵の更新中は旧鍵をhost上の一時0600ファイルへ退避し、デプロイ失敗時は
+復元する。旧`/var/lib/yagapon/github-app-private-key.pem`は新generationのhealth check成功後だけ削除する。
 
 `source-index-watch`は各repositoryの現在のmainに加え、commit日時、SHA、message、変更path、diffを
 `source_code_history/repository_history/historical`として登録する。patchが省略・切断された場合だけ、
 allowlist内の小さいファイルをそのSHAで補助取得する。初回履歴は1周期あたり最大100 commitずつ、
 新着を優先して永続cursorから遡る。GitHub rate limit、認証、アップロードのどれかに失敗した場合、
-直前の完全な索引世代を保持する。
+直前の完全な索引世代を保持する。大きいWeb repositoryの現在値はrepository全体のtarballではなく、
+Git treeからallowlistに一致する小さいblobだけを取得する。
 
 ## Knowledge登録キュー
 

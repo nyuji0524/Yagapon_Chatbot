@@ -109,6 +109,26 @@ SOURCE_SECRET_PATTERNS["literal-secret"] = re.compile(
     r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=]\s*"
     r"['\"][^'\"\n]{16,}['\"]"
 )
+# Historical diffs are a substantially riskier source than a current checkout:
+# deleting a leaked credential from ``main`` leaves the value in the commit that
+# introduced it.  Use a deliberately fail-closed policy for history even though
+# the current-source scanner stays narrower to avoid dropping ordinary source
+# files whose variables happen to be named ``token``.
+HISTORY_SECRET_PATTERNS = {
+    **SOURCE_SECRET_PATTERNS,
+    "sensitive-assignment": re.compile(
+        r"(?i)['\"]?(?:password|passwd|client[_ -]?secret|secret|api[_ -]?key|"
+        r"access[_ -]?token|refresh[_ -]?token|token|authorization)['\"]?"
+        r"\s*[:=]\s*['\"]?[^\s'\",}\]]{8,}"
+    ),
+    "jwt": re.compile(
+        r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"
+    ),
+    "authorization-value": re.compile(
+        r"(?i)\bauthorization\b\s*[:=]\s*['\"]?(?:bearer|basic)\s+"
+        r"[A-Za-z0-9._~+/=-]{8,}"
+    ),
+}
 DEFAULT_REPOSITORY_MANIFEST = {
     "repositories": [
         {
@@ -139,6 +159,7 @@ DEFAULT_REPOSITORY_MANIFEST = {
             "ref": "main",
             "private": True,
             "history": True,
+            "fetch": "tree",
             "include": [
                 "src/", "app/", "pages/", "components/", "lib/", "public/",
                 "package.json", "next.config.js", "next.config.mjs",
@@ -229,6 +250,9 @@ class SourceHistorySettings:
                 "max_pages": self.max_pages,
                 "max_files_per_commit": self.max_files_per_commit,
                 "max_bytes_per_repository": self.max_bytes_per_repository,
+                "max_snapshot_fallbacks_per_repository": (
+                    self.max_snapshot_fallbacks_per_repository
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -398,20 +422,44 @@ class GitHubSourceClient:
         repository: str,
         commit: str,
         includes: tuple[str, ...],
+        settings: SourceHistorySettings | None = None,
     ) -> list[tuple[str, bytes]]:
-        result = self._request(repository, f"/git/trees/{commit}?recursive=1")
+        result, headers = self._request_with_headers(
+            repository,
+            f"/git/trees/{commit}?recursive=1",
+        )
+        if settings is not None:
+            self._ensure_rate_budget(headers, settings)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"GitHub tree is invalid for {repository}@{commit}")
         if result.get("truncated"):
             raise RuntimeError(f"GitHub tree is truncated for {repository}@{commit}")
         files = []
         for item in result.get("tree", ()):
+            if not isinstance(item, dict):
+                raise RuntimeError(f"GitHub tree is invalid for {repository}@{commit}")
             path = str(item.get("path") or "")
-            size = int(item.get("size") or 0)
+            try:
+                size = int(item.get("size") or 0)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"GitHub tree has an invalid blob size for {repository}:{path}"
+                ) from exc
             if item.get("type") != "blob" or not safe_source_path(path, includes, size):
                 continue
-            blob = self._request(repository, f"/git/blobs/{item['sha']}")
+            blob, headers = self._request_with_headers(
+                repository,
+                f"/git/blobs/{item['sha']}",
+            )
+            if settings is not None:
+                self._ensure_rate_budget(headers, settings)
+            if not isinstance(blob, dict):
+                raise RuntimeError(f"GitHub blob is invalid for {repository}:{path}")
             if blob.get("encoding") != "base64":
                 raise RuntimeError(f"Unsupported GitHub blob encoding for {repository}:{path}")
             raw = base64.b64decode(str(blob["content"]).replace("\n", ""), validate=True)
+            if len(raw) != size:
+                raise RuntimeError(f"GitHub blob size mismatch for {repository}:{path}")
             files.append((path, raw))
         return files
 
@@ -493,7 +541,7 @@ class GitHubSourceClient:
                 raw_message = str(commit_payload.get("message") or "").strip()
                 message = (
                     "[credential-like commit message omitted]"
-                    if contains_secret(raw_message)
+                    if contains_history_secret(raw_message)
                     else raw_message[:2_000]
                 )
                 commits.append(
@@ -577,7 +625,7 @@ class GitHubSourceClient:
             return None, "exact-SHA file is binary or malformed"
         if len(raw) != size or b"\x00" in raw:
             return None, "exact-SHA file failed binary or size validation"
-        if contains_secret(text):
+        if contains_history_secret(text):
             return None, "exact-SHA file contains credential-like content"
         if len(text) > SOURCE_HISTORY_SNAPSHOT_CHARS:
             return (
@@ -649,7 +697,7 @@ class GitHubSourceClient:
                     elif len(patch.encode("utf-8")) > MAX_FILE_BYTES:
                         patch = "[patch omitted by source index per-file size policy]"
                         patch_state = "indexer_omitted_size"
-                    elif contains_secret(patch):
+                    elif contains_history_secret(patch):
                         patch = "[patch redacted by credential-like content policy]"
                         patch_state = "redacted_secret"
                     measured_patch_bytes = len(patch.encode("utf-8"))
@@ -722,6 +770,12 @@ class GitHubSourceClient:
 
 
 def load_repositories(path: Path) -> list[Repository]:
+    """Load only reviewed manifest entries, optionally narrowed by the env allowlist.
+
+    The GitHub App installation may cover every repository in the organization.
+    This loader never discovers repositories from GitHub: an empty environment
+    filter means every manifest entry, not every repository visible to the App.
+    """
     if path.exists():
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     else:
@@ -777,11 +831,9 @@ def load_repositories(path: Path) -> list[Repository]:
             raise RuntimeError(
                 f"Source repository fetch must use GitHub archive/tree: {repository.name}"
             )
-        if repository.private and (
-            repository.ref != "main" or repository.fetch != "archive"
-        ):
+        if repository.private and repository.ref != "main":
             raise RuntimeError(
-                f"Private source repository must index main through archive: {repository.name}"
+                f"Private source repository must index main: {repository.name}"
             )
         if repository.history and repository.source_type != "source_code":
             raise RuntimeError(
@@ -988,6 +1040,11 @@ def safe_source_path(path: str, includes: tuple[str, ...], size: int) -> bool:
 
 def contains_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SOURCE_SECRET_PATTERNS.values())
+
+
+def contains_history_secret(text: str) -> bool:
+    """Fail closed for credentials that may survive only in Git history."""
+    return any(pattern.search(text) for pattern in HISTORY_SECRET_PATTERNS.values())
 
 
 def document_policy(
@@ -1630,6 +1687,7 @@ async def sync_once(args) -> dict:
                     repository.name,
                     resolved_commits[repository.name],
                     repository.include,
+                    history_settings,
                 )
             else:
                 archives[repository.name] = await asyncio.to_thread(

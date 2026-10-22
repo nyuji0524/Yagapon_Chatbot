@@ -222,7 +222,8 @@ YAGAPON_SOURCE_INDEX_ENABLED=false
 YAGAPON_SOURCE_INDEX_STATE=/data/source-index-state.json
 YAGAPON_SOURCE_GITHUB_APP_ID=
 YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=
-YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=
+YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=/etc/yagapon/secrets/github-app-private-key.pem
+YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/github-app-private-key.pem
 YAGAPON_SOURCE_GITHUB_TOKEN=
 YAGAPON_SOURCE_GITHUB_TOKEN_FILE=
 YAGAPON_SOURCE_REPOSITORIES=nyuji0524/Yagapon_Chatbot,YagamiFes-IT/Yaga_Support,YagamiFes-IT/yagamifes-firebase,YagamiFes-IT/Yagamifes_Web_2025,YagamiFes-IT/YagamiFes-IT-Knowledge
@@ -236,9 +237,13 @@ YAGAPON_FIREBASE_KNOWLEDGE_API_KEY=
 
 Firebase現在値の`public` backendは未認証RESTを使うため、Firestore Security Rulesが適用される。
 `firestore`を指定した場合はADCがRulesを迂回するため、専用サービスアカウントと最小権限を使う。
-非公開リポジトリをソース索引へ含める場合、本番では対象リポジトリだけへインストールした
-read-only GitHub Appを使う。権限は`Contents: Read-only`と自動付与される`Metadata: Read-only`だけにし、
-private keyはSecret Managerから0600のファイルとしてmountする。`YAGAPON_SOURCE_GITHUB_TOKEN`は
+非公開リポジトリをソース索引へ含める場合、本番では組織の`All repositories`へインストールした
+read-only GitHub Appを使う。権限は`Contents: Read-only`と自動付与される`Metadata: Read-only`だけにする。
+App自体は組織の全repositoryを読めるが、source indexは`source_index/repositories.yaml`にあり、かつ
+`YAGAPON_SOURCE_REPOSITORIES`で選択された明示allowlistだけをinstallation tokenへ指定して取り込む。
+未知のrepositoryを列挙・自動索引しない。環境変数が空でも対象はmanifest内の全entryであり、組織の
+全repositoryではない。private keyはSecret Managerから共有data path外へ0600で展開し、source workerだけへread-only mountする。
+`YAGAPON_SOURCE_GITHUB_TOKEN`は
 ローカル移行時の互換経路に限り、個人の広権限な`gh` OAuth tokenは本番へ置かない。
 
 会議の共有Drive・Knowledgeへの自動外部化は、`@everyone`が元チャンネルを同等に
@@ -351,10 +356,12 @@ File Searchの文書設計、backfill手順、監査結果は[ナレッジ品質
 承認済みGitHubリポジトリのソース同期は`python -m source_index --dry-run`で対象を確認してから
 `YAGAPON_SOURCE_INDEX_ENABLED=true`にする。privateリポジトリはread-only GitHub Appの
 App ID、installation ID、private-keyファイルで読み取る。installation tokenは短命で自動更新され、
-Knowledgeへの書き込みには使わない。`*_FILE`を使えばSecret Managerから0600でmountした値を
+Knowledgeへの書き込みには使わない。PEMは共有`/data`へ置かず、`source-index-watch`だけの
+`/run/secrets` read-only bindから読む。`*_FILE`を使えばSecret Managerから0600でmountした値を
 環境変数へ展開せずに利用できる。Knowledgeリポジトリはfront matterが`active`または
 `historical`の文書だけを`curated`として同期し、`draft`と
-`needs-review`は検索対象へ昇格させない。tokenは必要なリポジトリだけに限定し、本文やログへ出力しない。
+`needs-review`は検索対象へ昇格させない。tokenはmanifest/envで明示選択したリポジトリだけに限定し、
+本文やログへ出力しない。
 
 現在のmainはcommit固定URL付きの`source_code`として、過去の変更はcommit日時・SHA・変更path・diffを
 持つ`source_code_history`として索引する。履歴は一度に全件取得せず、新着を優先しながら永続cursorで

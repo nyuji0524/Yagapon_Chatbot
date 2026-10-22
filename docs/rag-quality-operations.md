@@ -80,15 +80,21 @@ SHAが一致したものだけ`deployed_implementation/deployed`、それ以外�
 対象SHAの小さい変更ファイルを補助取得する。履歴は「その時点で何を変更したか」の根拠であり、
 現在のmainや本番デプロイ済み状態の根拠としては使わない。
 
-private repositoryはread-only GitHub Appで読む。Appは対象repositoryを限定し、
-`Contents: Read-only`と`Metadata: Read-only`以外の権限を持たせない。private keyはSecret Managerから
-0600のファイルとして渡し、1時間のinstallation tokenをメモリ上で更新する。個人PATは本番の標準経路にしない。
+private repositoryは組織の`All repositories`へインストールしたread-only GitHub Appで読む。
+Appは`Contents: Read-only`と`Metadata: Read-only`以外の権限を持たせない。source workerは
+`source_index/repositories.yaml`と`YAGAPON_SOURCE_REPOSITORIES`の明示allowlistだけをinstallation tokenへ
+指定し、Appから未知のrepositoryを列挙・自動索引しない。環境変数が空でもmanifest内の全entryに限る。
+private keyはSecret Managerから
+共有data path外の0600ファイルへ展開し、source workerだけへread-only mountする。1時間の
+installation tokenはメモリ上で更新する。個人PATは本番の標準経路にしない。
 
 Knowledgeリポジトリも同じ常駐同期へ含めるが、front matterのstatus allowlistを必須とし、
 承認済み文書だけを文書自身のstatusと`curated`/`reviewed_record` authorityで登録する。
 
 `.env`、認証情報、秘密鍵、生成物、依存物、lockfile、バイナリ、録音、ログは除外する。
-credentialらしい本文を検出したファイルもファイル単位で除外する。初回同期は次で確認する。
+credentialらしい本文を検出したファイルもファイル単位で除外する。履歴diffとexact-SHA補助取得には
+未引用assignment、JWT、PEMを含むより厳しいfail-closed検査を適用し、該当内容を索引へ送らない。
+初回同期は次で確認する。
 
 ```bash
 python -m source_index --dry-run
@@ -176,7 +182,7 @@ GitHub Actionsの`RAG Evaluation`は、`YAGAPON_RAG_EVAL_ENABLED=true`のとき�
   承認済み文書の変更・削除だけをFile Searchへ反映する。
 - ソース履歴: GitHub commit SHAを処理済み集合として保存し、新着優先のcursorで差分追加する。
 
-常駐同期を使う場合は、対象Guild ID、read-only GitHub Appのrepository選択、
+常駐同期を使う場合は、対象Guild ID、read-only GitHub Appの権限とsource manifest/env allowlist、
 Driveの読み取り権限を確認してから有効にする。承認済みKnowledgeをFile Searchへ登録する
 経路はACL・日付・年度をfail-closedで付与する`source-index-watch`だけとし、ローカルcloneを
 直接読む旧Knowledge indexerは使用しない。

@@ -88,7 +88,9 @@ services:
       YAGAPON_SOURCE_GITHUB_APP_ID_FILE: ${YAGAPON_SOURCE_GITHUB_APP_ID_FILE:-}
       YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID: ${YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID:-}
       YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID_FILE: ${YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID_FILE:-}
-      YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE: ${YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE:-}
+      # Keep the long-lived PEM out of the shared /data mount. Only this worker
+      # receives the read-only bind below; every other service sees no key file.
+      YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_FILE: /run/secrets/github-app-private-key.pem
       YAGAPON_SOURCE_GITHUB_TOKEN_FILE: ${YAGAPON_SOURCE_GITHUB_TOKEN_FILE:-}
       YAGAPON_SOURCE_HISTORY_SINCE: ${YAGAPON_SOURCE_HISTORY_SINCE:-2024-10-01T00:00:00+09:00}
       YAGAPON_SOURCE_HISTORY_UNTIL: ${YAGAPON_SOURCE_HISTORY_UNTIL:-}
@@ -102,6 +104,7 @@ services:
       YAGAPON_KNOWLEDGE_GUILD_ID: ${YAGAPON_KNOWLEDGE_GUILD_ID:-0}
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
+      - ${YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE:-/dev/null}:/run/secrets/github-app-private-key.pem:ro
     command: ["python", "-m", "source_index", "--watch-interval", "900"]
     healthcheck:
       disable: true

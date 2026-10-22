@@ -16,6 +16,7 @@ repositories:
     ref: main
     private: true
     history: true
+    fetch: tree
     include: [src/, app/, pages/, components/, lib/, public/, package.json, next.config.js, next.config.mjs]
   - name: YagamiFes-IT/YagamiFes-IT-Knowledge
     ref: main

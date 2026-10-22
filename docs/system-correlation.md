@@ -32,8 +32,8 @@ flowchart LR
       Outbox[knowledge-outbox]
       IndexState[source-index-state.json]
       OAuthFile[google-drive-oauth.json\n0600 authorized-user JSON]
-      GitHubKey[github-app-private-key.pem\n0600 RSA private key]
     end
+    GitHubKey[/etc/yagapon/secrets/github-app-private-key.pem\n0600・source-indexだけへread-only mount]
   end
 
   subgraph Gemini[Google AI]
@@ -115,9 +115,11 @@ flowchart LR
 ```
 
 `source-index-watch` の候補はmanifestで管理する。GitHubを正本として、現在のmainとcommit履歴を
-GitHub APIから直接取得する。private repositoryは対象repositoryだけにインストールした
-read-only GitHub Appで読み、短命なinstallation tokenを期限前に更新する。
-実際に取り込むリポジトリは `YAGAPON_SOURCE_REPOSITORIES` で絞られ、
+GitHub APIから直接取得する。private repositoryは組織の`All repositories`へインストールした
+read-only GitHub Appで読み、短命なinstallation tokenを期限前に更新する。Appが組織の全repositoryを
+読めても、自動列挙はしない。実際に取り込むrepositoryとtokenに指定するrepositoryは
+`source_index/repositories.yaml`のentryを`YAGAPON_SOURCE_REPOSITORIES`で絞った明示allowlistだけである。
+環境変数が空ならmanifest内の全entryを選び、組織の全repositoryを意味しない。
 `YAGAPON_SOURCE_INDEX_ENABLED=false` の間はworkerが起動していても索引を更新しない。
 
 ## 根拠の優先順位
@@ -193,9 +195,13 @@ Draft PR自体はレビュー待ちを示すが、「必ず人が承認した」
 
 ## GitHubソース認証
 
-- GitHub Appは`Contents: Read-only`と`Metadata: Read-only`だけを持ち、対象private repositoryを限定する。
-- private keyはSecret Managerからhostの`/var/lib/yagapon/github-app-private-key.pem`へ
-  UID 10001、mode `0600`で展開し、PEM本文を環境変数、ログ、索引へ載せない。
+- GitHub Appは組織の`All repositories`へインストールするが、権限は`Contents: Read-only`と
+  `Metadata: Read-only`だけにする。source workerはmanifest/envの明示allowlistだけに制限した
+  installation tokenを発行し、未知のrepositoryを列挙・索引しない。
+- private keyはSecret Managerから共有data path外の
+  `/etc/yagapon/secrets/github-app-private-key.pem`へUID 10001、mode `0600`で展開する。
+  `source-index-watch`だけへ`/run/secrets/github-app-private-key.pem:ro`としてbind mountし、
+  他のComposeサービス、環境変数、ログ、索引へPEM本文を載せない。
 - App IDとinstallation IDは通常設定として保持し、installation tokenはメモリ上で発行・更新する。
 - App設定、rate limit、GitHub取得、索引uploadのどこかが失敗した周期は、直前の完全な世代を保持する。
 
