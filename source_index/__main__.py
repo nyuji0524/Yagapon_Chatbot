@@ -79,7 +79,7 @@ MAX_GITHUB_JSON_BYTES = 25_000_000
 CHUNK_CHARS = 36_000
 SOURCE_UPLOAD_CONCURRENCY_DEFAULT = 2
 SOURCE_UPLOAD_CONCURRENCY_MAX = 8
-SOURCE_POLICY_VERSION = 7
+SOURCE_POLICY_VERSION = 8
 DEFAULT_SOURCE_HISTORY_SINCE = "2024-10-01T00:00:00+09:00"
 SOURCE_HISTORY_PAGE_SIZE = 100
 SOURCE_HISTORY_MAX_COMMITS_DEFAULT = 2_000
@@ -105,55 +105,80 @@ SOURCE_SECRET_PATTERNS = {
     for key, value in SENSITIVE_PATTERNS.items()
     if key != "credential-assignment"
 }
+SOURCE_SECRET_KEY_PATTERN = (
+    r"[A-Za-z0-9_-]*(?:password|passwd|パスワード|client[_ -]?secret|secret|"
+    r"api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token)"
+)
+SOURCE_SECRET_QUOTED_LITERAL_PATTERN = (
+    r'(?:(?:[rubf]{1,2})?"(?P<double>(?:\\.|[^"\\\r\n]){8,})"|'
+    r"(?:[rubf]{1,2})?'(?P<single>(?:\\.|[^'\\\r\n]){8,})'|"
+    r"`(?P<backtick>(?:\\.|[^`\\\r\n]){8,})`)"
+)
+SOURCE_SECRET_LITERAL_PATTERN = (
+    SOURCE_SECRET_QUOTED_LITERAL_PATTERN
+    + r"|(?P<unquoted>[^\s'\"`,;#]{8,})"
+)
 SOURCE_SECRET_ASSIGNMENT = re.compile(
     r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?P<key>password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?"
+    r"['\"]?(?P<key>" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
     r"[ \t]*(?P<operator>[:=])[ \t]*"
-    r'(?:"(?P<double>[^"\r\n]{8,})"|'
-    r"'(?P<single>[^'\r\n]{8,})'|"
-    r"(?P<unquoted>[^\s'\"`,;#]{8,}))"
+    r"(?:" + SOURCE_SECRET_LITERAL_PATTERN + r")"
 )
 SOURCE_SECRET_BLOCK_ASSIGNMENT = re.compile(
     r"(?im)^(?P<indent>[ \t]*)(?P<sequence>-[ \t]+)?"
-    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
     r"[ \t]*:[ \t]*[>|](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*"
     r"(?:#[^\r\n]*)?\r?\n"
 )
 SOURCE_SECRET_FALLBACK_ASSIGNMENT = re.compile(
     r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=][^\r\n]{0,4096}?"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
+    r"\s*[:=][^\r\n]{0,4096}?"
     r"(?:\|\||\?\?|\bor\b|\belse\b)\s*"
-    r'(?:"(?P<double>[^"\r\n]{8,})"|'
-    r"'(?P<single>[^'\r\n]{8,})'|"
-    r"(?P<unquoted>[^\s'\"`,;#]{8,}))"
+    r"(?:" + SOURCE_SECRET_LITERAL_PATTERN + r")"
 )
 SOURCE_SECRET_DEFAULT_ARGUMENT = re.compile(
     r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=][^\r\n]{0,4096}?"
-    r"(?:getenv|(?:environ|config|settings|credentials|vault)\.get|read_secret)"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?"
+    r"\s*[:=][^\r\n]{0,4096}?"
+    r"(?:getenv|string\.fromenvironment|"
+    r"(?:environ|config|settings|credentials|vault)\.get|read_secret)"
     r"\([^,\r\n]+,\s*"
-    r'(?:"(?P<double>[^"\r\n]{8,})"|'
-    r"'(?P<single>[^'\r\n]{8,})')"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*)?"
+    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
 )
 SOURCE_SECRET_TERNARY_TRUE_ASSIGNMENT = re.compile(
     r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=]"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?\s*[:=]"
     r"[^?\r\n]{0,4096}\?\s*"
-    r'(?:"(?P<double>[^"\r\n]{8,})"|'
-    r"'(?P<single>[^'\r\n]{8,})')"
+    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
 )
 SOURCE_SECRET_TERNARY_FALSE_ASSIGNMENT = re.compile(
     r"(?ix)(?<![A-Za-z0-9_])"
-    r"['\"]?(?:password|passwd|パスワード|client[_ -]?secret|secret|api[_ -]?key|"
-    r"access[_ -]?token|refresh[_ -]?token|token)['\"]?\s*[:=]"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?\s*[:=]"
     r"[^?\r\n]{0,2048}\?[^:\r\n]{0,2048}:\s*"
-    r'(?:"(?P<double>[^"\r\n]{8,})"|'
-    r"'(?P<single>[^'\r\n]{8,})')"
+    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
+)
+SOURCE_SECRET_WRAPPED_LITERAL_ASSIGNMENT = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"['\"]?(?:" + SOURCE_SECRET_KEY_PATTERN + r")['\"]?\s*[:=]\s*"
+    r"(?P<wrapper>[A-Za-z_][A-Za-z0-9_.]*)\s*\(\s*"
+    r"(?:" + SOURCE_SECRET_QUOTED_LITERAL_PATTERN + r")"
+)
+SOURCE_SECRET_RUNTIME_READERS = frozenset(
+    {
+        "config.get",
+        "credentials.get",
+        "environ.get",
+        "getenv",
+        "os.environ.get",
+        "os.getenv",
+        "read_secret",
+        "secret",
+        "settings.get",
+        "string.fromenvironment",
+        "vault.get",
+    }
 )
 SOURCE_SECRET_PLACEHOLDER = re.compile(
     r"(?i)(?:^|[-_./<>{}\s])"
@@ -1179,17 +1204,19 @@ def _concrete_source_secret_value(
     return True
 
 
-def _concrete_source_secret(match: re.Match[str]) -> bool:
-    quoted = match.group("double") is not None or match.group("single") is not None
+def _source_secret_match_value(match: re.Match[str]) -> tuple[str, bool]:
+    groups = match.groupdict()
+    quoted = any(groups.get(name) is not None for name in ("double", "single", "backtick"))
     value = next(
-        candidate
-        for candidate in (
-            match.group("double"),
-            match.group("single"),
-            match.group("unquoted"),
-        )
-        if candidate is not None
+        groups[name]
+        for name in ("double", "single", "backtick", "unquoted")
+        if groups.get(name) is not None
     )
+    return value, quoted
+
+
+def _concrete_source_secret(match: re.Match[str]) -> bool:
+    value, quoted = _source_secret_match_value(match)
     return _concrete_source_secret_value(
         value,
         operator=match.group("operator"),
@@ -1198,17 +1225,14 @@ def _concrete_source_secret(match: re.Match[str]) -> bool:
 
 
 def _concrete_source_secret_fallback(match: re.Match[str]) -> bool:
-    quoted = match.group("double") is not None or match.group("single") is not None
-    value = next(
-        candidate
-        for candidate in (
-            match.group("double"),
-            match.group("single"),
-            match.groupdict().get("unquoted"),
-        )
-        if candidate is not None
-    )
+    value, quoted = _source_secret_match_value(match)
     return _concrete_source_secret_value(value, operator="=", quoted=quoted)
+
+
+def _concrete_source_secret_wrapper(match: re.Match[str]) -> bool:
+    if match.group("wrapper").casefold() in SOURCE_SECRET_RUNTIME_READERS:
+        return False
+    return _concrete_source_secret_fallback(match)
 
 
 def _contains_source_secret_block(text: str) -> bool:
@@ -1249,6 +1273,11 @@ def contains_secret(text: str) -> bool:
             SOURCE_SECRET_TERNARY_FALSE_ASSIGNMENT,
         )
         for match in pattern.finditer(text)
+    ):
+        return True
+    if any(
+        _concrete_source_secret_wrapper(match)
+        for match in SOURCE_SECRET_WRAPPED_LITERAL_ASSIGNMENT.finditer(text)
     ):
         return True
     return _contains_source_secret_block(text)

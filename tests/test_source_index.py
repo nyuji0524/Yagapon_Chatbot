@@ -87,6 +87,23 @@ def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert contains_history_secret("+パスワード: 本番用秘密文字列12345678")
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        'const dbPassword = "ProdRealSecret123";',
+        "DB_PASSWORD=ProdRealSecret123",
+        'serviceClientSecret = "ProdRealSecret123"',
+        'password = SecretStr("ProdRealSecret123")',
+        'password = f"ProdRealSecret123"',
+        "password = `ProdRealSecret123`",
+        "password = process.env.DB_PASSWORD || `ProdRealSecret123`",
+    ),
+)
+def test_source_secret_scanner_blocks_common_live_secret_forms(assignment):
+    assert contains_secret(assignment)
+    assert contains_history_secret(f"+{assignment}")
+
+
 def test_source_secret_scanner_blocks_yaml_block_scalars():
     assert contains_secret("password: |\n  ProdRealSecret123")
     assert contains_secret("password: >- # stored credential\n\n  ProdRealSecret123")
@@ -106,7 +123,12 @@ def test_source_secret_scanner_blocks_yaml_block_scalars():
         'password = condition ? "ProdRealSecret123" : process.env.PASSWORD',
         'password = condition ? process.env.PASSWORD : "ProdRealSecret123"',
         'api_key = os.getenv("API_KEY", "ProdRealSecret123")',
+        'apiKey = os.getenv("API_KEY", default="ProdRealSecret123")',
         'password = settings.get("PASSWORD", "ProdRealSecret123")',
+        (
+            'dbPassword = String.fromEnvironment("DB_PASSWORD", '
+            'defaultValue: "ProdRealSecret123")'
+        ),
         "token = read_secret('TOKEN') or production-token-value",
     ),
 )
@@ -145,8 +167,14 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         'password: "{{ vault_password }}"',
         'password: "<PASSWORD>"',
         'client_secret: read_secret("CLIENT_SECRET")',
+        'serviceClientSecret = read_secret("CLIENT_SECRET")',
+        "const dbPassword = process.env.DB_PASSWORD",
+        "DB_PASSWORD=${DB_PASSWORD}",
+        "dbPassword: string",
         "password: replace-with-your-password",
         'api_key = "example-api-key-for-docs"',
+        'password = SecretStr("example-password")',
+        "password = process.env.DB_PASSWORD || `example-password`",
         "token = access_token",
     ),
 )
