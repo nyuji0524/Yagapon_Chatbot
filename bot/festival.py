@@ -187,7 +187,17 @@ def calendar_window_from_query(
                 month,
             )
     elif re.search(r"(?:去年|昨年|昨年度).{0,4}(?:今頃|この時期|今月)", normalized):
-        relative_month = (current.year - 1, current.month)
+        if festival is None:
+            relative_month = (current.year - 1, current.month)
+        else:
+            # festival_from_query() has already resolved relative wording such
+            # as 昨年度 to the target operating year.  Map the month into that
+            # period instead of subtracting the Gregorian year a second time.
+            period = festival_period(festival)
+            relative_month = (
+                period.starts_on.year if current.month >= 10 else period.ends_on.year,
+                current.month,
+            )
     elif re.search(r"今頃|この時期|今月", normalized):
         if festival is None:
             relative_month = (current.year, current.month)

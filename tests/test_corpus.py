@@ -3734,11 +3734,22 @@ async def test_upload_caps_remote_metadata_without_truncating_local_mirror(corpu
         "guild_id",
         "channel_id",
         "access_scope",
+        "source_type",
+        "schema",
         "start_epoch",
         "end_epoch",
         "source_url",
         "content_sha256",
     } <= remote_keys
+    remote_values = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in remote_metadata
+    }
+    assert corpus_manager._is_discord_conversation_metadata(
+        remote_values,
+        guild_id=1,
+        channel_id=2,
+    )
     corpus_manager.rag_store.upsert_document.assert_called_once()
     assert corpus_manager.rag_store.upsert_document.call_args.args[2] is metadata
 
