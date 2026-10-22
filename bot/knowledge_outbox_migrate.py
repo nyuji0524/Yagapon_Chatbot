@@ -22,6 +22,11 @@ from bot.knowledge_publish import _delivery_payload, _sensitive_labels
 
 BUNDLE_ID_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,160}")
 CURRENT_DELIVERY_KEYS = ("repositoryRoot", "branch", "title", "body", "manifest")
+KNOWLEDGE_INTAKE_ROOTS = (
+    "sources/meetings/yagapon/",
+    "sources/discord/inbox/",
+    "sources/drive/inbox/",
+)
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,10 @@ def _safe_repository_root(source_dir: Path, manifest_path: Path) -> str:
     root = PurePosixPath(relative.as_posix())
     if root.is_absolute() or not root.parts or ".." in root.parts:
         raise ValueError("Legacy repository root is invalid")
-    return root.as_posix()
+    value = root.as_posix()
+    if not value.startswith(KNOWLEDGE_INTAKE_ROOTS):
+        raise ValueError("Legacy repository root is outside Knowledge intake areas")
+    return value
 
 
 def _read_repository_files(repository_dir: Path, source_dir: Path) -> dict[str, str]:
@@ -109,8 +117,6 @@ def _verify_manifest_artifacts(repository_dir: Path, manifest: dict) -> bool:
 
 
 def _delivery_metadata(manifest: dict, repository_root: str, target_bundle_id: str) -> dict:
-    session_id = str(manifest.get("sessionId") or target_bundle_id)
-    branch_suffix = session_id if BUNDLE_ID_PATTERN.fullmatch(session_id) else target_bundle_id
     channel_name = str(manifest.get("channelName") or "meeting")
     started_at = str(manifest.get("startedAt") or "")
     title = f"source: {started_at[:10] or 'unknown-date'} {channel_name}の文字起こし"
@@ -128,7 +134,10 @@ def _delivery_metadata(manifest: dict, repository_root: str, target_bundle_id: s
         bundle_id=target_bundle_id,
         manifest=manifest,
         repository_root=repository_root,
-        branch=f"yagapon/meeting-{branch_suffix.lower()}",
+        # Knowledge intake binds the branch identity to the envelope bundleId.
+        # Reusing the legacy sessionId here would create a locally valid copy
+        # which the downstream validator can never accept.
+        branch=f"yagapon/meeting-{target_bundle_id.lower()}",
         title=title,
         body=body,
         migratedFromLegacy=True,

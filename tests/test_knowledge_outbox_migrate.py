@@ -12,7 +12,15 @@ from bot.knowledge_outbox_migrate import (
 
 def _legacy_bundle(root: Path, *, transcript: str = "# 文字起こし\n\n発言") -> Path:
     bundle = root / "legacy-session"
-    repository = bundle / "years" / "28th" / "bureaus" / "it" / "meetings" / "meeting"
+    repository = (
+        bundle
+        / "sources"
+        / "meetings"
+        / "yagapon"
+        / "28th"
+        / "2026-10-09"
+        / "legacy-session"
+    )
     repository.mkdir(parents=True)
     transcript_path = repository / "transcript.md"
     transcript_path.write_text(transcript, encoding="utf-8")
@@ -100,6 +108,8 @@ def test_legacy_outbox_apply_creates_retryable_copy_without_editing_source(tmp_p
     assert all(key in delivery for key in CURRENT_DELIVERY_KEYS)
     assert delivery["status"] == "pending"
     assert delivery["migratedFromLegacy"] is True
+    assert delivery["bundleId"] == plan.target_bundle_id
+    assert delivery["branch"] == f"yagapon/meeting-{plan.target_bundle_id.lower()}"
     assert (destination / delivery["repositoryRoot"] / "transcript.md").read_bytes() == (
         source / delivery["repositoryRoot"] / "transcript.md"
     ).read_bytes()
@@ -116,6 +126,21 @@ def test_legacy_outbox_migration_rejects_transcript_hash_mismatch(tmp_path):
     transcript.write_text("tampered", encoding="utf-8")
 
     with pytest.raises(ValueError, match="hash"):
+        migrate_legacy_bundle(
+            outbox_root=root,
+            source_bundle_id="legacy-session",
+        )
+
+
+def test_legacy_outbox_migration_rejects_root_not_accepted_by_knowledge(tmp_path):
+    root = tmp_path / "outbox"
+    bundle = _legacy_bundle(root)
+    accepted = next(bundle.glob("sources/meetings/yagapon/*/*/*"))
+    rejected = bundle / "years" / "28th" / "meetings" / "legacy-session"
+    rejected.parent.mkdir(parents=True)
+    accepted.rename(rejected)
+
+    with pytest.raises(ValueError, match="outside Knowledge intake areas"):
         migrate_legacy_bundle(
             outbox_root=root,
             source_bundle_id="legacy-session",

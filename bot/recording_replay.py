@@ -142,11 +142,15 @@ def reconcile_completed_replay_checkpoints(root: Path | None = None) -> dict[str
             job.transcript_path,
             transcript_archive,
         )
+        expected_archived_transcript = (
+            transcript_archive / str(job.target_guild_id) / f"{job.id}.md"
+        ).resolve()
         if (
             work_transcript is None
             or work_minutes is None
             or work_minutes != (work_dir / "minutes.md").resolve()
             or archived_transcript is None
+            or archived_transcript != expected_archived_transcript
         ):
             result["skipped_missing_artifacts"] += 1
             continue

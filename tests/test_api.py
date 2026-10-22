@@ -263,6 +263,19 @@ def test_app_startup_reconciles_completed_replay_checkpoints(tmp_path):
     )
 
 
+def test_app_startup_survives_replay_reconciliation_telemetry_failure():
+    _, bot = make_client()
+    bot.recording_replays.reconcile_completed_checkpoints = Mock(
+        return_value={"inspected": 1, "reconciled": 1}
+    )
+    bot.operations.record_event = Mock(side_effect=RuntimeError("database locked"))
+
+    with TestClient(create_app(bot)) as client:
+        assert client.get("/health").status_code == 200
+
+    bot.operations.record_event.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_api_shutdown_cancels_tasks_releases_guards_and_marks_jobs():
     _, bot = make_client()

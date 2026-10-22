@@ -90,17 +90,22 @@ async def _lifespan(app: FastAPI):
         reconciled = int(replay_reconciliation["reconciled"])
         log.warning("Reconciled %s completed replay checkpoint(s)", reconciled)
         if operations is not None and hasattr(operations, "record_event"):
-            operations.record_event(
-                "recording_replay",
-                "startup_reconcile",
-                "success",
-                details={
-                    "checkpoints_reconciled": reconciled,
-                    "checkpoints_inspected": int(
-                        replay_reconciliation.get("inspected") or 0
-                    ),
-                },
-            )
+            try:
+                operations.record_event(
+                    "recording_replay",
+                    "startup_reconcile",
+                    "success",
+                    details={
+                        "checkpoints_reconciled": reconciled,
+                        "checkpoints_inspected": int(
+                            replay_reconciliation.get("inspected") or 0
+                        ),
+                    },
+                )
+            except Exception:
+                # Reconciliation telemetry is best-effort. A locked or damaged
+                # operations database must not prevent the API from starting.
+                log.exception("Could not record replay reconciliation event")
     try:
         yield
     finally:

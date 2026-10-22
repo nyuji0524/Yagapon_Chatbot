@@ -201,6 +201,28 @@ def test_reconcile_completed_replay_checkpoint_fails_closed(
     assert metadata["status"] == "processing"
 
 
+def test_reconcile_completed_replay_rejects_another_jobs_archived_transcript(
+    tmp_path,
+    monkeypatch,
+):
+    replay_dir = _completed_replay_checkpoint(tmp_path, monkeypatch)
+    other = tmp_path / "transcripts" / "999" / "replay-other.md"
+    other.write_text("# another replay transcript", encoding="utf-8")
+    job_path = replay_dir / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    job["transcript_path"] = str(other)
+    job_path.write_text(json.dumps(job), encoding="utf-8")
+
+    result = reconcile_completed_replay_checkpoints(tmp_path / "replays")
+
+    metadata = json.loads(
+        (replay_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert result["reconciled"] == 0
+    assert result["skipped_missing_artifacts"] == 1
+    assert metadata["status"] == "processing"
+
+
 @pytest.mark.asyncio
 async def test_replay_manager_posts_minutes_from_existing_transcript(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
