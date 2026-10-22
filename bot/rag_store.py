@@ -316,7 +316,9 @@ class RagStore:
         params.append(limit * 4)
         sql = (
             "SELECT * FROM documents WHERE " + " AND ".join(conditions)
-            + " ORDER BY CASE WHEN authority = 'curated' THEN 1 ELSE 0 END DESC, "
+            + " ORDER BY CASE authority "
+            + "WHEN 'canonical' THEN 3 WHEN 'curated' THEN 2 "
+            + "WHEN 'reviewed_record' THEN 1 ELSE 0 END DESC, "
             + "CASE WHEN status IN ('active', 'historical', 'approved', 'verified', 'current') "
             + "THEN 1 ELSE 0 END DESC, end_at DESC LIMIT ?"
         )
@@ -332,7 +334,11 @@ class RagStore:
             matched_terms = sum(
                 1 for term in clean_terms if term.casefold() in body.casefold()
             )
-            authority_bonus = 20 if row["authority"] == "curated" else 0
+            authority_bonus = {
+                "canonical": 30,
+                "curated": 20,
+                "reviewed_record": 10,
+            }.get(row["authority"], 0)
             status_bonus = 10 if row["status"] in {
                 "active", "historical", "approved", "verified", "current"
             } else 0

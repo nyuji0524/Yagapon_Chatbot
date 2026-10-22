@@ -23,7 +23,6 @@ from bot.recording import (
     PCM_CHANNELS,
     PCM_SAMPLE_RATE,
     PCM_SAMPLE_WIDTH,
-    finalize_recording_replay,
     load_transcript_content,
     recording_root,
     save_external_transcript,
@@ -486,23 +485,6 @@ class RecordingReplayManager:
             if files:
                 kwargs["files"] = files
             await target_channel.send(**kwargs)
-
-            if job.retranscribe and artifact.raw_bytes > 0:
-                deleted = await asyncio.to_thread(
-                    finalize_recording_replay,
-                    guild_id=artifact.source_guild_id,
-                    session_id=artifact.session_id,
-                    session_dir=artifact.session_dir,
-                    channel_name=artifact.channel_name,
-                    transcript=transcript,
-                    replay_job_id=job.id,
-                )
-                if deleted:
-                    log.info(
-                        "Deleted source PCM after successful replay session=%s files=%s",
-                        artifact.session_id,
-                        deleted,
-                    )
 
             job.status = "completed"
             self._stage(job, "completed")

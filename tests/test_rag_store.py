@@ -104,6 +104,26 @@ def test_exact_search_reranks_curated_documents(tmp_path):
     assert hits[0].status == "approved"
 
 
+def test_exact_search_ranks_canonical_above_curated(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    for authority in ("curated", "canonical"):
+        store.upsert_document(
+            f"documents/{authority}",
+            "整理券の正式な権限契約",
+            metadata(27)
+            + [
+                {"key": "document_key", "string_value": authority},
+                {"key": "authority", "string_value": authority},
+                {"key": "status", "string_value": "verified"},
+            ],
+        )
+
+    hits = store.search_exact(1, ["整理券"], festival=27)
+
+    assert [hit.document_key for hit in hits] == ["canonical", "curated"]
+    assert hits[0].score > hits[1].score
+
+
 def test_exact_search_includes_global_trusted_documents(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     global_metadata = [

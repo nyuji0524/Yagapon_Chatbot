@@ -597,13 +597,22 @@ class YagaPon(discord.Bot):
             log.info("Shutting down, checkpointing voice sessions...")
             from bot.voice import checkpoint_voice_sessions_for_shutdown
 
-            await checkpoint_voice_sessions_for_shutdown()
+            try:
+                await checkpoint_voice_sessions_for_shutdown()
+            except Exception:
+                log.exception(
+                    "Voice session checkpoint failed during shutdown; continuing cleanup"
+                )
             if self._recording_recovery_task and not self._recording_recovery_task.done():
                 self._recording_recovery_task.cancel()
                 try:
                     await self._recording_recovery_task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    log.exception(
+                        "Recording recovery task failed during shutdown; continuing cleanup"
+                    )
             # Close the Discord connection before the slower corpus flush so
             # Pycord cannot start a reconnect against an already-closing HTTP
             # session during deployments.
