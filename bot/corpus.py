@@ -64,13 +64,22 @@ BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
 BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
 BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
 BUILTIN_SOURCE_TYPE = "builtin_reference"
-RAG_NORMAL_OUTPUT_TOKENS = max(
-    512,
-    min(int(os.environ.get("YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", "2048")), 4096),
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        log.warning("Invalid %s; using %s", name, default)
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env(
+    "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 2048, 512, 4096
 )
-RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS = max(
-    2048,
-    min(int(os.environ.get("YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", "8192")), 16384),
+RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS = _bounded_int_env(
+    "YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 8192, 2048, 16384
 )
 RAG_SEARCH_TOP_K = 12
 RAG_COMPREHENSIVE_SEARCH_TOP_K = 20
@@ -364,12 +373,22 @@ def answer_declares_missing_knowledge(answer: str) -> bool:
 
 def generated_answer_is_sensitive(question: str, answer: str) -> bool:
     """Fail closed if generation appears to disclose credentials or private PII."""
-    secret_patterns = (
+    opaque_secret_patterns = (
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
-        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*[`\"']?[^\s`\"']{12,}",
     )
-    if any(re.search(pattern, answer) for pattern in secret_patterns):
+    if any(re.search(pattern, answer) for pattern in opaque_secret_patterns):
+        return True
+    assignments = re.finditer(
+        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
+        r"\s*[:=]\s*[`\"']?([^\s`\"']{12,})",
+        answer,
+    )
+    placeholder_terms = ("example", "placeholder", "changeme", "your_", "redacted", "xxxxx")
+    if any(
+        not any(term in match.group(1).casefold() for term in placeholder_terms)
+        for match in assignments
+    ):
         return True
     public_contact_request = bool(re.search(r"(?:公式|代表|公開|窓口|共有アドレス)", question))
     if not public_contact_request and re.search(

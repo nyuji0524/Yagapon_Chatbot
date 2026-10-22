@@ -547,6 +547,10 @@ def test_generated_answer_secret_and_private_contact_scan_fails_closed():
         "APIキーの管理方法を教えて",
         "APIキーはSecret Managerで管理するぽん。",
     )
+    assert not generated_answer_is_sensitive(
+        "設定例を教えて",
+        'password = "your_password_here"',
+    )
 
 
 def test_committee_member_contact_remains_private_even_though_committee_contact_is_allowed():
