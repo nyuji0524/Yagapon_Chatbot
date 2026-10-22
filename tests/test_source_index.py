@@ -25,8 +25,10 @@ from source_index.__main__ import (
     history_chunks_for,
     inferred_festival,
     load_repositories,
+    load_state,
     metadata_digest_for,
     metadata_for,
+    preflight_once,
     repository_manifest_digest,
     repository_state_is_current,
     safe_source_path,
@@ -479,12 +481,27 @@ def test_repository_env_can_only_narrow_reviewed_manifest(monkeypatch, tmp_path)
     )
     monkeypatch.setenv(
         "YAGAPON_SOURCE_REPOSITORIES",
-        "example/approved,example/not-in-manifest",
+        "example/approved",
     )
 
     repositories = load_repositories(manifest)
 
     assert [repository.name for repository in repositories] == ["example/approved"]
+
+    monkeypatch.setenv(
+        "YAGAPON_SOURCE_REPOSITORIES",
+        "example/approved,example/not-in-manifest",
+    )
+    with pytest.raises(RuntimeError, match="outside the reviewed manifest"):
+        load_repositories(manifest)
+
+
+def test_repository_manifest_cannot_select_zero_sources(tmp_path):
+    manifest = tmp_path / "repositories.yaml"
+    manifest.write_text("repositories: []\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="selection is empty"):
+        load_repositories(manifest)
 
 
 def _history_settings(**overrides) -> SourceHistorySettings:
@@ -1228,6 +1245,185 @@ def _metadata_map(metadata: list[dict]) -> dict:
         item["key"]: item.get("string_value", item.get("numeric_value"))
         for item in metadata
     }
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_is_a_safe_noop_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "false")
+    monkeypatch.setattr(
+        source_index_module,
+        "source_history_settings",
+        lambda: pytest.fail("disabled preflight must not parse source settings"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=None,
+    )
+
+    assert await preflight_once(args) == {"disabled": True, "preflight": True}
+    assert not args.state.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_resolves_every_repo_and_samples_one_document(
+    tmp_path,
+    monkeypatch,
+):
+    repositories = [
+        Repository("example/one", "main", ("src/",)),
+        Repository("example/two", "release", ("app/",)),
+    ]
+    provider = object()
+    resolved = []
+    history_checks = []
+    list_calls = []
+
+    class FakeGitHubClient:
+        def resolve(self, repository, ref):
+            resolved.append((repository, ref))
+            return f"resolved-{repository}"
+
+    def documents():
+        yield SimpleNamespace(name="documents/one")
+        raise AssertionError("preflight must not enumerate the File Search store")
+
+    def list_documents(**kwargs):
+        list_calls.append(kwargs)
+        return documents()
+
+    fake_genai_client = SimpleNamespace(
+        file_search_stores=SimpleNamespace(
+            documents=SimpleNamespace(list=list_documents),
+        ),
+    )
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_API_KEY", "fixture-google-key")
+    monkeypatch.delenv("YAGAPON_CORPUS_STORE_NAME", raising=False)
+    monkeypatch.setattr(
+        source_index_module,
+        "source_history_settings",
+        lambda: history_checks.append(True),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: repositories,
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "github_token_provider",
+        lambda loaded: provider if loaded == repositories else pytest.fail(),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "GitHubSourceClient",
+        lambda loaded_provider: (
+            FakeGitHubClient()
+            if loaded_provider is provider
+            else pytest.fail("unexpected token provider")
+        ),
+    )
+    monkeypatch.setattr(
+        source_index_module,
+        "ConfigManager",
+        lambda: SimpleNamespace(get_corpus=lambda guild_id: f"stores/{guild_id}"),
+    )
+    monkeypatch.setattr(
+        source_index_module.genai,
+        "Client",
+        lambda *, api_key: (
+            fake_genai_client
+            if api_key == "fixture-google-key"
+            else pytest.fail("unexpected Google API key")
+        ),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=123,
+    )
+
+    result = await preflight_once(args)
+
+    assert history_checks == [True]
+    assert resolved == [("example/one", "main"), ("example/two", "release")]
+    assert list_calls == [
+        {"parent": "stores/123", "config": {"page_size": 20}},
+    ]
+    assert result == {
+        "preflight": True,
+        "repositories_checked": 2,
+        "file_search_store": "stores/123",
+        "remote_documents_sampled": 1,
+        "state_documents": 0,
+    }
+    assert not args.state.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_rejects_invalid_history_settings_before_network(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_HISTORY_MAX_COMMITS", "not-an-integer")
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: pytest.fail("invalid settings must fail before network setup"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=123,
+    )
+
+    with pytest.raises(RuntimeError, match="MAX_COMMITS must be an integer"):
+        await preflight_once(args)
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_rejects_invalid_state_before_network(
+    tmp_path,
+    monkeypatch,
+):
+    state = tmp_path / "state.json"
+    state.write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
+    monkeypatch.setattr(
+        source_index_module,
+        "load_repositories",
+        lambda _manifest: pytest.fail("invalid state must fail before network setup"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=state,
+        guild_id=123,
+    )
+
+    with pytest.raises(RuntimeError, match="state must be a JSON object"):
+        await preflight_once(args)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        ('{"documents": []}', "documents must be a JSON object"),
+        (
+            '{"documents": {}, "repositories": []}',
+            "repositories must be a JSON object",
+        ),
+        ("{not-json", "state is unreadable"),
+    ),
+)
+def test_load_state_rejects_corrupt_shapes(tmp_path, payload, message):
+    state = tmp_path / "state.json"
+    state.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=message):
+        load_state(state)
 
 
 @pytest.mark.asyncio

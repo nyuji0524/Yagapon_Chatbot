@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 import yaml
+from google import genai
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
@@ -910,6 +911,14 @@ def load_repositories(path: Path) -> list[Repository]:
             )
         if not allowed_env or repository.name.casefold() in allowed_env:
             repositories.append(repository)
+    unknown = allowed_env - seen_names
+    if unknown:
+        raise RuntimeError(
+            "YAGAPON_SOURCE_REPOSITORIES contains repositories outside the reviewed manifest: "
+            + ", ".join(sorted(unknown))
+        )
+    if not repositories:
+        raise RuntimeError("Source repository selection is empty")
     return repositories
 
 
@@ -1508,7 +1517,17 @@ def select_history_commits(
 def load_state(path: Path) -> dict:
     if not path.exists():
         return {"schema_version": 1, "documents": {}}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Source index state is unreadable: {path}") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("Source index state must be a JSON object")
+    if not isinstance(state.get("documents"), dict):
+        raise RuntimeError("Source index state documents must be a JSON object")
+    if "repositories" in state and not isinstance(state["repositories"], dict):
+        raise RuntimeError("Source index state repositories must be a JSON object")
+    return state
 
 
 def save_state(path: Path, state: dict) -> None:
@@ -1770,6 +1789,48 @@ def stale_managed_document_keys(
         key
         for key, value in documents.items()
         if value.get("repository") in configured_repositories and key not in live_keys
+    }
+
+
+async def preflight_once(args) -> dict:
+    """Verify every read dependency without changing File Search or local state."""
+    if os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() != "true":
+        return {"disabled": True, "preflight": True}
+
+    source_history_settings()
+    state = load_state(args.state)
+    repositories = load_repositories(args.manifest)
+    client = GitHubSourceClient(github_token_provider(repositories))
+    resolved = {}
+    for repository in repositories:
+        resolved[repository.name] = await asyncio.to_thread(
+            client.resolve,
+            repository.name,
+            repository.ref,
+        )
+
+    config = ConfigManager()
+    store_name = os.environ.get("YAGAPON_CORPUS_STORE_NAME") or config.get_corpus(
+        args.guild_id
+    )
+    if not store_name:
+        raise RuntimeError("No File Search store configured for the guild")
+
+    def sample_file_search_documents() -> int:
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        documents = client.file_search_stores.documents.list(
+            parent=store_name,
+            config={"page_size": 20},
+        )
+        return int(next(iter(documents), None) is not None)
+
+    remote_document_sample = await asyncio.to_thread(sample_file_search_documents)
+    return {
+        "preflight": True,
+        "repositories_checked": len(resolved),
+        "file_search_store": store_name,
+        "remote_documents_sampled": remote_document_sample,
+        "state_documents": len(state["documents"]),
     }
 
 
@@ -2299,6 +2360,7 @@ def main() -> None:
     parser.add_argument("--state", type=Path, default=Path(os.environ.get("YAGAPON_SOURCE_INDEX_STATE", "/data/source-index-state.json")))
     parser.add_argument("--release", type=Path, default=Path(os.environ.get("YAGAPON_RELEASE_METADATA", "/data/releases/current.json")))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--watch-interval", type=int, default=0)
     args = parser.parse_args()
     enabled = os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() == "true"
@@ -2306,7 +2368,12 @@ def main() -> None:
         parser.error("--guild-id or YAGAPON_KNOWLEDGE_GUILD_ID is required")
     if args.watch_interval and args.watch_interval < 60:
         parser.error("--watch-interval must be at least 60 seconds")
+    if args.preflight and (args.dry_run or args.watch_interval):
+        parser.error("--preflight cannot be combined with --dry-run or --watch-interval")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    if args.preflight:
+        print(json.dumps(asyncio.run(preflight_once(args)), ensure_ascii=False), flush=True)
+        return
     while True:
         try:
             print(json.dumps(asyncio.run(sync_once(args)), ensure_ascii=False), flush=True)

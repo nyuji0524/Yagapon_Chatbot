@@ -214,6 +214,11 @@ timeout --signal=TERM --kill-after=30s 420s docker run --rm \
   --env-file /etc/yagapon/yagapon.env \
   --volume "$data_path:/data" \
   "$image" python -m bot.preflight
+timeout --signal=TERM --kill-after=30s 420s docker compose \
+  --project-directory "$app_dir" \
+  --env-file "$deploy_env" \
+  run --rm --no-deps source-index-watch \
+  python -m source_index --preflight
 systemctl restart yagapon
 
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
