@@ -747,9 +747,8 @@ def _instruction_override_request(normalized: str) -> bool:
 def sensitive_request_response(question: str) -> str | None:
     """Block unsafe requests before any user-controlled retrieval is attempted."""
     normalized = "".join(
-        character
+        " " if unicodedata.category(character) == "Cf" else character
         for character in unicodedata.normalize("NFKC", question.casefold())
-        if unicodedata.category(character) != "Cf"
     )
     normalized = " ".join(normalized.split())
     internal_instruction_topic = bool(

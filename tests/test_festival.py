@@ -232,6 +232,21 @@ def test_multi_month_window_maps_across_festival_operating_year():
         festival=27,
     ) == CalendarWindow(date(2025, 11, 1), date(2026, 2, 28))
 
+    assert calendar_window_from_query(
+        "27thの2月から11月まで",
+        now,
+        festival=27,
+    ) is None
+
+
+def test_reverse_explicit_calendar_range_is_not_silently_reordered():
+    now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+
+    assert calendar_window_from_query(
+        "2024年12月から2024年10月まで",
+        now,
+    ) is None
+
 
 @pytest.mark.parametrize("query", ["27thの第1月曜の定例", "27thの第2月曜日の会議"])
 def test_weekday_ordinal_is_not_mistaken_for_a_calendar_month(query):

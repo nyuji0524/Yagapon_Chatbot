@@ -217,6 +217,13 @@ def calendar_window_from_query(
             _month_window(int(match.group(1)), int(match.group(2)))
             for match in explicit_matches
         ]
+        range_separator = normalized[
+            explicit_matches[0].end():explicit_matches[-1].start()
+        ]
+        if re.search(r"から|まで|[〜～~]", range_separator) and (
+            windows[0].starts_on > windows[-1].starts_on
+        ):
+            return None
         return CalendarWindow(
             starts_on=min(window.starts_on for window in windows),
             ends_on=max(window.ends_on for window in windows),
@@ -279,6 +286,13 @@ def calendar_window_from_query(
             month = int(match.group(1))
             year = period.starts_on.year if month >= 10 else period.ends_on.year
             windows.append(_month_window(year, month))
+        range_separator = normalized[
+            mentioned_months[0].end():mentioned_months[-1].start()
+        ]
+        if re.search(r"から|まで|[〜～~]", range_separator) and (
+            windows[0].starts_on > windows[-1].starts_on
+        ):
+            return None
         return CalendarWindow(
             starts_on=min(window.starts_on for window in windows),
             ends_on=max(window.ends_on for window in windows),
