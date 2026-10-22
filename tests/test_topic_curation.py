@@ -15,6 +15,7 @@ from knowledge_curation.__main__ import (
     backfill_checkpoint_status,
     build_topic_bundle,
     collect_topic_evidence,
+    expand_curation_documents,
     render_topic_brief,
     validate_topic_draft,
 )
@@ -83,6 +84,29 @@ def source_document() -> dict:
         "end_at": "2026-10-01T01:00:00+09:00",
         "body": "新歓Webページを公開前にレビューする。" * 20,
     }
+
+
+def test_long_curation_source_is_split_deterministically_without_dropping_tail():
+    document = source_document()
+    document["source_type"] = "meeting_transcript"
+    document["body"] = "A" * 24_000 + "B" * 24_000 + "末尾の重要な決定"
+
+    first = expand_curation_documents([document])
+    second = expand_curation_documents([document])
+
+    assert first == second
+    assert len(first) == 3
+    assert first[0]["source_document_key"] == document["document_key"]
+    assert first[0]["source_segment_start"] == 0
+    assert first[-1]["source_segment_end"] == len(document["body"])
+    assert "末尾の重要な決定" in first[-1]["body"]
+    assert [item["source_segment_index"] for item in first] == [1, 2, 3]
+    # Every original character belongs to the non-overlap core of one segment.
+    cores = [
+        document["body"][item["source_segment_start"] : item["source_segment_end"]]
+        for item in first
+    ]
+    assert "".join(cores) == document["body"]
 
 
 def test_topic_identity_is_normalized_deterministic_and_filesystem_safe():
