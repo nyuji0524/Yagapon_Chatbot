@@ -603,6 +603,7 @@ class RagStore:
         limit: int = 4,
     ) -> list[LexicalHit]:
         clean_terms = [term for term in terms if len(term) >= 2][:12]
+        is_history = str(question_kind or "").casefold() == "history"
         if target_date is not None and (date_from is not None or date_to is not None):
             raise ValueError("target_date and date range are mutually exclusive")
         for label, value in (("date_from", date_from), ("date_to", date_to)):
@@ -722,7 +723,7 @@ class RagStore:
 
         with self._lock, self._connect() as connection:
             rows = list(fetch_rows())
-            if str(question_kind or "").casefold() == "history" and limit >= 2:
+            if is_history and limit >= 2:
                 record_rows = fetch_rows(
                     "(source_type = ? OR substr(source_type, 1, 8) = 'meeting_')",
                     ("discord_conversation",),
@@ -769,7 +770,7 @@ class RagStore:
                 content_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             ))
         hits.sort(key=lambda hit: hit.score, reverse=True)
-        if str(question_kind or "").casefold() != "history" or limit < 2:
+        if not is_history or limit < 2:
             return hits[:limit]
 
         # A HISTORY answer normally needs both the implementation change and

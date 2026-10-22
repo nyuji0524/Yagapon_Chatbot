@@ -273,11 +273,11 @@ def calendar_window_from_query(
     is usually discussed over several days and a one-day filter would make a
     natural question such as "去年の今頃" miss almost every relevant record.
     """
-    if festival_subject_dates_from_query(query):
-        return None
-    if calendar_date_from_query(query, now, festival=festival) is not None:
-        return None
     normalized = query.translate(_QUERY_DIGIT_TRANSLATION)
+    if festival_subject_dates_from_query(normalized):
+        return None
+    if calendar_date_from_query(normalized, now, festival=festival) is not None:
+        return None
     current = (now or datetime.now(JST)).astimezone(JST).date()
 
     explicit_dates = list(_EXPLICIT_DATE_PATTERN.finditer(normalized))
