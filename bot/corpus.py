@@ -380,34 +380,147 @@ def answer_declares_missing_knowledge(answer: str) -> bool:
     return parse_model_answer(answer).status is AnswerStatus.NO_EVIDENCE
 
 
+_CONTACT_EMAIL = re.compile(
+    r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])",
+    re.IGNORECASE,
+)
+_CONTACT_PHONE = re.compile(
+    r"(?<!\d)0\d{1,4}[-‐‑‒–—―ー− \t]\d{1,4}[-‐‑‒–—―ー− \t]\d{3,4}(?!\d)"
+)
+_PLACEHOLDER_SECRET_TERMS = (
+    "example",
+    "placeholder",
+    "changeme",
+    "your_",
+    "your-",
+    "redacted",
+    "xxxxx",
+)
+
+
+@dataclass(frozen=True)
+class _SensitiveRequestPolicy:
+    disclosure_request: bool
+    credential_topic: bool
+    safe_howto: bool
+    actual_secret_request: bool
+    unsafe_credential_clause: bool
+    contact_topic: bool
+    public_contact: bool
+    individual_contact: bool
+
+
+def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
+    """Classify the whole request so a safe clause cannot mask a sensitive one."""
+    normalized = " ".join(question.casefold().split())
+    disclosure_pattern = (
+        r"(?:教えて|教えろ|答えて|回答|知りたい|くれ|ください|ちょうだい|出力|表示|"
+        r"見せて|開示|共有して|送って|一覧|すべて|全部|実値|実際の|現在の|生の|"
+        r"何|なに|どれ|どんな|[?？]$)"
+    )
+    safe_howto_pattern = (
+        r"(?:管理方法|保管方法|更新方法|設定方法|作り方|取得方法|漏洩対策|扱い方|"
+        r"ローテーション|とは何|って何|意味|概要|概念|説明して|種類|用途|形式|仕組み)"
+    )
+    credential_pattern = (
+        r"(?:(?:discord\s*bot|bot|api)[ _-]?(?:token|key)|トークン|api\s*キー|apiキー|"
+        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|secret|秘密情報)"
+    )
+    disclosure_request = bool(re.search(disclosure_pattern, normalized))
+    safe_howto = bool(re.search(safe_howto_pattern, normalized))
+    credential_topic = bool(re.search(credential_pattern, normalized))
+    actual_secret_request = bool(
+        re.search(
+            r"(?:実際の|実値|現在の|本物の|有効な|生の|そのまま|値を|中身|文字列|"
+            r"コピー|貼って|表示|出力|開示|共有して|送って)",
+            normalized,
+        )
+    )
+    clauses = [
+        value
+        for value in re.split(
+            rf"(?:[。！？!?\n,、;；]+|また|加えて|それと|"
+            rf"と(?=(?:実際|現在|本物|有効|生の|そのまま|{credential_pattern})))",
+            normalized,
+        )
+        if value
+    ]
+    unsafe_credential_clause = any(
+        re.search(credential_pattern, clause)
+        and re.search(disclosure_pattern, clause)
+        and not re.search(safe_howto_pattern, clause)
+        for clause in clauses
+    )
+    contact_topic = bool(re.search(r"(?:メールアドレス|e-?mail|電話番号|連絡先|個人住所)", normalized))
+    public_contact = bool(
+        re.search(r"(?:公式|代表|公開|窓口|共有アドレス|実行委員会)", normalized)
+    )
+    individual_contact = bool(
+        re.search(
+            r"(?:個人|本人|メンバー|委員(?!会)|局長|副局長|企画長|担当者|さん|くん)",
+            normalized,
+        )
+    )
+    return _SensitiveRequestPolicy(
+        disclosure_request=disclosure_request,
+        credential_topic=credential_topic,
+        safe_howto=safe_howto,
+        actual_secret_request=actual_secret_request,
+        unsafe_credential_clause=unsafe_credential_clause,
+        contact_topic=contact_topic,
+        public_contact=public_contact,
+        individual_contact=individual_contact,
+    )
+
+
+def _public_contact_allowlist() -> set[str]:
+    raw = os.environ.get("YAGAPON_RAG_PUBLIC_CONTACT_ALLOWLIST", "")
+    return {
+        value.strip().casefold()
+        for value in re.split(r"[,;\n]", raw)
+        if value.strip()
+    }
+
+
+def _looks_like_non_placeholder_secret(value: str) -> bool:
+    normalized = value.casefold()
+    return not any(term in normalized for term in _PLACEHOLDER_SECRET_TERMS)
+
+
 def generated_answer_is_sensitive(question: str, answer: str) -> bool:
     """Fail closed if generation appears to disclose credentials or private PII."""
     opaque_secret_patterns = (
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        r"\bmfa\.[A-Za-z0-9_-]{20,}\b",
+        r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}\b",
+        r"\bsk-[A-Za-z0-9_-]{12,}\b",
+        r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
+        r"\bAIza[0-9A-Za-z_-]{20,}\b",
+        r"\bAKIA[0-9A-Z]{16}\b",
     )
     if any(re.search(pattern, answer) for pattern in opaque_secret_patterns):
         return True
     assignments = re.finditer(
-        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b"
-        r"\s*[:=]\s*[`\"']?([^\s`\"']{12,})",
+        r"(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)\b|"
+        r"\b[A-Z][A-Z0-9_]{1,63}(?:TOKEN|SECRET|PASSWORD|KEY)\b)"
+        r"\s*[:=]\s*[`\"']?([^\s`\"']{8,})",
         answer,
     )
-    placeholder_terms = ("example", "placeholder", "changeme", "your_", "redacted", "xxxxx")
-    if any(
-        not any(term in match.group(1).casefold() for term in placeholder_terms)
-        for match in assignments
-    ):
+    if any(_looks_like_non_placeholder_secret(match.group(1)) for match in assignments):
         return True
-    public_contact_request = bool(re.search(r"(?:公式|代表|公開|窓口|共有アドレス)", question))
-    if not public_contact_request and re.search(
-        r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])",
-        answer,
-        re.IGNORECASE,
-    ):
-        return True
-    if not public_contact_request and re.search(r"(?<!\d)0\d{1,4}-\d{1,4}-\d{3,4}(?!\d)", answer):
-        return True
+
+    contacts = [match.group(0).casefold() for match in _CONTACT_EMAIL.finditer(answer)]
+    contacts.extend(match.group(0).casefold() for match in _CONTACT_PHONE.finditer(answer))
+    if contacts:
+        policy = _sensitive_request_policy(question)
+        allowed = _public_contact_allowlist()
+        if (
+            not policy.public_contact
+            or policy.individual_contact
+            or any(contact not in allowed for contact in contacts)
+        ):
+            return True
     return False
 
 
@@ -422,7 +535,7 @@ _CITATION_PRIVATE_EMAIL = re.compile(
     r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])",
     re.IGNORECASE,
 )
-_CITATION_PRIVATE_PHONE = re.compile(r"(?<!\d)0\d{1,4}-\d{1,4}-\d{3,4}(?!\d)")
+_CITATION_PRIVATE_PHONE = _CONTACT_PHONE
 _CITATION_SECRET_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -441,6 +554,14 @@ _CITATION_SECRET_QUERY_KEYS = {
 }
 
 
+def _escape_citation_component(value: object) -> str:
+    """Escape retrieved metadata before inserting it into Discord Markdown."""
+    escaped = str(value or "").replace("\\", "\\\\")
+    for character in "[]()<>`":
+        escaped = escaped.replace(character, f"\\{character}")
+    return escaped.replace("@", "@\u200b")
+
+
 def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     """Reject citations that could disclose a credential or private contact.
 
@@ -455,7 +576,7 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     material = unquote(f"{label}\n{source_url}")
     if material.count("\n") != 1 or "\r" in material or "\x00" in material:
         return False
-    if "](http" in label.casefold():
+    if re.search(r"(?<!\\)\]\s*\(\s*<?https?://", label, re.IGNORECASE):
         return False
     if any(re.search(pattern, material) for pattern in _CITATION_OPAQUE_SECRET_PATTERNS):
         return False
@@ -469,6 +590,8 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
         return False
     if not source_url:
         return True
+    if re.search(r"[\s\x00-\x1f\x7f<>\[\]()\\`\"']", source_url):
+        return False
     try:
         parsed = urlsplit(source_url)
     except ValueError:
@@ -497,39 +620,18 @@ def rendered_citation_is_safe(citation: str) -> bool:
 
 def sensitive_request_response(question: str) -> str | None:
     """Block direct requests for private contact details and credentials before retrieval."""
-    normalized = " ".join(question.casefold().split())
-    disclosure_request = re.search(
-        r"(?:教えて|教えろ|知りたい|くれ|ください|ちょうだい|出力|表示|見せて|開示|共有して|送って|"
-        r"一覧|すべて|全部|何|なに|どれ|[?？]$)",
-        normalized,
-    )
-    if not disclosure_request:
+    policy = _sensitive_request_policy(question)
+    if not policy.disclosure_request:
         return None
 
-    safe_howto = re.search(
-        r"(?:管理方法|保管方法|更新方法|設定方法|作り方|取得方法|漏洩対策|扱い方|ローテーション|"
-        r"とは何|って何|意味|概要|概念|説明して|種類|用途|形式|仕組み)",
-        normalized,
-    )
-    credential = re.search(
-        r"(?:discord\s*bot|bot|api)[ _-]?(?:token|key)|"
-        r"トークン|api\s*キー|apiキー|パスワード|秘密鍵|認証情報|credentials?|"
-        r"環境変数|secret|秘密情報",
-        normalized,
-    )
-    if credential and not safe_howto:
+    if policy.credential_topic and (
+        policy.unsafe_credential_clause or policy.actual_secret_request
+    ):
         return (
             "Botトークン、APIキー、パスワードなどの認証情報や秘密情報は回答できないぽん。"
             "必要な場合は、権限を持つ管理者に安全な経路で確認してほしいぽん。"
         )
-
-    contact = re.search(r"(?:メールアドレス|e-?mail|電話番号|連絡先|個人住所)", normalized)
-    public_contact = re.search(r"(?:公式|代表|公開|窓口|共有アドレス)", normalized)
-    individual = re.search(
-        r"(?:個人|本人|メンバー|委員(?!会)|局長|副局長|企画長|担当者|さん|くん)",
-        normalized,
-    )
-    if contact and individual and not public_contact:
+    if policy.contact_topic and policy.individual_contact:
         return (
             "個人のメールアドレスや電話番号など、非公開の連絡先は回答できないぽん。"
             "本人に直接確認するか、委員会の公式窓口を利用してほしいぽん。"
@@ -623,6 +725,33 @@ class RagAnswer:
     no_answer: bool = False
     metadata_filter: str | None = None
     lexical_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _GroundingEvidence:
+    key: str
+    citation: str
+    text: str
+
+
+@dataclass(frozen=True)
+class _GroundingAudit:
+    evidence: tuple[_GroundingEvidence, ...] = ()
+    rejected_supported_chunks: int = 0
+    invalid_supports: int = 0
+    claim_coverage_complete: bool = True
+
+    @property
+    def sources(self) -> list[str]:
+        return list(dict.fromkeys(item.citation for item in self.evidence if item.citation))
+
+    @property
+    def requires_recovery(self) -> bool:
+        return bool(
+            self.rejected_supported_chunks
+            or self.invalid_supports
+            or not self.claim_coverage_complete
+        )
 
 
 class CorpusManager:
@@ -1527,6 +1656,15 @@ class CorpusManager:
                     if item.document_key in selected or f"runtime:{item.document_key}" in selected
                 ]
 
+            def selected_semantic_evidence(
+                evidence: tuple[_GroundingEvidence, ...],
+                parsed: ParsedModelAnswer,
+            ) -> list[_GroundingEvidence]:
+                if not parsed.explicit_status:
+                    return list(evidence)
+                selected = set(parsed.evidence_keys)
+                return [item for item in evidence if item.key in selected]
+
             def observe_answer_contract(parsed: ParsedModelAnswer, *, stage: str) -> None:
                 if not parsed.explicit_status:
                     log.warning(
@@ -1610,47 +1748,74 @@ class CorpusManager:
                 # File Search metadata filtering stays disabled while legacy
                 # documents are migrated. Enforce the festival again on the
                 # returned evidence so off-year citations cannot support an answer.
-                semantic_sources = self._response_sources(
+                semantic_audit = self._response_grounding_audit(
                     response,
                     limit=search_top_k,
+                    answer_text=parsed.text,
                     expected_festival=festival,
                     expected_date=target_date.isoformat() if target_date else None,
                     question_kind=question_kind,
                     allowed_channel_ids=allowed_channel_ids,
                     allow_unrestricted_conversations=allow_unrestricted_conversations,
                 )
+                semantic_sources = semantic_audit.sources
                 used_lexical_hits = selected_lexical_hits(search_hits, parsed)
                 used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
                 sources = [*semantic_sources]
                 sources.extend(self._lexical_sources(used_lexical_hits, sources))
                 sources.extend(self._firebase_sources(used_firebase, sources))
-                semantic_evidence_rejected = (
-                    (festival is not None or target_date is not None) and not semantic_sources and not firebase_evidence
+                if semantic_audit.requires_recovery:
+                    log.warning(
+                        "Rejected File Search answer grounding "
+                        "(rejected_chunks=%s invalid_supports=%s coverage=%s)",
+                        semantic_audit.rejected_supported_chunks,
+                        semantic_audit.invalid_supports,
+                        semantic_audit.claim_coverage_complete,
+                    )
+                    # The answer may already have incorporated rejected evidence.
+                    # Never preserve it merely because another citation survived.
+                    has_answer = False
+                    sources = []
+
+                recovery_semantic_evidence = tuple(
+                    item for item in semantic_audit.evidence if item.text
                 )
-                if search_hits and (
+                if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                     not has_answer
                     or not (semantic_sources or used_lexical_hits or used_firebase)
-                    or semantic_evidence_rejected
+                    or semantic_audit.requires_recovery
                 ):
+                    recovery_context = with_lexical_context(evidence_context, search_hits)
+                    for item in recovery_semantic_evidence:
+                        recovery_context += self._untrusted_evidence(item.key, item.text)
                     recovered_answer = await self._recover_from_lexical_hits(
                         question=question,
                         system_instruction=system,
-                        evidence_context=search_context,
+                        evidence_context=recovery_context,
                         model=model,
-                        max_output_tokens=recovery_budget,
+                        max_output_tokens=(
+                            recovery_budget or max(256, remaining_output_tokens // 4)
+                        ),
                     )
                     recovered = parse_model_answer(recovered_answer or "")
                     observe_answer_contract(recovered, stage="exact_recovery")
                     if usable(recovered):
                         used_lexical_hits = selected_lexical_hits(search_hits, recovered)
                         used_firebase = selected_firebase_evidence(firebase_evidence, recovered)
-                        # The retry used exact excerpts only.
-                        sources = self._lexical_sources(used_lexical_hits, [])
+                        used_semantic = selected_semantic_evidence(
+                            recovery_semantic_evidence,
+                            recovered,
+                        )
+                        # The retry used only evidence that passed every local filter.
+                        sources = list(
+                            dict.fromkeys(item.citation for item in used_semantic if item.citation)
+                        )
+                        sources.extend(self._lexical_sources(used_lexical_hits, sources))
                         sources.extend(self._firebase_sources(used_firebase, sources))
                         if sources:
                             answer = recovered.text
                             has_answer = True
-                    elif semantic_evidence_rejected:
+                    else:
                         has_answer = False
             no_answer = not sources or not has_answer
             if no_answer:
@@ -1690,8 +1855,8 @@ class CorpusManager:
     ) -> str | None:
         """Retry without File Search when exact excerpts exist but tool search refuses to answer."""
         recovery_instruction = (
-            system_instruction + "\n\n【完全一致候補からの再確認】\n"
-            "File Searchは十分な回答を作れなかったぽん。上にある完全一致候補の原文だけを読み直し、"
+            system_instruction + "\n\n【検証済み候補からの再確認】\n"
+            "File Searchは安全な回答を確定できなかったぽん。上にある検証済み候補の原文だけを読み直し、"
             "質問へ直接答えられる根拠がある場合は、その範囲で具体的に回答するぽん。"
             "候補が質問と無関係、または根拠が不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
@@ -1756,13 +1921,16 @@ class CorpusManager:
         for hit in hits:
             if hit.source_url and hit.source_url in existing_urls:
                 continue
+            if not citation_reference_is_safe(hit.channel_name or "記録", hit.source_url):
+                log.warning("Blocked unsafe exact-search citation metadata")
+                continue
             source_type = getattr(hit, "source_type", "")
             prefix = (
                 "会議記録"
                 if source_type.startswith("meeting_")
                 else AUTHORITY_LABELS.get(getattr(hit, "authority", ""), "完全一致")
             )
-            name = hit.channel_name or "記録"
+            name = _escape_citation_component(hit.channel_name or "記録")
             if not source_type.startswith("meeting_") and getattr(hit, "authority", "") not in {
                 "deployed_implementation",
                 "repository_context",
@@ -1790,7 +1958,10 @@ class CorpusManager:
     def _firebase_sources(evidence: list[FirebaseEvidence], existing: list[str]) -> list[str]:
         rendered = []
         for item in evidence:
-            label = f"Firebase現在値: {item.title}"
+            if not citation_reference_is_safe(item.title, item.source_url):
+                log.warning("Blocked unsafe Firebase citation metadata")
+                continue
+            label = f"Firebase現在値: {_escape_citation_component(item.title)}"
             if not citation_reference_is_safe(label, item.source_url):
                 log.warning("Blocked unsafe Firebase citation metadata")
                 continue
@@ -1799,25 +1970,77 @@ class CorpusManager:
                 rendered.append(value)
         return rendered
 
+    @staticmethod
+    def _grounding_claims(answer_text: str) -> list[str]:
+        claims = []
+        for raw in re.split(r"(?<=[。！？!?])|\n+", answer_text):
+            value = raw.strip()
+            if not value or value.startswith("[[YAGAPON_") or re.fullmatch(r"#{1,6}\s+.*", value):
+                continue
+            value = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", value).strip()
+            if re.search(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠]", value):
+                claims.append(value)
+        return claims
+
+    @staticmethod
+    def _normalized_grounding_text(value: str) -> str:
+        return re.sub(r"[\s*_`#>\-\[\]()（）「」『』、,。.!！?？:：;；]", "", value.casefold())
+
     @classmethod
-    def _response_sources(
+    def _grounding_claims_covered(cls, answer_text: str, segment_texts: list[str]) -> bool:
+        claims = [cls._normalized_grounding_text(value) for value in cls._grounding_claims(answer_text)]
+        claims = [value for value in claims if value]
+        if not claims:
+            return True
+        segments = [cls._normalized_grounding_text(value) for value in segment_texts]
+        segments = [value for value in segments if value]
+        if not segments:
+            return False
+        combined = "".join(segments)
+        for claim in claims:
+            if claim in combined:
+                continue
+            if any(claim in segment for segment in segments):
+                continue
+            return False
+        return True
+
+    @staticmethod
+    def _support_segment_text(support, answer_text: str) -> str:
+        segment = getattr(support, "segment", None)
+        if segment is None:
+            return ""
+        text = getattr(segment, "text", None)
+        if text:
+            return str(text)
+        start = getattr(segment, "start_index", None)
+        end = getattr(segment, "end_index", None)
+        if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(answer_text):
+            return answer_text[start:end]
+        return ""
+
+    @classmethod
+    def _response_grounding_audit(
         cls,
         response,
         limit: int = 5,
         *,
+        answer_text: str | None = None,
         expected_festival: int | None = None,
         expected_date: str | None = None,
         question_kind: QuestionKind | None = None,
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
-    ) -> list[str]:
-        """File Search grounding metadataをDiscord上で読める参照一覧へ変換する。"""
+    ) -> _GroundingAudit:
+        """Validate every chunk the model says it used, plus claim coverage."""
         candidates = getattr(response, "candidates", None) or []
         if not candidates:
-            return []
+            return _GroundingAudit()
         grounding = getattr(candidates[0], "grounding_metadata", None)
         chunks = getattr(grounding, "grounding_chunks", None) or []
         supports = getattr(grounding, "grounding_supports", None)
+        invalid_supports = 0
+        support_indices: list[tuple[object, tuple[int, ...]]] = []
         if supports is None and chunks:
             log.warning(
                 "File Search grounding_supports missing; semantic citation fallback "
@@ -1826,20 +2049,37 @@ class CorpusManager:
                 len(chunks),
             )
             if REQUIRE_GROUNDING_SUPPORTS:
-                return []
+                return _GroundingAudit(invalid_supports=1, claim_coverage_complete=False)
+            supported_indices = list(range(len(chunks)))
         elif supports is not None:
-            supported_indices = []
+            supported_indices: list[int] = []
             for support in supports:
-                for index in getattr(support, "grounding_chunk_indices", None) or ():
-                    if isinstance(index, int) and 0 <= index < len(chunks) and index not in supported_indices:
+                raw_indices = getattr(support, "grounding_chunk_indices", None) or ()
+                valid_indices = []
+                if not raw_indices:
+                    invalid_supports += 1
+                for index in raw_indices:
+                    if isinstance(index, int) and 0 <= index < len(chunks):
+                        valid_indices.append(index)
+                    else:
+                        invalid_supports += 1
+                support_indices.append((support, tuple(dict.fromkeys(valid_indices))))
+                for index in valid_indices:
+                    if index not in supported_indices:
                         supported_indices.append(index)
-            chunks = [chunks[index] for index in supported_indices]
-        sources = []
-        seen = set()
+        else:
+            supported_indices = []
+
+        evidence: list[_GroundingEvidence] = []
+        seen_citations: set[str] = set()
+        allowed_indices: set[int] = set()
+        rejected_supported_chunks = 0
         visible_channels = set(normalized_channel_ids(allowed_channel_ids))
-        for chunk in chunks:
+        for index in supported_indices:
+            chunk = chunks[index]
             context = getattr(chunk, "retrieved_context", None)
             if context is None:
+                rejected_supported_chunks += 1
                 continue
             metadata = cls._metadata_map(context)
             channel = metadata.get("channel_name")
@@ -1856,18 +2096,22 @@ class CorpusManager:
                     try:
                         source_channel_id = int(str(metadata.get("channel_id") or ""))
                     except ValueError:
+                        rejected_supported_chunks += 1
                         continue
                     if source_channel_id not in visible_channels:
+                        rejected_supported_chunks += 1
                         continue
                 else:
                     # Missing/unknown scopes are legacy evidence and must not
                     # become visible merely because File Search returned it.
+                    rejected_supported_chunks += 1
                     continue
             if (
                 question_kind is not None
                 and not allows_unreviewed_evidence(question_kind)
                 and not can_answer_directly(question_kind, authority, status)
             ):
+                rejected_supported_chunks += 1
                 continue
             if expected_festival is not None:
                 try:
@@ -1881,13 +2125,28 @@ class CorpusManager:
                     and status in {"active", "historical", "approved", "verified", "current"}
                 )
                 if source_festival != expected_festival and not timeless_trusted:
+                    rejected_supported_chunks += 1
                     continue
             if expected_date is not None and start != expected_date:
+                rejected_supported_chunks += 1
                 continue
             url = metadata.get("source_url") or getattr(context, "uri", None)
             title = getattr(context, "title", None)
+            raw_citation_metadata = " ".join(
+                str(value or "")
+                for value in (
+                    channel,
+                    title,
+                    status,
+                    metadata.get("commit_sha"),
+                )
+            )
+            if not citation_reference_is_safe(raw_citation_metadata, url or ""):
+                log.warning("Blocked unsafe File Search citation metadata")
+                rejected_supported_chunks += 1
+                continue
             label = (
-                str(channel)
+                _escape_citation_component(channel)
                 if channel
                 and source_type
                 in {
@@ -1896,15 +2155,15 @@ class CorpusManager:
                     "knowledge_repository",
                     "builtin_reference",
                 }
-                else f"#{channel}"
+                else f"#{_escape_citation_component(channel)}"
                 if channel
-                else (title or "ナレッジ")
+                else _escape_citation_component(title or "ナレッジ")
             )
             authority_label = "会議記録" if source_type.startswith("meeting_") else AUTHORITY_LABELS.get(authority)
             if source_type.startswith("meeting_"):
-                label = str(channel or title or "会議")
+                label = _escape_citation_component(channel or title or "会議")
             elif source_type == "source_code_history":
-                commit_sha = str(metadata.get("commit_sha") or "")[:7]
+                commit_sha = _escape_citation_component(str(metadata.get("commit_sha") or "")[:7])
                 if commit_sha:
                     label += f" @ {commit_sha}"
             if authority_label:
@@ -1913,21 +2172,72 @@ class CorpusManager:
                 label += f"（{start}）"
             details = []
             if festival is not None:
-                details.append(f"{int(float(festival))}th")
+                try:
+                    details.append(f"{int(float(festival))}th")
+                except (TypeError, ValueError):
+                    rejected_supported_chunks += 1
+                    continue
             if status and status != "approved":
-                details.append(str(status))
+                details.append(_escape_citation_component(status))
             if details:
                 label += f" [{' / '.join(details)}]"
             if not citation_reference_is_safe(label, url or ""):
                 log.warning("Blocked unsafe File Search citation metadata")
+                rejected_supported_chunks += 1
                 continue
             rendered = f"[{label}]({url})" if url else label
-            if rendered not in seen:
-                seen.add(rendered)
-                sources.append(rendered)
-            if len(sources) >= limit:
-                break
-        return sources
+            citation = ""
+            if rendered not in seen_citations and len(seen_citations) < limit:
+                seen_citations.add(rendered)
+                citation = rendered
+            allowed_indices.add(index)
+            evidence.append(
+                _GroundingEvidence(
+                    key=f"semantic:{index}",
+                    citation=citation,
+                    text=str(getattr(context, "text", None) or "")[:8_000],
+                )
+            )
+
+        claim_coverage_complete = True
+        if answer_text is not None and supports is not None:
+            safe_segments = []
+            for support, indices in support_indices:
+                if not indices or any(index not in allowed_indices for index in indices):
+                    continue
+                segment_text = cls._support_segment_text(support, answer_text)
+                if segment_text:
+                    safe_segments.append(segment_text)
+            claim_coverage_complete = cls._grounding_claims_covered(answer_text, safe_segments)
+        return _GroundingAudit(
+            evidence=tuple(evidence),
+            rejected_supported_chunks=rejected_supported_chunks,
+            invalid_supports=invalid_supports,
+            claim_coverage_complete=claim_coverage_complete,
+        )
+
+    @classmethod
+    def _response_sources(
+        cls,
+        response,
+        limit: int = 5,
+        *,
+        expected_festival: int | None = None,
+        expected_date: str | None = None,
+        question_kind: QuestionKind | None = None,
+        allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
+        allow_unrestricted_conversations: bool = False,
+    ) -> list[str]:
+        """File Search grounding metadataをDiscord上で読める参照一覧へ変換する。"""
+        return cls._response_grounding_audit(
+            response,
+            limit=limit,
+            expected_festival=expected_festival,
+            expected_date=expected_date,
+            question_kind=question_kind,
+            allowed_channel_ids=allowed_channel_ids,
+            allow_unrestricted_conversations=allow_unrestricted_conversations,
+        ).sources
 
     # ------ backfill ------
 

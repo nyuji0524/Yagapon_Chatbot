@@ -863,11 +863,18 @@ class YagaPon(discord.Bot):
                     filename="yagapon-answer.md",
                 ),
                 silent=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return [message]
         sent_messages = []
         for chunk in chunks:
-            sent_messages.append(await destination.send(chunk, silent=True))
+            sent_messages.append(
+                await destination.send(
+                    chunk,
+                    silent=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            )
         return sent_messages
 
     async def close(self):
