@@ -198,6 +198,8 @@ def test_source_secret_scanner_blocks_unquoted_concrete_scalars(assignment):
         "const dbPassword =\n  process.env.DB_PASSWORD;",
         "password = process.env.DB_PASSWORD || `example-password`",
         "token = access_token",
+        "reset_token = []",
+        "client_secret = {}",
     ),
 )
 def test_source_secret_scanner_allows_types_references_and_placeholders(assignment):
@@ -331,6 +333,8 @@ def test_source_secret_scanner_does_not_allow_concrete_shell_default():
         'api_key(value="ProdRealSecret123")',
         "<token>ProdRealSecret123</token>",
         '<input name="password" value="ProdRealSecret123">',
+        '<input id="api_key" value="ProdRealSecret123">',
+        '<input type="password" value="ProdRealSecret123">',
         '<meta name="api_key" content="ProdRealSecret123">',
         '<config key="token" value="ProdRealSecret123"/>',
         "<input name=password value=ProdRealSecret123>",
@@ -363,6 +367,8 @@ def test_source_secret_scanner_blocks_adversarial_literal_contexts(source):
         "redis://:${PASSWORD}@example.invalid/0",
         "<token>${TOKEN}</token>",
         '<input name="password" value="${PASSWORD}">',
+        '<input id="api_key" value="${API_KEY}">',
+        '<input type="password" value="${PASSWORD}">',
         '<meta name="api_key" content="replace-with-your-api-key">',
         '<config key="token" value="${TOKEN}"/>',
         '<config token="${TOKEN}"/>',
@@ -428,6 +434,67 @@ def test_current_source_redacts_isolated_literal_but_keeps_safe_context():
     assert "ProdRealSecret123" not in content
     assert "def connect():" in content
     assert "return client()" in content
+    assert not contains_secret(content)
+
+
+def test_current_source_redacts_direct_embedded_secret_without_assignment():
+    source = "\n".join(
+        (
+            "# Connection example",
+            "https://example.invalid/path?token=ProdRealSecret123",
+            "# End example",
+        )
+    )
+
+    sanitized = redact_source_secrets(source)
+
+    assert sanitized is not None
+    content, count = sanitized
+    assert count == 1
+    assert "ProdRealSecret123" not in content
+    assert "# Connection example" in content
+    assert "# End example" in content
+    assert not contains_secret(content)
+
+
+@pytest.mark.parametrize(
+    "safe_assignment",
+    (
+        '    password = os.getenv(\n        "DB_PASSWORD",\n        ""\n    )',
+        (
+            "    const geminiApiKey = defineSecret(\n"
+            '        "GEMINI_API_KEY"\n'
+            "    );"
+        ),
+        (
+            "    registerPushToken = onCall(\n"
+            '        {region: "asia-northeast1", timeoutSeconds: 30},\n'
+            "        runRegisterPushToken,\n"
+            "    );"
+        ),
+        '    token = os.environ[\n        "DISCORD_TOKEN"\n    ]',
+    ),
+)
+def test_current_source_redaction_keeps_safe_multiline_assignment(
+    safe_assignment,
+):
+    source = "\n".join(
+        (
+            "def load():",
+            safe_assignment,
+            '    api_key = "ProdRealSecret123"',
+            "    return value",
+        )
+    )
+
+    sanitized = redact_source_secrets(source)
+
+    assert sanitized is not None
+    content, count = sanitized
+    assert count == 1
+    assert safe_assignment in content
+    assert "ProdRealSecret123" not in content
+    assert "return value" in content
     assert not contains_secret(content)
 
 

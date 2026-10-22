@@ -1614,7 +1614,9 @@ def _contains_embedded_source_secret(text: str) -> bool:
                 value = match.group("unquoted_value")
             attributes.append((match.group("name").casefold(), value))
         credential_keys = [
-            value for name, value in attributes if name in {"key", "name"}
+            value
+            for name, value in attributes
+            if name in {"id", "key", "name", "type"}
         ]
         credential_values = [
             value for name, value in attributes if name in {"content", "value"}
@@ -1735,6 +1737,8 @@ def _concrete_source_secret_rhs(key: str, operator: str, raw_value: str) -> bool
     value = _source_secret_actual_rhs(operator, raw_value)
     compact = re.sub(r"\s+", " ", value).strip().rstrip(",;")
     if _source_secret_safe_runtime_definition(key, value):
+        return False
+    if compact in {"[]", "{}"}:
         return False
     if compact.startswith(("{", "[")):
         depth, quote = _source_secret_delimiter_state(compact)
@@ -2246,13 +2250,24 @@ def _contains_pathological_sensitive_line(text: str) -> bool:
     return False
 
 
+def _contains_direct_source_secret(text: str) -> bool:
+    """Detect embedded credentials without reparsing partial assignments.
+
+    Assignment safety depends on the complete logical expression.  This helper
+    is therefore also safe to call for one physical line while redacting a
+    document that contains an unrelated credential.
+    """
+    scanned = _mask_secret_manager_resource_names(text)
+    if any(pattern.search(scanned) for pattern in SOURCE_SECRET_PATTERNS.values()):
+        return True
+    return _contains_embedded_source_secret(scanned)
+
+
 def contains_secret(text: str) -> bool:
     scanned = _mask_secret_manager_resource_names(text)
     if _contains_pathological_sensitive_line(scanned):
         return True
-    if any(pattern.search(scanned) for pattern in SOURCE_SECRET_PATTERNS.values()):
-        return True
-    if _contains_embedded_source_secret(scanned):
+    if _contains_direct_source_secret(scanned):
         return True
     for key, operator, value, truncated, _start, _end in (
         _source_secret_assignments_for_scan(scanned)
@@ -2321,7 +2336,7 @@ def redact_source_secrets(text: str) -> tuple[str, int] | None:
         has_crlf = has_lf and raw_line.endswith("\r")
         content = raw_line[:-1] if has_crlf else raw_line
         ending = "\r\n" if has_crlf else "\n" if has_lf else ""
-        if index in assignment_line_indexes or contains_secret(content):
+        if index in assignment_line_indexes or _contains_direct_source_secret(content):
             indentation = content[: len(content) - len(content.lstrip(" \t"))]
             redacted_lines.append(
                 f"{indentation}{SOURCE_SECRET_REDACTION_MARKER}{ending}"
