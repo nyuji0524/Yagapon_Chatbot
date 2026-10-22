@@ -50,6 +50,7 @@ MAX_FILE_BYTES = 120_000
 CHUNK_CHARS = 36_000
 SOURCE_UPLOAD_CONCURRENCY_DEFAULT = 2
 SOURCE_UPLOAD_CONCURRENCY_MAX = 8
+SOURCE_POLICY_VERSION = 2
 SOURCE_SECRET_PATTERNS = {
     key: value
     for key, value in SENSITIVE_PATTERNS.items()
@@ -308,10 +309,13 @@ def document_policy(
     repository: Repository,
     path: str,
     text: str,
+    *,
+    default_authority: str | None = None,
+    default_status: str | None = None,
 ) -> tuple[str, str, int | None] | None:
     """Resolve authority/status and exclude unapproved curated documents."""
-    authority = repository.authority or "repository_context"
-    status = repository.status or "current"
+    authority = default_authority or repository.authority or "repository_context"
+    status = default_status or repository.status or "current"
     if not repository.front_matter_statuses:
         return authority, status, None
     normalized = text.replace("\r\n", "\n")
@@ -479,7 +483,7 @@ def metadata_for(chunk: SourceChunk, guild_id: int, digest: str) -> list[dict]:
     metadata = [
         {"key": "source", "string_value": "github_source"},
         {"key": "source_type", "string_value": chunk.source_type},
-        {"key": "schema", "string_value": "source-v1"},
+        {"key": "schema", "string_value": f"source-v{SOURCE_POLICY_VERSION}"},
         {"key": "guild_id", "string_value": str(guild_id)},
         {"key": "status", "string_value": chunk.status},
         {"key": "authority", "string_value": chunk.authority},
@@ -533,6 +537,7 @@ async def sync_once(args) -> dict:
             and previous_repository.get("status") == status
             and previous_repository.get("source_type", "source_code")
             == repository.source_type
+            and previous_repository.get("policy_version") == SOURCE_POLICY_VERSION
         ):
             existing = [
                 key
@@ -570,7 +575,13 @@ async def sync_once(args) -> dict:
                 log.warning("Skipping source with credential-like content: %s:%s", repository.name, path)
                 skipped += 1
                 continue
-            policy = document_policy(repository, path, content)
+            policy = document_policy(
+                repository,
+                path,
+                content,
+                default_authority=authority,
+                default_status=status,
+            )
             if policy is None:
                 skipped += 1
                 continue
@@ -655,6 +666,7 @@ async def sync_once(args) -> dict:
             "authority": authority,
             "status": status,
             "source_type": repository.source_type,
+            "policy_version": SOURCE_POLICY_VERSION,
         }
 
     for key in set(state["documents"]) - live_keys:
