@@ -59,13 +59,19 @@ async def main():
         return
 
     log.info("Starting bot + API server...")
-    await asyncio.gather(
-        bot.start(token),
-        server.serve(),
-    )
-    # ``bot.close`` can release bot.start before its final durable corpus flush
-    # finishes. Keep the event loop alive until that shutdown task is complete.
-    if shutdown_task is not None:
+    try:
+        await asyncio.gather(
+            bot.start(token),
+            server.serve(),
+        )
+    finally:
+        # ``bot.close`` can release bot.start before its final durable corpus
+        # flush finishes. Unexpected task failures must also checkpoint active
+        # sessions and flush buffers before the event loop exits.
+        if shutdown_task is None:
+            shutdown_task = asyncio.create_task(
+                shutdown(bot, server), name="graceful-shutdown"
+            )
         await shutdown_task
 
 

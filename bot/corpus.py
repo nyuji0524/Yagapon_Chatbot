@@ -1040,7 +1040,12 @@ class CorpusManager:
             title = getattr(context, "title", None)
             label = (
                 str(channel)
-                if channel and source_type in {"source_code", "knowledge_repository"}
+                if channel
+                and source_type in {
+                    "source_code",
+                    "knowledge_repository",
+                    "builtin_reference",
+                }
                 else f"#{channel}" if channel
                 else (title or "ナレッジ")
             )

@@ -402,8 +402,8 @@ def chunks_for(
     chunks = []
     resolved_festival = (
         festival
-        if festival is not None or not infer_missing_festival
-        else inferred_festival(path, content)
+        if festival is not None
+        else inferred_festival(path, content) if infer_missing_festival else None
     )
     start = 0
     while start < len(lines):

@@ -498,6 +498,32 @@ def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):
     ]
 
 
+def test_builtin_reference_title_is_not_rendered_as_discord_channel(corpus_manager):
+    context = SimpleNamespace(
+        title="Bot運用仕様",
+        uri="https://github.example/trusted-knowledge",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "Bot運用仕様"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "verified"},
+            {"key": "source_type", "string_value": "builtin_reference"},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)]
+                )
+            )
+        ]
+    )
+
+    assert corpus_manager._response_sources(response, expected_festival=28) == [
+        "[確定仕様: Bot運用仕様 [verified]](https://github.example/trusted-knowledge)"
+    ]
+
+
 def test_response_sources_keep_only_the_expected_calendar_date(corpus_manager):
     def chunk(day):
         return SimpleNamespace(
