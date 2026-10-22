@@ -21,6 +21,7 @@ from bot.knowledge_intake import (
     parse_discord_message_url,
     parse_drive_file_url,
 )
+from bot.knowledge_pipeline import KnowledgePipelineBusy
 from bot.knowledge_policy import (
     knowledge_guild_allowed as _knowledge_guild_allowed,
 )
@@ -387,18 +388,26 @@ def register(bot):
             try:
                 try:
                     result = await _run_knowledge_refresh(bot, mode=mode)
+                except KnowledgePipelineBusy:
+                    result = {
+                        "mode": mode,
+                        "curation": {
+                            "enabled": True,
+                            "checkpoint_ready": False,
+                            "checkpoint_reason": "knowledge-pipeline-busy",
+                        },
+                    }
                 except RuntimeError as exc:
-                    if str(exc) == "Another Knowledge curation run is active":
-                        result = {
-                            "mode": mode,
-                            "curation": {
-                                "enabled": True,
-                                "checkpoint_ready": False,
-                                "checkpoint_reason": "curation-already-running",
-                            },
-                        }
-                    else:
+                    if str(exc) != "Another Knowledge curation run is active":
                         raise
+                    result = {
+                        "mode": mode,
+                        "curation": {
+                            "enabled": True,
+                            "checkpoint_ready": False,
+                            "checkpoint_reason": "curation-already-running",
+                        },
+                    }
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

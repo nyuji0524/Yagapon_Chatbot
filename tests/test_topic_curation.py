@@ -610,6 +610,7 @@ def checkpoint_payload(now: datetime) -> dict:
                 "configured_channel_ids": ["10", "20", "30", "40"],
                 "discovered_channel_ids": ["10", "20", "30", "40"],
                 "eligible_channel_ids": ["10", "20", "30", "40"],
+                "container_channel_ids": [],
                 "missing_channel_ids": [],
                 "completed_channel_ids": ["10", "20", "30", "40"],
             }
@@ -626,6 +627,57 @@ def test_backfill_checkpoint_gate_allows_unset_or_fresh_complete_state(tmp_path,
     path.write_text(json.dumps(checkpoint_payload(now)), encoding="utf-8")
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
+
+
+def test_backfill_checkpoint_accepts_forum_parent_container_plus_completed_threads(
+    tmp_path,
+    monkeypatch,
+):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    payload = checkpoint_payload(now)
+    payload["configured_channel_ids"] = ["40"]
+    payload["discovered_channel_ids"] = ["40", "41", "42"]
+    payload["eligible_channel_ids"] = ["40", "41", "42"]
+    payload["guilds"]["123"].update(
+        configured_channel_ids=["40"],
+        discovered_channel_ids=["40", "41", "42"],
+        eligible_channel_ids=["40", "41", "42"],
+        container_channel_ids=["40"],
+        completed_channel_ids=["41", "42"],
+        channels_total=2,
+        channels_completed=2,
+    )
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+
+    assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
+
+
+def test_backfill_checkpoint_accepts_a_readable_empty_forum(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    payload = checkpoint_payload(now)
+    payload["configured_channel_ids"] = ["40"]
+    payload["discovered_channel_ids"] = ["40"]
+    payload["eligible_channel_ids"] = ["40"]
+    payload["guilds"]["123"].update(
+        configured_channel_ids=["40"],
+        discovered_channel_ids=["40"],
+        eligible_channel_ids=["40"],
+        container_channel_ids=["40"],
+        completed_channel_ids=[],
+        channels_total=0,
+        channels_completed=0,
+    )
+    path = tmp_path / "scheduled-backfill-state.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_BACKFILL_STATE", str(path))
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "123")
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_CURATION_CHANNEL_IDS", raising=False)
+
     assert backfill_checkpoint_status(now=now) == (True, "fresh-success")
 
 

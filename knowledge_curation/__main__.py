@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from bot.ai_completion import require_complete_model_output
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import new_genai_client, retry_rate_limit
+from bot.knowledge_pipeline import knowledge_pipeline_lock
 from bot.knowledge_policy import knowledge_guild_allowed
 from bot.knowledge_publish import JST, publish_knowledge_bundle, retry_knowledge_delivery
 from bot.rag_store import RagStore
@@ -140,12 +141,16 @@ def save_state(path: Path, state: dict) -> None:
 def curation_lock(state_path: Path):
     lock_path = state_path.with_suffix(state_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("Another Knowledge curation run is active") from exc
-        yield
+    # The outer lock excludes corpus replacement in the Discord process. The
+    # state-specific lock still prevents two curation workers using different
+    # command paths from entering together.
+    with knowledge_pipeline_lock():
+        with lock_path.open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("Another Knowledge curation run is active") from exc
+            yield
 
 
 def _digest(document: dict) -> str:
@@ -521,20 +526,37 @@ def backfill_checkpoint_status(
         failures = result.get("failures")
         guild_discovered = result.get("discovered_channel_ids")
         guild_eligible = result.get("eligible_channel_ids")
+        guild_containers = result.get("container_channel_ids", [])
         guild_completed = result.get("completed_channel_ids")
         guild_missing = result.get("missing_channel_ids")
         if not isinstance(failures, list) or not all(
             isinstance(value, list)
-            for value in (guild_discovered, guild_eligible, guild_completed, guild_missing)
+            for value in (
+                guild_discovered,
+                guild_eligible,
+                guild_containers,
+                guild_completed,
+                guild_missing,
+            )
         ):
             return False, f"checkpoint-invalid-failures:{guild_id}"
+        eligible_targets = set(guild_eligible) - set(guild_containers)
+        guild_configured = result.get("configured_channel_ids")
+        empty_forum_refresh = (
+            channels_total == 0
+            and channels_completed == 0
+            and bool(guild_containers)
+            and not eligible_targets
+        )
         if (
             failures
             or guild_missing
-            or channels_total <= 0
+            or (channels_total <= 0 and not empty_forum_refresh)
             or channels_completed != channels_total
-            or len(set(guild_eligible)) != channels_total
-            or set(guild_completed) != set(guild_eligible)
+            or not isinstance(guild_configured, list)
+            or set(guild_configured) - set(guild_eligible)
+            or len(eligible_targets) != channels_total
+            or set(guild_completed) != eligible_targets
         ):
             return False, f"checkpoint-incomplete-guild:{guild_id}"
         all_discovered.update(str(value) for value in guild_discovered)

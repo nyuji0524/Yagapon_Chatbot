@@ -169,6 +169,12 @@ class ScheduledBackfillManager:
         # The scheduled loop and an administrator-triggered refresh share this
         # manager. Only one of them may own the durable checkpoint at a time.
         self._run_lock = asyncio.Lock()
+        # Invalidate a previous process's successful checkpoint while the bot
+        # is still being constructed. The HTTP server can become healthy
+        # before Discord's on_ready event, so waiting until start() would let a
+        # curation worker consume stale evidence during that startup window.
+        if scheduler_enabled():
+            self._write_waiting_checkpoint("bot-starting")
 
     @property
     def running(self) -> bool:
@@ -177,17 +183,26 @@ class ScheduledBackfillManager:
     def start(self) -> bool:
         if not scheduler_enabled() or self.running:
             return False
+        self._write_waiting_checkpoint("initial-delay")
+        self._task = asyncio.create_task(
+            self._run_loop(),
+            name="scheduled-discord-backfill",
+        )
+        return True
+
+    def _write_waiting_checkpoint(self, reason: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         waiting = {
             "schema_version": 1,
             "started_at": now,
             "completed_at": None,
             "status": "waiting",
-            "reason": "initial-delay",
+            "reason": reason,
             "configured_guild_ids": [str(value) for value in configured_guild_ids()],
             "configured_channel_ids": [str(value) for value in sorted(configured_channel_ids())],
             "discovered_channel_ids": [],
             "eligible_channel_ids": [],
+            "container_channel_ids": [],
             "missing_channel_ids": [],
             "guilds": {},
         }
@@ -201,11 +216,6 @@ class ScheduledBackfillManager:
             except OSError:
                 pass
             raise
-        self._task = asyncio.create_task(
-            self._run_loop(),
-            name="scheduled-discord-backfill",
-        )
-        return True
 
     async def stop(self) -> None:
         if self._task is None:
@@ -325,6 +335,7 @@ class ScheduledBackfillManager:
             "configured_channel_ids": [],
             "discovered_channel_ids": [],
             "eligible_channel_ids": [],
+            "container_channel_ids": [],
             "missing_channel_ids": [],
             "channels_total": 0,
             "channels_completed": 0,
@@ -567,6 +578,9 @@ class ScheduledBackfillManager:
                     "configured_channel_ids": [str(value) for value in sorted(local_configured)],
                     "discovered_channel_ids": [str(value) for value in sorted(discovered_ids)],
                     "eligible_channel_ids": [str(value) for value in sorted(eligible_ids)],
+                    "container_channel_ids": [
+                        str(value) for value in sorted(requested_forum_ids)
+                    ],
                     "missing_channel_ids": [str(value) for value in sorted(local_missing)],
                     "channels_total": len(channels),
                 }

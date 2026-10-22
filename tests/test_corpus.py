@@ -24,6 +24,12 @@ from bot.corpus import (
     sensitive_request_response,
 )
 from bot.knowledge_authority import QuestionKind
+from bot.knowledge_pipeline import (
+    KnowledgePipelineBusy,
+    acquire_knowledge_pipeline_lock,
+    knowledge_pipeline_lock,
+    release_knowledge_pipeline_lock,
+)
 from bot.rag_store import RagStore
 
 
@@ -177,6 +183,55 @@ async def test_prepared_backfill_uses_one_fixed_utc_cutoff(corpus_manager):
 
     assert channel.history_kwargs["before"] == cutoff
     assert session.completed_channel_ids == {2}
+
+
+@pytest.mark.asyncio
+async def test_backfill_defers_while_curation_owns_shared_pipeline_lock(
+    corpus_manager,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv(
+        "YAGAPON_KNOWLEDGE_PIPELINE_LOCK",
+        str(tmp_path / "knowledge-pipeline.lock"),
+    )
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+
+    with knowledge_pipeline_lock():
+        session = await corpus_manager.prepare_backfill(
+            1,
+            {2},
+            "fileSearchStores/test",
+        )
+
+    assert session is None
+    assert corpus_manager._active_backfills == {}
+    corpus_manager.list_remote_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_holds_shared_pipeline_lock_until_finish(
+    corpus_manager,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv(
+        "YAGAPON_KNOWLEDGE_PIPELINE_LOCK",
+        str(tmp_path / "knowledge-pipeline.lock"),
+    )
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+    )
+
+    with pytest.raises(KnowledgePipelineBusy):
+        acquire_knowledge_pipeline_lock()
+
+    await corpus_manager.finish_backfill(session)
+    acquired = acquire_knowledge_pipeline_lock()
+    release_knowledge_pipeline_lock(acquired)
 
 
 @pytest.mark.asyncio

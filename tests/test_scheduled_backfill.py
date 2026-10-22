@@ -287,6 +287,13 @@ async def test_scheduler_stop_cancels_sleeping_loop(tmp_path, monkeypatch):
     )
     manager = ScheduledBackfillManager(_bot(), state_path=state_path)
 
+    # Construction happens before the API server is started, so yesterday's
+    # success is already unusable even if Discord on_ready is delayed.
+    booting = json.loads(state_path.read_text(encoding="utf-8"))
+    assert booting["status"] == "waiting"
+    assert booting["reason"] == "bot-starting"
+    assert booting["completed_at"] is None
+
     assert manager.start() is True
     # start() invalidates yesterday's success synchronously, before the task can
     # enter its configured initial sleep.
@@ -373,6 +380,7 @@ async def test_forum_parent_allowlist_expands_active_and_archived_threads(
     assert guild["channels_total"] == 2
     assert set(guild["completed_channel_ids"]) == {"41", "42"}
     assert set(guild["eligible_channel_ids"]) == {"40", "41", "42"}
+    assert guild["container_channel_ids"] == ["40"]
     assert prepared_target_ids == [frozenset({41, 42})]
     cursor_channel_ids = {call.args[1] for call in bot.config.set_backfill_cursor.await_args_list}
     assert cursor_channel_ids == {41, 42}

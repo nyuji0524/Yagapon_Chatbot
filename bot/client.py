@@ -896,7 +896,9 @@ class YagaPon(discord.Bot):
             except Exception:
                 log.exception("Scheduled backfill shutdown failed; continuing cleanup")
             pending_refreshes = [
-                task for task in self.knowledge_refresh_tasks if not task.done()
+                task
+                for task in getattr(self, "knowledge_refresh_tasks", ())
+                if not task.done()
             ]
             for task in pending_refreshes:
                 task.cancel()

@@ -39,6 +39,11 @@ from bot.knowledge_authority import (
     classify_question_facets,
     direct_authorities,
 )
+from bot.knowledge_pipeline import (
+    KnowledgePipelineBusy,
+    acquire_knowledge_pipeline_lock,
+    release_knowledge_pipeline_lock,
+)
 from bot.rag_judge import QualityJudgment, judge_answer_quality
 from bot.rag_store import LexicalHit, RagStore
 
@@ -570,6 +575,7 @@ class BackfillSession:
     deferred_buffers: dict[tuple[int, int], MessageBuffer] = field(default_factory=dict)
     completed_channel_ids: set[int] = field(default_factory=set)
     remote_inventory: tuple[dict[str, object], ...] | None = None
+    pipeline_lock: object | None = field(default=None, repr=False, compare=False)
     prepared: bool = False
     finished: bool = False
 
@@ -2298,13 +2304,19 @@ class CorpusManager:
         )
         if guild_id in self._active_backfills:
             return None
+        try:
+            session.pipeline_lock = acquire_knowledge_pipeline_lock()
+        except KnowledgePipelineBusy:
+            # A curation cycle or another bot process owns the corpus snapshot.
+            # Keep the previous durable checkpoint and let the caller retry.
+            return None
         # No await before publishing. A dry-run uses the guard only; a real run
         # also makes on_message defer post-cutoff target events.
         self._active_backfills[guild_id] = session
         try:
             async with self._guild_flush_lock(guild_id):
                 if self._active_backfills.get(guild_id) is not session:
-                    return None
+                    raise RuntimeError("Backfill session ownership changed during preparation")
                 if not dry_run:
                     for channel_id in session.target_channel_ids:
                         key = (guild_id, channel_id)
@@ -2333,6 +2345,8 @@ class CorpusManager:
                     self._merge_buffer(self._buffers, key, buffered)
                 for key, buffered in session.deferred_buffers.items():
                     self._merge_buffer(self._buffers, key, buffered)
+            release_knowledge_pipeline_lock(session.pipeline_lock)  # type: ignore[arg-type]
+            session.pipeline_lock = None
             raise
         return session
 
@@ -2376,32 +2390,40 @@ class CorpusManager:
         """
         if session is None:
             return True
-        if session.dry_run:
-            if self._active_backfills.get(session.guild_id) is session:
-                self._active_backfills.pop(session.guild_id, None)
-            session.finished = True
-            return True
-        guild_id = session.guild_id
-        keys_to_flush: set[tuple[int, int]] = set()
-        async with self._guild_flush_lock(guild_id):
-            if self._active_backfills.get(guild_id) is not session:
+        release_pipeline = False
+        try:
+            if session.dry_run:
+                if self._active_backfills.get(session.guild_id) is session:
+                    self._active_backfills.pop(session.guild_id, None)
+                    release_pipeline = True
                 session.finished = True
                 return True
-            # Failed channels must retain their pre-cutoff live copy. Successful
-            # channels are now represented by the bounded history snapshot.
-            for key, buffered in session.quarantined_buffers.items():
-                if key[1] not in session.completed_channel_ids:
+            guild_id = session.guild_id
+            keys_to_flush: set[tuple[int, int]] = set()
+            async with self._guild_flush_lock(guild_id):
+                if self._active_backfills.get(guild_id) is not session:
+                    session.finished = True
+                    return True
+                # Failed channels must retain their pre-cutoff live copy. Successful
+                # channels are now represented by the bounded history snapshot.
+                for key, buffered in session.quarantined_buffers.items():
+                    if key[1] not in session.completed_channel_ids:
+                        self._merge_buffer(self._buffers, key, buffered)
+                        keys_to_flush.add(key)
+                for key, buffered in session.deferred_buffers.items():
                     self._merge_buffer(self._buffers, key, buffered)
                     keys_to_flush.add(key)
-            for key, buffered in session.deferred_buffers.items():
-                self._merge_buffer(self._buffers, key, buffered)
-                keys_to_flush.add(key)
-            session.quarantined_buffers.clear()
-            session.deferred_buffers.clear()
-            self._active_backfills.pop(guild_id, None)
-            session.finished = True
+                session.quarantined_buffers.clear()
+                session.deferred_buffers.clear()
+                self._active_backfills.pop(guild_id, None)
+                session.finished = True
+                release_pipeline = True
 
-        outcomes = []
-        for key in sorted(keys_to_flush):
-            outcomes.append(await self._flush_buffer(key, session.corpus_store_name))
-        return all(outcomes)
+            outcomes = []
+            for key in sorted(keys_to_flush):
+                outcomes.append(await self._flush_buffer(key, session.corpus_store_name))
+            return all(outcomes)
+        finally:
+            if release_pipeline:
+                release_knowledge_pipeline_lock(session.pipeline_lock)  # type: ignore[arg-type]
+                session.pipeline_lock = None
