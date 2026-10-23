@@ -2864,6 +2864,10 @@ class CorpusManager:
                         item.authority,
                         item.status,
                     )
+                    and (
+                        not item.document_key.startswith("firebase:schema:")
+                        or schema_fallback_allowed
+                    )
                 ]
                 if not parsed.explicit_status:
                     return evidence
@@ -3546,7 +3550,8 @@ class CorpusManager:
             )
             lines.extend(
                 (
-                    f"## {contract.festival}th {labels[contract.source_type]}",
+                    f"## {contract.festival}th "
+                    f"{labels.get(contract.source_type, contract.source_type)}",
                     f"- {path_label}: `{contract.path}`",
                     "- 読み取り許可フィールド: "
                     + ", ".join(f"`{field}`" for field in contract.allowlisted_fields),
