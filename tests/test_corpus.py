@@ -433,6 +433,48 @@ def test_public_discord_document_records_trusted_auto_promotion(corpus_manager):
     assert metadata["auto_promote"] == "true"
 
 
+def test_snapshot_document_builder_is_output_equivalent(corpus_manager):
+    default_role = SimpleNamespace(id=1)
+    channel = FakeChannel([])
+    channel.guild = SimpleNamespace(id=1, default_role=default_role)
+    channel.parent = SimpleNamespace(
+        id=80,
+        name="開発フォーラム",
+        category=channel.category,
+        category_id=channel.category_id,
+    )
+    channel.parent_id = 80
+    channel.permissions_for = lambda role: SimpleNamespace(
+        view_channel=role is default_role,
+        read_message_history=role is default_role,
+    )
+    messages = [
+        corpus_manager._knowledge_message(fake_message(1)),
+        corpus_manager._knowledge_message(fake_message(2, 1)),
+    ]
+
+    direct = corpus_manager._build_knowledge_documents(
+        channel,
+        messages,
+        allow_automatic_promotion=True,
+    )
+    snapshot = corpus_manager._channel_knowledge_snapshot(channel)
+    from_snapshot = corpus_manager._build_knowledge_documents_from_snapshot(
+        snapshot,
+        messages,
+        allow_automatic_promotion=True,
+    )
+
+    assert from_snapshot == direct
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in from_snapshot[0].metadata
+    }
+    assert metadata["auto_promote"] == "true"
+    assert metadata["parent_id"] == "80"
+    assert metadata["category_id"] == "90"
+
+
 @pytest.mark.asyncio
 async def test_backfilled_public_history_does_not_auto_promote_by_default(
     corpus_manager,
@@ -480,6 +522,48 @@ async def test_explicitly_authorized_public_history_auto_promotes(corpus_manager
         for item in corpus_manager._upload_document.await_args.args[3]
     }
     assert metadata["auto_promote"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_history_acl_is_resnapshotted_before_offloaded_document_build(
+    corpus_manager,
+):
+    default_role = SimpleNamespace(id=1)
+    readable = True
+    channel = FakeChannel([fake_message(1), fake_message(2, 1)])
+    channel.guild = SimpleNamespace(id=1, default_role=default_role)
+    channel.permissions_for = lambda role: SimpleNamespace(
+        view_channel=readable and role is default_role,
+        read_message_history=readable and role is default_role,
+    )
+
+    def history(**kwargs):
+        channel.history_kwargs = kwargs
+
+        async def iterate():
+            nonlocal readable
+            for message in channel.messages:
+                yield message
+            readable = False
+
+        return iterate()
+
+    channel.history = history
+    corpus_manager._existing_channel_documents = AsyncMock(return_value=[])
+    corpus_manager._upload_document = AsyncMock(return_value="documents/new")
+
+    await corpus_manager.backfill_channel(
+        channel,
+        "fileSearchStores/test",
+        full_history=True,
+        authorize_history_promotion=True,
+    )
+
+    metadata = {
+        item["key"]: item.get("string_value", item.get("numeric_value"))
+        for item in corpus_manager._upload_document.await_args.args[3]
+    }
+    assert metadata["auto_promote"] == "false"
 
 
 @pytest.mark.asyncio
@@ -844,6 +928,39 @@ async def test_bounded_replacement_keeps_imprecise_or_invalid_legacy_end(
 
 
 @pytest.mark.asyncio
+async def test_legacy_index_preserves_channel_names_containing_delimiter(
+    corpus_manager,
+):
+    inventory = (
+        {
+            "name": "documents/forum-thread",
+            "display_name": "#企画 | 相談 | unknown",
+            "metadata": {},
+        },
+    )
+    thread = FakeChannel([])
+    thread.name = "企画 | 相談"
+    parent = FakeChannel([])
+    parent.name = "企画"
+
+    thread_matches = await corpus_manager._existing_channel_documents(
+        "fileSearchStores/test",
+        thread,
+        remote_inventory=inventory,
+    )
+    parent_matches = await corpus_manager._existing_channel_documents(
+        "fileSearchStores/test",
+        parent,
+        remote_inventory=inventory,
+    )
+
+    assert thread_matches == ["documents/forum-thread"]
+    # This deliberately preserves the old startswith behavior. Prepared
+    # multi-channel sessions still apply the separate unique-owner guard.
+    assert parent_matches == ["documents/forum-thread"]
+
+
+@pytest.mark.asyncio
 async def test_existing_channel_documents_never_replaces_other_source_or_guild(
     corpus_manager,
 ):
@@ -869,6 +986,21 @@ async def test_existing_channel_documents_never_replaces_other_source_or_guild(
             "name": "documents/ambiguous-metadata",
             "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
             "metadata": {"guild_id": "1", "channel_id": "2", "start_epoch": 0},
+        },
+        {
+            "name": "documents/malformed-metadata",
+            "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": [("guild_id", "1"), ("channel_id", "2")],
+        },
+        {
+            "name": "documents/padded-guild-id",
+            "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": {**base, "guild_id": "001"},
+        },
+        {
+            "name": "documents/padded-channel-id",
+            "display_name": "#開発 | 2026-10-05 09:00-2026-10-05 09:01",
+            "metadata": {**base, "channel_id": "02"},
         },
     )
 
@@ -985,6 +1117,8 @@ async def test_prepared_multichannel_backfill_reuses_one_remote_inventory(
             "metadata": discord_document_metadata(4, start_epoch=0),
         },
     ]
+    build_index = Mock(wraps=corpus_manager._index_remote_inventory)
+    corpus_manager._index_remote_inventory = build_index
     corpus_manager.list_remote_documents = AsyncMock(return_value=remote_inventory)
     corpus_manager._upload_document = AsyncMock(return_value="documents/new")
     corpus_manager._delete_documents = AsyncMock(
@@ -1013,6 +1147,7 @@ async def test_prepared_multichannel_backfill_reuses_one_remote_inventory(
     corpus_manager.list_remote_documents.assert_awaited_once_with(
         "fileSearchStores/test"
     )
+    assert build_index.call_count == 1
     deleted = {
         tuple(call.args[0])
         for call in corpus_manager._delete_documents.await_args_list
@@ -1238,6 +1373,47 @@ async def test_remote_inventory_failure_aborts_session_and_restores_live_message
     restored = "\n".join(corpus_manager._buffers[(1, 2)].messages)
     assert "inventory取得前のメッセージ" in restored
     assert "inventory取得中のメッセージ" in restored
+    corpus_manager._upload_document.assert_not_awaited()
+    corpus_manager._delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_inventory_index_failure_restores_buffers_without_mutation(
+    corpus_manager,
+    monkeypatch,
+):
+    cutoff = datetime(2026, 10, 22, 3, 4, tzinfo=timezone.utc)
+    corpus_manager.add_message(
+        1,
+        2,
+        "開発",
+        "member",
+        "索引失敗でも復元するメッセージ",
+        cutoff - timedelta(minutes=1),
+        "fileSearchStores/test",
+        message_id=9,
+    )
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+    corpus_manager._upload_document = AsyncMock()
+    corpus_manager._delete_documents = AsyncMock()
+    monkeypatch.setattr(
+        corpus_manager,
+        "_index_remote_inventory",
+        Mock(side_effect=RuntimeError("inventory index failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="index failed"):
+        await corpus_manager.prepare_backfill(
+            1,
+            {2},
+            "fileSearchStores/test",
+            cutoff=cutoff,
+        )
+
+    assert corpus_manager._active_backfills == {}
+    assert "索引失敗でも復元するメッセージ" in corpus_manager._buffers[
+        (1, 2)
+    ].messages[0]
     corpus_manager._upload_document.assert_not_awaited()
     corpus_manager._delete_documents.assert_not_awaited()
 
@@ -1486,6 +1662,170 @@ async def test_backfill_continues_when_progress_reporting_fails(corpus_manager):
     assert result.messages_indexed == 500
     assert result.documents_uploaded > 0
     progress.assert_awaited_once_with(500)
+
+
+@pytest.mark.asyncio
+async def test_backfill_cpu_stages_keep_health_loop_responsive(
+    corpus_manager,
+    monkeypatch,
+):
+    import threading
+
+    from api.routes import health
+
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        dry_run=True,
+    )
+    main_thread_id = threading.get_ident()
+    stage_thread_ids = {}
+    build_started = threading.Event()
+    release_build = threading.Event()
+    original_legacy = corpus_manager._session_legacy_name_match_allowed
+    original_filter = corpus_manager._filter_existing_channel_documents
+    original_build = corpus_manager._build_knowledge_documents_from_snapshot
+
+    def monitored_legacy(*args, **kwargs):
+        stage_thread_ids["legacy"] = threading.get_ident()
+        return original_legacy(*args, **kwargs)
+
+    def monitored_filter(*args, **kwargs):
+        stage_thread_ids["filter"] = threading.get_ident()
+        return original_filter(*args, **kwargs)
+
+    def blocked_build(*args, **kwargs):
+        stage_thread_ids["build"] = threading.get_ident()
+        build_started.set()
+        assert release_build.wait(timeout=2)
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(
+        corpus_manager,
+        "_session_legacy_name_match_allowed",
+        monitored_legacy,
+    )
+    monkeypatch.setattr(
+        corpus_manager,
+        "_filter_existing_channel_documents",
+        monitored_filter,
+    )
+    monkeypatch.setattr(
+        corpus_manager,
+        "_build_knowledge_documents_from_snapshot",
+        blocked_build,
+    )
+
+    ticks = 0
+    stop_ticker = asyncio.Event()
+
+    async def ticker():
+        nonlocal ticks
+        while not stop_ticker.is_set():
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    safety_release = threading.Timer(1, release_build.set)
+    safety_release.start()
+    started_at = asyncio.get_running_loop().time()
+    ticker_task = asyncio.create_task(ticker())
+    backfill_task = asyncio.create_task(
+        corpus_manager.backfill_channel(
+            FakeChannel([fake_message(1), fake_message(2, 1)]),
+            "fileSearchStores/test",
+            dry_run=True,
+            session=session,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(build_started.wait, 0.5)
+        health_response = await asyncio.wait_for(health(), timeout=0.2)
+        await asyncio.sleep(0.03)
+
+        assert health_response["status"] == "ok"
+        assert asyncio.get_running_loop().time() - started_at < 0.5
+        assert ticks >= 3
+    finally:
+        release_build.set()
+        safety_release.cancel()
+        await backfill_task
+        stop_ticker.set()
+        await ticker_task
+        await corpus_manager.finish_backfill(session)
+
+    assert stage_thread_ids.keys() == {"legacy", "filter", "build"}
+    assert all(
+        thread_id != main_thread_id for thread_id in stage_thread_ids.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_offloaded_build_does_not_mutate_remote_or_complete_session(
+    corpus_manager,
+    monkeypatch,
+):
+    import threading
+
+    timestamp = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    add_message(corpus_manager, content="cancel時に復元", timestamp=timestamp)
+    corpus_manager.list_remote_documents = AsyncMock(return_value=[])
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        cutoff=timestamp + timedelta(minutes=1),
+    )
+    corpus_manager._upload_document = AsyncMock()
+    corpus_manager._delete_documents = AsyncMock()
+    build_started = threading.Event()
+    release_build = threading.Event()
+    build_finished = threading.Event()
+    original_build = corpus_manager._build_knowledge_documents_from_snapshot
+
+    def blocked_build(*args, **kwargs):
+        build_started.set()
+        try:
+            assert release_build.wait(timeout=2)
+            return original_build(*args, **kwargs)
+        finally:
+            build_finished.set()
+
+    monkeypatch.setattr(
+        corpus_manager,
+        "_build_knowledge_documents_from_snapshot",
+        blocked_build,
+    )
+    safety_release = threading.Timer(1, release_build.set)
+    safety_release.start()
+    task = asyncio.create_task(
+        corpus_manager.backfill_channel(
+            FakeChannel([fake_message(1)]),
+            "fileSearchStores/test",
+            session=session,
+        )
+    )
+    assert await asyncio.to_thread(build_started.wait, 0.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release_build.set()
+    safety_release.cancel()
+    assert await asyncio.to_thread(build_finished.wait, 0.5)
+
+    corpus_manager._upload_document.assert_not_awaited()
+    corpus_manager._delete_documents.assert_not_awaited()
+    assert session.completed_channel_ids == set()
+
+    corpus_manager._flush_buffer = AsyncMock(return_value=True)
+    await corpus_manager.finish_backfill(session)
+
+    assert "cancel時に復元" in corpus_manager._buffers[(1, 2)].messages[0]
+    corpus_manager._flush_buffer.assert_awaited_once_with(
+        (1, 2),
+        "fileSearchStores/test",
+    )
 
 
 @pytest.mark.asyncio
