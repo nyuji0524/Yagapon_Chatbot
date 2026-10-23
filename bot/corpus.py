@@ -44,6 +44,8 @@ from bot.festival import (
 )
 from bot.firebase_knowledge import (
     COLLECTIONS,
+    FIREBASE_SCHEMA_CONTRACT_SOURCES,
+    FIREBASE_SCHEMA_CONTRACT_VERSION,
     FirebaseEvidence,
     FirebaseKnowledgeReader,
     firebase_projected_fields_are_safe,
@@ -51,6 +53,8 @@ from bot.firebase_knowledge import (
 )
 from bot.knowledge_authority import (
     AUTHORITY_LABELS,
+    CURRENT_IMPLEMENTATION_AUTHORITIES,
+    CURRENT_STATUSES,
     QuestionKind,
     allows_unreviewed_evidence,
     authority_instruction,
@@ -291,7 +295,9 @@ _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
 # lexical overlap.  This keeps a nearby but different number, role, state, or
 # identifier from authorizing a regenerated claim.
 _CRITICAL_GROUNDING_ATOM_RE = re.compile(
-    r"(?:権限|認可|許可|禁止|公開|非公開|有効|無効|稼働|停止|開催|中止|"
+    r"(?:権限|認可|不許可|許可|禁止|公開予定ではない|公開ではない|"
+    r"非公開|公開|有効ではない|無効|有効|不可能|可能ではない|"
+    r"未確定|稼働|停止|開催|中止|"
     r"会場|場所|担当|責任者|局長|副局長|企画長|テーマ|名称|保存先|"
     r"コレクション|フィールド|締切|期限|必須|可能|不可|首位|最下位|"
     r"デプロイ済み|実装済み|運用中|決定済み|確定|未定|終了済み|受付中|"
@@ -299,9 +305,108 @@ _CRITICAL_GROUNDING_ATOM_RE = re.compile(
     r"\b(?:true|false|null)\b)",
     re.IGNORECASE,
 )
+_RECOVERY_JAPANESE_NUMBER_UNIT_RE = re.compile(
+    r"[〇零一二三四五六七八九十百千万億兆]+"
+    r"(?:パーセント|グループ|ページ|チーム|"
+    r"時間|企画|文字|時|分|秒|日|月|年|件|名|人|円|票|割|位|"
+    r"枠|個|台|回|組|つ|枚|本|校|局|倍|点|階|棟|室|席|[%％])"
+)
+_RECOVERY_SIGNED_NUMBER_PREFIX = "signed-number:"
 _RECOVERY_PROPER_TOKEN_RE = re.compile(
     r"(?:[A-Za-z][A-Za-z0-9_.:/\-]{1,}(?:[ァ-ヶ一-龠]+)?|"
     r"(?:[A-Za-z]{1,16}|[一-龠]{1,8})(?:さん|くん|氏)|[ァ-ヶー]{3,})"
+)
+_RECOVERY_ROLE_MARKER_RE = re.compile(
+    r"(?:ロール|(?<![A-Za-z0-9_])roles?(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_RECOVERY_QUOTED_VALUE_RE = re.compile(r"[「『]([^」』]{1,64})[」』]")
+_RECOVERY_ROLE_VALUE_SUFFIX_RE = re.compile(
+    r"(?:だ|です|である)?ぽん[。.!！?？]*$|(?:だ|です|である)[。.!！?？]*$"
+)
+_RECOVERY_ELLIPTICAL_NON_RETENTION_RE = re.compile(
+    r"(?:残らない|残りません|残存しない|保持されない|保存されない)$"
+)
+_RECOVERY_NEGATED_DELETION_RE = re.compile(
+    r"削除(?:(?:し|され)(?:て)?(?:い)?(?:ない|ません|ず)|せず|"
+    r"(?:する|される)?(?:こと|わけ|もの)(?:は|では)?(?:ない|ありません)|"
+    r"[はを]?(?:行わ|実施し)(?:ない|ません)|対象(?:ではない|外)|"
+    r"不要|できない)"
+)
+_RECOVERY_NEGATIVE_RETENTION_RE = re.compile(
+    r"(?:残らない|残りません|残存しない|"
+    r"保持(?:しない|されない)|保存(?:しない|されない))"
+)
+_RECOVERY_POSITIVE_RETENTION_RE = re.compile(
+    r"(?:残る|残ります|残っている|残存する|残存します|"
+    r"保持(?:する|される)|保存(?:する|される)|永続保存)"
+)
+_RECOVERY_RETENTION_SCOPE_RE = re.compile(
+    r"(?:録音pcm|pcm|録音|文字起こし|議事録|音声|データ|ファイル)",
+    re.IGNORECASE,
+)
+_RECOVERY_PERMISSION_PREDICATE_RE = re.compile(
+    r"(?:(?:管理|操作).{0,16}(?:でき|可能|行(?:う|える|った)|する|した)|"
+    r"(?:編集|利用|閲覧|作成|更新|削除).{0,16}(?:でき|可能)|"
+    r"(?:管理|操作)(?:ロール|roles?))",
+    re.IGNORECASE,
+)
+_RECOVERY_PERMISSION_ACTOR_RE = re.compile(
+    r"(?P<actor>[^、,。.!！？?\n]{1,64}?)(?:"
+    r"であれば|の場合(?:は|に)?|については|も|が|"
+    r"(?<!また)(?<!もしく)(?<!あるい)は)"
+    r"(?=[^、,。.!！？?\n]{0,48}(?:管理|操作|編集|利用|閲覧|作成|更新|削除))"
+)
+_RECOVERY_PERMISSION_POST_ACTOR_RE = re.compile(
+    r"(?:管理|操作|編集|利用|閲覧|作成|更新|削除)"
+    r"(?:でき(?:る|た)?|可能)(?:なの|の)?(?:は|が)[「『]?"
+    r"(?P<actor>[^、,。.!！？?\n」』]{1,64}?)"
+    r"(?=(?:だけ|のみ)?(?:だ|です|である|ぽん)?[」』]?(?:[。.!！？?\n]|$))"
+)
+_RECOVERY_SUBCOLLECTION_NEGATIVE_RE = re.compile(
+    r"(?:サブコレクション(?:が|は)?(?:ない|存在しない)|"
+    r"サブコレクション(?:では|じゃ)ない|"
+    r"\bno\s+(?:nested\s+)?subcollections?\b|"
+    r"\bnot\s+(?:a\s+|nested\s+)?subcollections?\b|"
+    r"\bsubcollections?\s+(?:do(?:es)?\s+not|doesn't|don't)\s+exist\b|"
+    r"\bwithout\b[^.!?\n]{0,80}\bsubcollections?\b|"
+    r"\b(?:is|are)\s+not\s+(?:a\s+|nested\s+)?subcollections?\b)",
+    re.IGNORECASE,
+)
+_RECOVERY_SUBCOLLECTION_POSITIVE_RE = re.compile(
+    r"(?:サブコレクション(?:がある|は存在する|(?:です|である)(?=ぽん|[。.!！?？\n]|$)|"
+    r"として(?:保存|作成|配置|存在))|"
+    r"\b(?:has|have|contains?|includes?)\b[^.!?\n]{0,120}"
+    r"\bsubcollections?(?=\b|ぽん)|"
+    r"\bsubcollections?\s+(?:exist|are\s+present)(?=\b|ぽん)|"
+    r"\b(?:is|are)\s+(?:a\s+|nested\s+)?subcollections?(?=\b|ぽん))",
+    re.IGNORECASE,
+)
+_RECOVERY_CRITICAL_POLARITY_PATTERNS = (
+    (
+        re.compile(
+            r"(?:非公開|未公開|公開(?:予定)?(?:では|じゃ|は)?ない|"
+            r"公開(?:し|され)(?:てい)?(?:ない|ません))"
+        ),
+        re.compile(r"公開"),
+    ),
+    (
+        re.compile(
+            r"(?:不許可|未許可|許可(?:され|し)?(?:てい)?(?:ない|ません)|"
+            r"許可(?:では|じゃ|は)?ない)"
+        ),
+        re.compile(r"許可"),
+    ),
+    (
+        re.compile(
+            r"(?:管理|操作|編集|利用|閲覧|作成|更新|削除).{0,16}"
+            r"(?:できない|できません|不可能|可能(?:では|じゃ|は)?ない|不可)"
+        ),
+        re.compile(
+            r"(?:管理|操作|編集|利用|閲覧|作成|更新|削除).{0,16}"
+            r"(?:できる|できます|可能)"
+        ),
+    ),
 )
 
 
@@ -374,12 +479,21 @@ def _select_lexical_context_hits(
     if limit <= 0:
         return []
     if question_kind is not QuestionKind.HISTORY:
+        authority_before_relevance = not allows_unreviewed_evidence(question_kind)
         return sorted(
             hits,
             key=lambda hit: (
                 can_answer_directly(question_kind, hit.authority, hit.status),
-                hit.score,
-                authority_score(question_kind, hit.authority, hit.status),
+                (
+                    authority_score(question_kind, hit.authority, hit.status)
+                    if authority_before_relevance
+                    else hit.score
+                ),
+                (
+                    hit.score
+                    if authority_before_relevance
+                    else authority_score(question_kind, hit.authority, hit.status)
+                ),
             ),
             reverse=True,
         )[:limit]
@@ -496,8 +610,26 @@ def retrieval_metadata_filter(
         clauses.append(festival_metadata_filter(festival))
     if target_date is not None:
         clauses.append(f'start_at = "{target_date}*"')
+    direct = direct_authorities(question_kind)
+    current_implementation_authorities = sorted(
+        CURRENT_IMPLEMENTATION_AUTHORITIES.intersection(direct)
+    )
+    if (
+        not allows_unreviewed_evidence(question_kind)
+        and current_implementation_authorities
+    ):
+        non_current_authorities = " AND ".join(
+            f'authority != "{authority}"'
+            for authority in current_implementation_authorities
+        )
+        current_statuses = " OR ".join(
+            f'status = "{status}"' for status in sorted(CURRENT_STATUSES)
+        )
+        clauses.append(f"(({non_current_authorities}) OR ({current_statuses}))")
     if not allows_unreviewed_evidence(question_kind):
-        authorities = " OR ".join(f'authority = "{authority}"' for authority in direct_authorities(question_kind))
+        authorities = " OR ".join(
+            f'authority = "{authority}"' for authority in direct
+        )
         clauses.append(f"({authorities})")
         clauses.extend(
             (
@@ -1319,6 +1451,19 @@ class _FirebaseListGroup:
     completeness: str
     order: str
     items: tuple[_FirebaseListItem, ...]
+
+
+@dataclass(frozen=True)
+class _FirebaseSchemaContract:
+    festival: int
+    source_type: str
+    path_kind: str
+    path: str
+    allowlisted_fields: tuple[str, ...]
+    observed_fields: tuple[str, ...]
+    observation: str
+    title: str
+    source_url: str
 
 
 @dataclass(frozen=True)
@@ -2717,6 +2862,13 @@ class CorpusManager:
             if guild_id
             else []
         )
+        if not allows_unreviewed_evidence(question_kind):
+            lexical_hits = [
+                hit
+                for hit in lexical_hits
+                if hit.authority not in CURRENT_IMPLEMENTATION_AUTHORITIES
+                or hit.status in CURRENT_STATUSES
+            ]
         lexical_hits = _select_lexical_context_hits(
             lexical_hits,
             question_kind=question_kind,
@@ -2728,6 +2880,9 @@ class CorpusManager:
         cross_source_history = question_kind is QuestionKind.HISTORY and any(
             is_history_narrative_source(hit.source_type) for hit in lexical_hits
         )
+        schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
+        schema_sources: list[str] = []
+        schema_fallback_allowed = False
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -2760,6 +2915,20 @@ class CorpusManager:
                 question_kind,
                 festival=festival,
             )
+            if question_kind is QuestionKind.DATA_CONTRACT:
+                schema_contracts = self._parse_firebase_schema_contracts(
+                    firebase_evidence,
+                    expected_festival=festival,
+                )
+                schema_fallback_allowed = self._firebase_schema_fallback_allowed(
+                    question,
+                    schema_contracts,
+                )
+                if schema_fallback_allowed:
+                    schema_sources = self._firebase_schema_sources(schema_contracts)
+            else:
+                schema_contracts = ()
+                schema_sources = []
             if comprehensive and self._is_firebase_only_exhaustive_request(question):
                 firebase_groups = self._parse_firebase_list_groups(firebase_evidence)
                 firebase_sources = self._firebase_sources(firebase_evidence, [])
@@ -2809,6 +2978,23 @@ class CorpusManager:
                 evidence: list[FirebaseEvidence],
                 parsed: ParsedModelAnswer,
             ) -> list[FirebaseEvidence]:
+                # Runtime documents may be useful context, but only an
+                # authority approved for this question kind may become the
+                # cited, sole basis of an answer.  Schema-contract evidence is
+                # explicitly tagged as deployed implementation by its builder.
+                evidence = [
+                    item
+                    for item in evidence
+                    if can_answer_directly(
+                        question_kind,
+                        item.authority,
+                        item.status,
+                    )
+                    and (
+                        not item.document_key.startswith("firebase:schema:")
+                        or schema_fallback_allowed
+                    )
+                ]
                 if not parsed.explicit_status:
                     return evidence
                 selected = set(parsed.evidence_keys)
@@ -3124,7 +3310,22 @@ class CorpusManager:
                             recovery_semantic_evidence,
                         )
             no_answer = not sources or not has_answer
-            if no_answer:
+            if (
+                no_answer
+                and schema_fallback_allowed
+                and schema_contracts
+                and schema_sources
+            ):
+                # Source code may describe nested collections and invariants
+                # that the public projection intentionally omits, so always
+                # give normal grounded retrieval the first chance to answer.
+                # This deterministic projection is the safe fallback when the
+                # broader answer cannot pass grounding.
+                answer = self._render_firebase_schema_contracts(schema_contracts)
+                sources = schema_sources
+                has_answer = True
+                no_answer = False
+            elif no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
                     "年度や用語を変えて質問するか、資料を追加してほしいぽん。"
@@ -3143,6 +3344,14 @@ class CorpusManager:
             )
         except Exception:
             log.exception("RAG query failed")
+            if schema_fallback_allowed and schema_contracts and schema_sources:
+                return RagAnswer(
+                    text=self._render_firebase_schema_contracts(schema_contracts),
+                    citations=tuple(schema_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,
@@ -3236,6 +3445,270 @@ class CorpusManager:
     def _is_firebase_only_exhaustive_request(question: str) -> bool:
         """Keep the deterministic list path limited to current-value list requests."""
         return is_explicit_firebase_list_query(question)
+
+    def _parse_firebase_schema_contracts(
+        self,
+        evidence: list[FirebaseEvidence],
+        *,
+        expected_festival: int | None = None,
+    ) -> tuple[_FirebaseSchemaContract, ...]:
+        """Revalidate schema projections before deterministic rendering.
+
+        Evidence bodies are still untrusted data.  Paths and allowlists must
+        exactly match the in-process reviewed registry; Firestore may only add
+        a subset of safely projected, observed field names.
+        """
+        schema_items = [
+            item
+            for item in evidence
+            if item.document_key.startswith("firebase:schema:")
+        ]
+        if not schema_items:
+            return ()
+
+        header_pattern = re.compile(
+            r"\AFirestore公開データ契約（(?P<festival>\d+)th / "
+            r"(?P<source_type>[A-Za-z][A-Za-z0-9]*)）\Z"
+        )
+        allowed_observations = {
+            "public-documents-observed",
+            "no-observed-public-fields",
+            "withheld-until-public-result",
+            "lookup-unavailable",
+        }
+        contracts: list[_FirebaseSchemaContract] = []
+        seen_source_types: set[str] = set()
+        project_id = self.firebase_knowledge.project_id
+        if not project_id or re.fullmatch(r"[a-z][a-z0-9-]{4,62}", project_id) is None:
+            return ()
+        source_labels = {
+            "ranking": "大賞企画の公開集計",
+            "rankingConfig": "大賞企画の公開状態",
+            "maps": "公開マップ",
+        }
+        for item in schema_items:
+            lines = item.body.splitlines()
+            if len(lines) != 8:
+                return ()
+            header = header_pattern.fullmatch(lines[0])
+            if header is None:
+                return ()
+            festival = int(header.group("festival"))
+            source_type = header.group("source_type")
+            if (
+                source_type not in FIREBASE_SCHEMA_CONTRACT_SOURCES
+                or source_type in seen_source_types
+                or (contracts and festival != contracts[0].festival)
+                or (expected_festival is not None and festival != expected_festival)
+                or item.document_key != f"firebase:schema:{source_type}"
+                or item.authority != "deployed_implementation"
+                or item.status != "deployed"
+                or lines[1]
+                != f"schema_contract: {FIREBASE_SCHEMA_CONTRACT_VERSION}"
+                or lines[2] != f"reference: schema:{source_type}"
+                or lines[7]
+                != "scope: public-readonly-projection; not-a-complete-firestore-schema"
+            ):
+                return ()
+
+            config = COLLECTIONS[source_type]
+            path_kind = (
+                "document_path"
+                if config.get("document") is True
+                else "collection_path"
+            )
+            path = str(config["path"]).format(festival=festival)
+            expected_title = (
+                f"{festival}th {source_labels[source_type]}の公開データ契約"
+            )
+            expected_source_url = self.firebase_knowledge._console_url(path)
+            if (
+                lines[3] != f"{path_kind}: {path}"
+                or item.title != expected_title
+                or item.source_url != expected_source_url
+            ):
+                return ()
+
+            if not lines[4].startswith("allowlisted_fields: ") or not lines[5].startswith(
+                "observed_fields: "
+            ):
+                return ()
+            try:
+                allowlisted = json.loads(lines[4].removeprefix("allowlisted_fields: "))
+                observed = json.loads(lines[5].removeprefix("observed_fields: "))
+            except (TypeError, ValueError):
+                return ()
+            expected_allowlist = tuple(str(value) for value in config["fields"])
+            if (
+                not isinstance(allowlisted, list)
+                or tuple(allowlisted) != expected_allowlist
+                or not isinstance(observed, list)
+                or any(not isinstance(value, str) for value in observed)
+            ):
+                return ()
+            observed_fields = tuple(observed)
+            expected_observed_order = tuple(
+                field for field in expected_allowlist if field in set(observed_fields)
+            )
+            if observed_fields != expected_observed_order:
+                return ()
+
+            if not lines[6].startswith("observation: "):
+                return ()
+            observation = lines[6].removeprefix("observation: ")
+            if observation not in allowed_observations:
+                return ()
+            if (
+                (observation == "public-documents-observed" and not observed_fields)
+                or (
+                    observation
+                    in {
+                        "no-observed-public-fields",
+                        "withheld-until-public-result",
+                        "lookup-unavailable",
+                    }
+                    and observed_fields
+                )
+                or (
+                    observation == "withheld-until-public-result"
+                    and source_type != "ranking"
+                )
+            ):
+                return ()
+
+            seen_source_types.add(source_type)
+            contracts.append(
+                _FirebaseSchemaContract(
+                    festival=festival,
+                    source_type=source_type,
+                    path_kind=path_kind,
+                    path=path,
+                    allowlisted_fields=expected_allowlist,
+                    observed_fields=observed_fields,
+                    observation=observation,
+                    title=expected_title,
+                    source_url=expected_source_url,
+                )
+            )
+        return tuple(contracts)
+
+    @staticmethod
+    def _firebase_schema_fallback_allowed(
+        question: str,
+        contracts: tuple[_FirebaseSchemaContract, ...],
+    ) -> bool:
+        """Limit deterministic projections to broad read-schema overviews.
+
+        The projection cannot establish write permissions, validation rules,
+        nested collections, types, or required fields.  Those questions must
+        be answered from repository/deployed implementation evidence instead.
+        """
+        if not contracts:
+            return False
+        normalized = unicodedata.normalize("NFKC", question).casefold()
+        if not re.search(
+            r"firestore|データ構造|スキーマ|schema|構造|フィールド|fields?",
+            normalized,
+        ):
+            return False
+        if re.search(
+            r"書き込|書込|更新|作成|削除|write|create|update|delete|"
+            r"security|セキュリティ|rules?|ルール|権限|permission|"
+            r"必須|required|型|types?|サブコレクション|nested|"
+            r"features?|geometry|calibrations?|完全な",
+            normalized,
+        ):
+            return False
+        source_types = {contract.source_type for contract in contracts}
+        asks_ranking = bool(
+            re.search(r"ranking|ランキング|大賞企画|y-?1(?:グランプリ)?", normalized)
+        )
+        asks_maps = bool(re.search(r"(?<![a-z])maps?(?![a-z])|地図|マップ", normalized))
+        if asks_ranking and not source_types.issubset({"ranking", "rankingConfig"}):
+            return False
+        if asks_maps and source_types != {"maps"}:
+            return False
+        return asks_ranking or asks_maps
+
+    @staticmethod
+    def _firebase_schema_sources(
+        contracts: tuple[_FirebaseSchemaContract, ...],
+    ) -> list[str]:
+        """Render citations whose title and URL were rebuilt from the registry."""
+        rendered: list[str] = []
+        for contract in contracts:
+            label = (
+                "やがぽん公開読み取り投影: "
+                f"{_escape_citation_component(contract.title)}"
+            )
+            if not citation_reference_is_safe(label, contract.source_url):
+                log.warning("Blocked unsafe Firebase schema citation metadata")
+                continue
+            value = f"[{label}]({contract.source_url})"
+            if value not in rendered:
+                rendered.append(value)
+        return rendered
+
+    @staticmethod
+    def _render_firebase_schema_contracts(
+        contracts: tuple[_FirebaseSchemaContract, ...],
+    ) -> str:
+        """Render a reviewed public projection without model inference."""
+        labels = {
+            "ranking": "大賞企画の公開集計",
+            "rankingConfig": "大賞企画の公開状態",
+            "maps": "公開マップ",
+        }
+        lines = [
+            "# Firestore公開読み取り投影",
+            "",
+            (
+                "以下は、現在デプロイされているやがぽんが対象年度のFirestoreから"
+                "取得できた場合に、公開回答へ投影するフィールドのallowlistだぽん。"
+                "Firestore RulesやIAM上の読み取り許可を示すものではないぽん。"
+            ),
+            "",
+        ]
+        for contract in contracts:
+            path_label = (
+                "ドキュメント"
+                if contract.path_kind == "document_path"
+                else "コレクション"
+            )
+            lines.extend(
+                (
+                    f"## {contract.festival}th "
+                    f"{labels.get(contract.source_type, contract.source_type)}",
+                    f"- {path_label}: `{contract.path}`",
+                    "- 公開回答への投影allowlist: "
+                    + ", ".join(f"`{field}`" for field in contract.allowlisted_fields),
+                )
+            )
+            if contract.observed_fields:
+                lines.append(
+                    "- 現在の公開データで観測したフィールド: "
+                    + ", ".join(f"`{field}`" for field in contract.observed_fields)
+                )
+            elif contract.observation == "withheld-until-public-result":
+                lines.append(
+                    "- 現在の観測フィールド: 結果公開前の得票値を出さないため表示していないぽん。"
+                )
+            elif contract.observation == "lookup-unavailable":
+                lines.append(
+                    "- 現在の観測フィールド: Firestoreを確認できなかったため未確認だぽん。"
+                )
+            else:
+                lines.append(
+                    "- 現在の観測フィールド: 今回取得した公開データでは確認できなかったぽん。"
+                )
+            lines.append("")
+        lines.append(
+            "※ これは現在の公開用allowlistと、取得できた場合の観測フィールド名の一覧だぽん。"
+            "対象年度当時の完全なスキーマや読み書きの権限を証明するものではなく、"
+            "非公開データ、未許可フィールド、サブコレクションを含むFirestore全体の"
+            "完全なスキーマではないぽん。"
+        )
+        return "\n".join(lines).rstrip()
 
     @classmethod
     def _parse_firebase_list_groups(
@@ -3496,6 +3969,24 @@ class CorpusManager:
     @staticmethod
     def _normalized_grounding_text(value: str) -> str:
         normalized = unicodedata.normalize("NFKC", value.casefold())
+        # Source contracts commonly use the Firestore field name ``roles``
+        # while a natural Japanese answer calls the same field a ``ロール``.
+        # Source excerpts also commonly use ``subcollections`` while the
+        # Japanese answer says ``サブコレクション``. Canonicalize only those
+        # structural terms; identifiers and role values remain exact atoms.
+        normalized = normalized.replace("ロール", "roles")
+        normalized = normalized.replace("サブコレクション", "subcollection")
+        normalized = normalized.replace("コレクション", "collection")
+        normalized = re.sub(
+            r"(?<![A-Za-z0-9_])subcollections?(?![A-Za-z0-9_])",
+            "subcollection",
+            normalized,
+        )
+        normalized = re.sub(
+            r"(?<![A-Za-z0-9_])collections?(?![A-Za-z0-9_])",
+            "collection",
+            normalized,
+        )
         return re.sub(r"[\s*_`#>\-\[\]()（）「」『』、,。.!！?？:：;；]", "", normalized)
 
     @classmethod
@@ -3594,14 +4085,14 @@ class CorpusManager:
     @classmethod
     def _recovery_required_atoms(cls, raw_clause: str, clause: str) -> tuple[str, ...]:
         atoms = []
+        atoms.extend(
+            f"{_RECOVERY_SIGNED_NUMBER_PREFIX}{match.group(0)}"
+            for match in re.finditer(r"(?<![\d.])[+-]\d+(?:\.\d+)?", raw_clause)
+        )
         atoms.extend(re.findall(r"\d+", clause))
         atoms.extend(
             cls._normalized_grounding_text(match.group(0))
-            for match in re.finditer(
-                r"[〇零一二三四五六七八九十百千万億兆]+"
-                r"(?:時|分|秒|日|月|年|件|名|人|円|票|割|位|枠|個|台|回)",
-                raw_clause,
-            )
+            for match in _RECOVERY_JAPANESE_NUMBER_UNIT_RE.finditer(raw_clause)
         )
         atoms.extend(
             cls._normalized_grounding_text(match.group(0))
@@ -3615,30 +4106,389 @@ class CorpusManager:
                 atoms.append(atom)
         return tuple(dict.fromkeys(atom for atom in atoms if atom))
 
+    @classmethod
+    def _recovery_role_atoms(cls, raw_claim: str) -> tuple[str, ...]:
+        """Return role values that must coexist in one selected evidence body."""
+        if not _RECOVERY_ROLE_MARKER_RE.search(raw_claim):
+            return ()
+
+        quoted = [
+            cls._normalized_grounding_text(match.group(1))
+            for match in _RECOVERY_QUOTED_VALUE_RE.finditer(raw_claim)
+        ]
+        quoted = [value for value in quoted if value]
+        if quoted:
+            return tuple(dict.fromkeys(quoted))
+
+        marker = _RECOVERY_ROLE_MARKER_RE.search(raw_claim)
+        assert marker is not None
+        values = raw_claim[marker.end() :]
+        values = re.sub(r"^(?:名)?(?:は|が|に|:|：)?[、,\s]*", "", values)
+        values = _RECOVERY_ROLE_VALUE_SUFFIX_RE.sub("", values.strip())
+        if not values:
+            return ()
+
+        parts = re.split(r"(?:または|もしくは|あるいは)", values)
+        atoms = [
+            cls._normalized_grounding_text(part)
+            for part in parts
+            if cls._normalized_grounding_text(part)
+        ]
+        # Long prose after a role marker is not a stable identifier. In that
+        # case ordinary atom and bigram verification remains fail-closed.
+        if not atoms or any(len(atom) > 32 for atom in atoms):
+            return ()
+        return tuple(dict.fromkeys(atoms))
+
+    @classmethod
+    def _recovery_permission_atoms(cls, raw_claim: str) -> tuple[str, ...]:
+        """Extract permission actors independently of role-marker word order."""
+        atoms = list(cls._recovery_role_atoms(raw_claim))
+        if not (
+            _RECOVERY_ROLE_MARKER_RE.search(raw_claim)
+            or _RECOVERY_PERMISSION_PREDICATE_RE.search(raw_claim)
+        ):
+            return tuple(atoms)
+
+        for connector in re.finditer(r"(?:または|もしくは|あるいは)", raw_claim):
+            left = raw_claim[: connector.start()]
+            right = raw_claim[connector.end() :]
+            left = re.split(r"[、,。.!！？?「『」』\s]+", left)[-1]
+            left = re.split(r"(?:は|が|を|に|で|の)", left)[-1]
+            right = right.lstrip("「『 \t")
+            right = re.split(
+                r"(?:は|が|を|に|で|だ|です|である)|[、,。.!！？?「『」』\s]+",
+                right,
+                maxsplit=1,
+            )[0]
+            for value in (left, right):
+                atom = cls._normalized_grounding_text(value)
+                if atom and len(atom) <= 32 and not re.search(r"\d", atom):
+                    atoms.append(atom)
+
+        if _RECOVERY_PERMISSION_PREDICATE_RE.search(raw_claim):
+            for match in _RECOVERY_PERMISSION_ACTOR_RE.finditer(raw_claim):
+                actor = match.group("actor")
+                actor = re.split(r"[、,。.!！？?「『」』\s]+", actor)[-1]
+                actor = re.split(r"(?:は|が|を|に|で|の)", actor)[-1]
+                atom = cls._normalized_grounding_text(actor)
+                if (
+                    atom
+                    and len(atom) <= 32
+                    and not re.search(r"\d", atom)
+                    and "または" not in actor
+                    and "もしくは" not in actor
+                    and "あるいは" not in actor
+                    and not _RECOVERY_ROLE_MARKER_RE.search(actor)
+                ):
+                    atoms.append(atom)
+
+            for match in _RECOVERY_PERMISSION_POST_ACTOR_RE.finditer(raw_claim):
+                actor = match.group("actor").strip("「『 」")
+                actor = re.sub(r"(?:だ|です|である)$", "", actor)
+                if any(
+                    connector in actor
+                    for connector in ("または", "もしくは", "あるいは")
+                ):
+                    continue
+                atom = cls._normalized_grounding_text(actor)
+                if atom and len(atom) <= 32 and not re.search(r"\d", atom):
+                    atoms.append(atom)
+
+        return tuple(dict.fromkeys(atom for atom in atoms if atom))
+
+    @classmethod
+    def _recovery_retention_state(cls, value: str) -> str | None:
+        """Return retained/non-retained only for explicit lifecycle predicates."""
+        normalized = cls._normalized_grounding_text(value)
+        states = set()
+        if "削除" in normalized:
+            states.add(
+                "retained"
+                if _RECOVERY_NEGATED_DELETION_RE.search(normalized)
+                else "not_retained"
+            )
+        if _RECOVERY_NEGATIVE_RETENTION_RE.search(normalized):
+            states.add("not_retained")
+        if _RECOVERY_POSITIVE_RETENTION_RE.search(normalized):
+            states.add("retained")
+        if len(states) > 1:
+            return "conflicting"
+        return next(iter(states), None)
+
+    @classmethod
+    def _recovery_retention_conflicts(
+        cls,
+        raw_clause: str,
+        raw_evidence: str,
+    ) -> bool:
+        """Reject lifecycle claims not bound to the same concrete object."""
+        answer_state = cls._recovery_retention_state(raw_clause)
+        if answer_state is None:
+            return False
+        if answer_state == "conflicting":
+            return True
+        answer_scopes = {
+            cls._normalized_grounding_text(match.group(0))
+            for match in _RECOVERY_RETENTION_SCOPE_RE.finditer(raw_clause)
+        }
+        if not answer_scopes:
+            return False
+
+        matched_scope = False
+        for segment in re.split(r"[。.!！?？\n]+", raw_evidence):
+            evidence_scopes = {
+                cls._normalized_grounding_text(match.group(0))
+                for match in _RECOVERY_RETENTION_SCOPE_RE.finditer(segment)
+            }
+            if not any(
+                answer_scope in evidence_scope or evidence_scope in answer_scope
+                for answer_scope in answer_scopes
+                for evidence_scope in evidence_scopes
+            ):
+                continue
+            matched_scope = True
+            evidence_state = cls._recovery_retention_state(segment)
+            if evidence_state == "conflicting":
+                return True
+            if evidence_state is not None and evidence_state != answer_state:
+                return True
+        # Similar lifecycle wording about another stored artifact must never
+        # authorize a claim about PCM, transcripts, minutes, or vice versa.
+        return not matched_scope
+
+    @classmethod
+    def _recovery_critical_polarity_state(cls, value: str) -> tuple[str | None, ...]:
+        """Extract publication/permission polarity without substring reversal."""
+        normalized = cls._normalized_grounding_text(value)
+        states: list[str | None] = []
+        for negative_pattern, positive_pattern in _RECOVERY_CRITICAL_POLARITY_PATTERNS:
+            negative = bool(negative_pattern.search(normalized))
+            positive_surface = negative_pattern.sub("", normalized)
+            positive = bool(positive_pattern.search(positive_surface))
+            if negative and positive:
+                states.append("conflicting")
+            elif negative:
+                states.append("negative")
+            elif positive:
+                states.append("positive")
+            else:
+                states.append(None)
+        return tuple(states)
+
+    @classmethod
+    def _recovery_critical_polarity_conflicts(
+        cls,
+        raw_clause: str,
+        raw_evidence: str,
+    ) -> bool:
+        answer_states = cls._recovery_critical_polarity_state(raw_clause)
+        evidence_states = cls._recovery_critical_polarity_state(raw_evidence)
+        for answer_state, evidence_state in zip(
+            answer_states,
+            evidence_states,
+            strict=True,
+        ):
+            if answer_state == "conflicting" or evidence_state == "conflicting":
+                return True
+            if (
+                answer_state is not None
+                and evidence_state is not None
+                and answer_state != evidence_state
+            ):
+                return True
+        return False
+
     @staticmethod
-    def _recovery_atom_in_evidence(atom: str, evidence: str) -> bool:
+    def _recovery_subcollection_state(value: str) -> str | None:
+        """Return the asserted existence state for a subcollection statement."""
+        surface = unicodedata.normalize("NFKC", value.casefold())
+        states = set()
+        if _RECOVERY_SUBCOLLECTION_NEGATIVE_RE.search(surface):
+            states.add("absent")
+        if _RECOVERY_SUBCOLLECTION_POSITIVE_RE.search(surface):
+            states.add("present")
+        if len(states) > 1:
+            return "conflicting"
+        return next(iter(states), None)
+
+    @classmethod
+    def _recovery_subcollection_conflicts(
+        cls,
+        raw_clause: str,
+        raw_evidence: str,
+    ) -> bool:
+        answer_state = cls._recovery_subcollection_state(raw_clause)
+        if answer_state is None:
+            return False
+        if answer_state == "conflicting":
+            return True
+        evidence_state = cls._recovery_subcollection_state(raw_evidence)
+        return evidence_state == "conflicting" or (
+            evidence_state is not None and evidence_state != answer_state
+        )
+
+    @classmethod
+    def _recovery_permission_atom_in_evidence(
+        cls,
+        atom: str,
+        raw_evidence: str,
+        normalized_evidence: str,
+    ) -> bool:
+        """Match a permission actor as a value, never as part of another role."""
+        evidence_atoms = cls._recovery_permission_atoms(raw_evidence)
+        if evidence_atoms:
+            return atom in evidence_atoms
+
+        surface = unicodedata.normalize("NFKC", raw_evidence.casefold())
+        if re.fullmatch(r"[a-z0-9_.:/-]+", atom, re.IGNORECASE):
+            return bool(
+                re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(atom)}(?![A-Za-z0-9_])",
+                    surface,
+                    re.IGNORECASE,
+                )
+            )
+
+        if atom not in normalized_evidence:
+            return False
+        left_boundaries = (
+            "「",
+            "『",
+            "（",
+            "(",
+            "[",
+            "【",
+            "、",
+            ",",
+            ":",
+            "：",
+            "=",
+            " ",
+            "\n",
+            "\t",
+            "は",
+            "が",
+            "を",
+            "に",
+            "の",
+            "で",
+            "と",
+            "または",
+            "もしくは",
+            "あるいは",
+        )
+        right_boundaries = (
+            "」",
+            "』",
+            "）",
+            ")",
+            "]",
+            "】",
+            "、",
+            ",",
+            "。",
+            ".",
+            ":",
+            "：",
+            " ",
+            "\n",
+            "\t",
+            "は",
+            "が",
+            "を",
+            "に",
+            "の",
+            "で",
+            "と",
+            "だ",
+            "です",
+            "である",
+            "だけ",
+            "のみ",
+            "または",
+            "もしくは",
+            "あるいは",
+        )
+        for match in re.finditer(re.escape(atom), surface, re.IGNORECASE):
+            left = surface[: match.start()]
+            right = surface[match.end() :]
+            if (not left or left.endswith(left_boundaries)) and (
+                not right or right.startswith(right_boundaries)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _recovery_atom_in_evidence(
+        atom: str,
+        evidence: str,
+        raw_evidence: str = "",
+    ) -> bool:
+        if atom.startswith(_RECOVERY_SIGNED_NUMBER_PREFIX):
+            signed_number = atom.removeprefix(_RECOVERY_SIGNED_NUMBER_PREFIX)
+            raw_numbers = re.findall(
+                r"(?<![\d.])[+-]\d+(?:\.\d+)?",
+                unicodedata.normalize("NFKC", raw_evidence),
+            )
+            return signed_number in raw_numbers
         if atom.isdecimal():
             return atom in re.findall(r"\d+", evidence)
+        if _RECOVERY_JAPANESE_NUMBER_UNIT_RE.fullmatch(atom):
+            return atom in _RECOVERY_JAPANESE_NUMBER_UNIT_RE.findall(evidence)
         # A positive state must not be authorized solely by the corresponding
-        # negative word containing it as a suffix.
-        opposites = {
-            "公開": "非公開",
-            "有効": "無効",
-            "許可": "不許可",
-            "可能": "不可能",
+        # negative expression containing it as a substring.
+        negative_patterns = {
+            "公開": r"(?:非公開|未公開|公開(?:予定)?(?:では|じゃ|は)?ない)",
+            "有効": r"(?:無効|有効(?:では|じゃ|は)?ない)",
+            "許可": r"(?:不許可|未許可|許可(?:され|し)?(?:てい)?ない|許可(?:では|じゃ|は)?ない)",
+            "可能": r"(?:不可能|可能(?:では|じゃ|は)?ない)",
+            "確定": r"(?:未確定|確定(?:し|され)?(?:てい)?ない|確定(?:では|じゃ|は)?ない)",
         }
-        if opposite := opposites.get(atom):
-            evidence = evidence.replace(opposite, "")
+        if pattern := negative_patterns.get(atom):
+            evidence = re.sub(pattern, "", evidence)
         return atom in evidence
 
     @classmethod
-    def _recovery_clause_supported(cls, raw_clause: str, clause: str, evidence: str) -> bool:
+    def _recovery_clause_supported(
+        cls,
+        raw_clause: str,
+        clause: str,
+        evidence: str,
+        raw_evidence: str = "",
+        polarity_clause: str | None = None,
+    ) -> bool:
+        if raw_evidence and cls._recovery_retention_conflicts(
+            polarity_clause or raw_clause,
+            raw_evidence,
+        ):
+            return False
+        if raw_evidence and cls._recovery_critical_polarity_conflicts(
+            raw_clause,
+            raw_evidence,
+        ):
+            return False
+        if raw_evidence and cls._recovery_subcollection_conflicts(
+            raw_clause,
+            raw_evidence,
+        ):
+            return False
+        if (
+            re.search(r"サブコレクション|subcollections?", raw_clause, re.IGNORECASE)
+            and cls._recovery_subcollection_state(raw_clause) is None
+        ):
+            # Unknown grammatical forms must not fall through to fuzzy
+            # character overlap for a structural existence assertion.
+            return False
+        atoms = cls._recovery_required_atoms(raw_clause, clause)
+        if any(
+            not cls._recovery_atom_in_evidence(atom, evidence, raw_evidence)
+            for atom in atoms
+        ):
+            return False
+
         if clause in evidence:
             return True
-
-        atoms = cls._recovery_required_atoms(raw_clause, clause)
-        if any(not cls._recovery_atom_in_evidence(atom, evidence) for atom in atoms):
-            return False
 
         clause_bigrams = cls._grounding_bigrams(clause)
         if not clause_bigrams:
@@ -3649,6 +4499,34 @@ class CorpusManager:
             len(matched) >= minimum_matches
             and len(matched) / len(clause_bigrams)
             >= _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
+        )
+
+    @classmethod
+    def _elliptical_non_retention_supported(
+        cls,
+        clause: str,
+        previous_clause: tuple[str, str] | None,
+        evidence: str,
+        raw_evidence: str,
+        polarity_clause: str | None = None,
+    ) -> bool:
+        """Allow only deletion-backed, subject-preserving non-retention wording."""
+        if not _RECOVERY_ELLIPTICAL_NON_RETENTION_RE.fullmatch(clause):
+            return False
+        if previous_clause is None:
+            return False
+
+        previous_raw, previous = previous_clause
+        previous_positive = _RECOVERY_NEGATED_DELETION_RE.sub("", previous)
+        evidence_positive = _RECOVERY_NEGATED_DELETION_RE.sub("", evidence)
+        if "削除" not in previous_positive or "削除" not in evidence_positive:
+            return False
+        return cls._recovery_clause_supported(
+            previous_raw,
+            previous,
+            evidence,
+            raw_evidence,
+            polarity_clause,
         )
 
     @classmethod
@@ -3664,18 +4542,80 @@ class CorpusManager:
         body; critical values must be present in that same body.
         """
         claims = cls._grounding_claims(answer_text)
-        evidence = [cls._normalized_grounding_text(value) for value in evidence_texts]
-        evidence = [value for value in evidence if value]
+        evidence = []
+        for value in evidence_texts:
+            normalized = cls._normalized_grounding_text(value)
+            if normalized:
+                evidence.append((value, normalized))
         if not claims or not evidence:
             return False
 
         for claim in claims:
+            permission_atoms = cls._recovery_permission_atoms(claim)
+            if _RECOVERY_PERMISSION_PREDICATE_RE.search(claim) and not permission_atoms:
+                # A permission claim without a bound actor is unsafe to
+                # regenerate.  Do not let generic lexical overlap authorize it.
+                return False
+            claim_evidence = evidence
+            if permission_atoms:
+                claim_evidence = [
+                    (raw_source, normalized_source)
+                    for raw_source, normalized_source in evidence
+                    if all(
+                        cls._recovery_permission_atom_in_evidence(
+                            atom,
+                            raw_source,
+                            normalized_source,
+                        )
+                        for atom in permission_atoms
+                    )
+                ]
+                if not claim_evidence:
+                    return False
+
+            previous_clause = None
             for raw_clause, clause in cls._grounding_clauses(claim):
+                polarity_clause = raw_clause
+                needs_previous_context = False
+                if (
+                    previous_clause is not None
+                    and cls._recovery_retention_state(raw_clause) is not None
+                    and not _RECOVERY_RETENTION_SCOPE_RE.search(raw_clause)
+                    and _RECOVERY_RETENTION_SCOPE_RE.search(previous_clause[0])
+                ):
+                    polarity_clause = f"{previous_clause[0]}、{raw_clause}"
+                    needs_previous_context = True
+
                 if not any(
-                    cls._recovery_clause_supported(raw_clause, clause, source)
-                    for source in evidence
+                    (
+                        not needs_previous_context
+                        or cls._recovery_clause_supported(
+                            previous_clause[0],
+                            previous_clause[1],
+                            normalized_source,
+                            raw_source,
+                        )
+                    )
+                    and (
+                        cls._recovery_clause_supported(
+                            raw_clause,
+                            clause,
+                            normalized_source,
+                            raw_source,
+                            polarity_clause,
+                        )
+                        or cls._elliptical_non_retention_supported(
+                            clause,
+                            previous_clause,
+                            normalized_source,
+                            raw_source,
+                            polarity_clause,
+                        )
+                    )
+                    for raw_source, normalized_source in claim_evidence
                 ):
                     return False
+                previous_clause = (raw_clause, clause)
         return True
 
     @staticmethod
@@ -3788,6 +4728,14 @@ class CorpusManager:
                     # become visible merely because File Search returned it.
                     rejected_supported_chunks += 1
                     continue
+            if (
+                question_kind is not None
+                and not allows_unreviewed_evidence(question_kind)
+                and authority in CURRENT_IMPLEMENTATION_AUTHORITIES
+                and status not in CURRENT_STATUSES
+            ):
+                rejected_supported_chunks += 1
+                continue
             if (
                 question_kind is not None
                 and not allows_unreviewed_evidence(question_kind)

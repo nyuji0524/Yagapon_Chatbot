@@ -29,6 +29,10 @@ AUTHORITY_LABELS = {
 }
 
 CURRENT_STATUSES = {"deployed", "current", "active", "approved", "verified"}
+CURRENT_IMPLEMENTATION_AUTHORITIES = {
+    "deployed_implementation",
+    "repository_context",
+}
 
 
 def is_history_narrative_source(source_type: str) -> bool:
@@ -46,11 +50,13 @@ def is_history_narrative_source(source_type: str) -> bool:
 QUESTION_KIND_RULES = (
     (
         QuestionKind.AUTHORIZATION,
-        r"権限|認可|permission|allow\s+(?:read|write)|アクセス(?:権|制御)|誰が.+(?:でき|可能)",
+        r"権限|認可|permission|allow\s+(?:read|write)|アクセス(?:権|制御)|誰が.+(?:でき|可能)|"
+        r"(?:管理|操作|編集|利用).{0,12}(?:でき|可能).{0,12}(?:ロール|役職)",
     ),
     (
         QuestionKind.DATA_CONTRACT,
         r"保存先|どこに保存|コレクション|フィールド|スキーマ|schema|データ構造|型定義|migration|"
+        r"(?:録音|PCM|文字起こし).{0,20}(?:保存|保持|削除|残)|"
         r"Firestore|firestore|(?:ranking|map|データ|DB|db).{0,12}(?:構造|形式)|"
         r"(?:構造|形式).{0,12}(?:ranking|map|データ|DB|db)",
     ),
@@ -168,7 +174,20 @@ _DIRECT_AUTHORITIES = {
 
 
 def can_answer_directly(kind: QuestionKind, authority: str, status: str) -> bool:
-    return authority in _DIRECT_AUTHORITIES[kind] and status not in {"draft", "raw", "deprecated"}
+    if authority not in _DIRECT_AUTHORITIES[kind] or status in {
+        "draft",
+        "raw",
+        "deprecated",
+    }:
+        return False
+    # An implementation snapshot is only evidence of current behavior when
+    # the indexer positively identified it as current/deployed. Legacy rows
+    # with missing status and historical snapshots must not establish a
+    # present-day authorization or data contract merely because their
+    # authority label is otherwise allowed for that question kind.
+    if authority in CURRENT_IMPLEMENTATION_AUTHORITIES:
+        return status in CURRENT_STATUSES
+    return True
 
 
 def allows_unreviewed_evidence(kind: QuestionKind) -> bool:

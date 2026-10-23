@@ -30,7 +30,7 @@ from bot.corpus import (
     trusted_festival_mapping_response,
 )
 from bot.festival import CalendarWindow
-from bot.firebase_knowledge import FirebaseEvidence
+from bot.firebase_knowledge import FirebaseEvidence, FirebaseKnowledgeReader
 from bot.knowledge_authority import QuestionKind
 from bot.knowledge_pipeline import (
     KnowledgePipelineBusy,
@@ -142,6 +142,41 @@ def test_non_history_context_keeps_direct_authority_priority():
     )
 
     assert selected == [deployed]
+
+
+@pytest.mark.parametrize(
+    "question_kind",
+    (QuestionKind.AUTHORIZATION, QuestionKind.DATA_CONTRACT),
+)
+def test_current_context_prioritizes_deployed_over_wordier_repository_candidates(
+    question_kind,
+):
+    repository_hits = [
+        lexical_hit(
+            f"repository-{index}",
+            score=1_000 - index,
+            authority="repository_context",
+            source_type="source_code",
+            status="current",
+        )
+        for index in range(20)
+    ]
+    deployed = lexical_hit(
+        "deployed-contract",
+        score=100,
+        authority="deployed_implementation",
+        source_type="source_code",
+        status="deployed",
+    )
+
+    selected = _select_lexical_context_hits(
+        [*repository_hits, deployed],
+        question_kind=question_kind,
+        limit=4,
+    )
+
+    assert selected[0] == deployed
+    assert len(selected) == 4
 
 
 def test_small_history_context_limit_does_not_replace_best_hit():
@@ -2527,6 +2562,263 @@ async def test_data_contract_firebase_sample_still_searches_source_code(corpus_m
 
 
 @pytest.mark.asyncio
+async def test_map_data_contract_falls_back_to_reviewed_public_projection(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "yagamy/27/maps/yagami-campus"
+        ),
+        "fields": {
+            "mapId": {"stringValue": "yagami-campus"},
+            "status": {"stringValue": "published"},
+            "schemaVersion": {"integerValue": "1"},
+            "floorId": {"stringValue": "campus"},
+        },
+    }
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [document],
+        observation="public-documents-observed",
+    )
+    reader.evidence_for = AsyncMock(return_value=[schema])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("source search unavailable")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのmapのFirestore構造ってどうなってた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`yagamy/27/maps`" in result.text
+    assert "`mapId`" in result.text
+    assert "`schemaVersion`" in result.text
+    assert "`floorId`" in result.text
+    assert "公開回答への投影allowlist" in result.text
+    assert "Firestore RulesやIAM上の読み取り許可を示すものではない" in result.text
+    assert "読み取りを許可された" not in result.text
+    assert "読み取り許可フィールド" not in result.text
+    assert "完全なスキーマではない" in result.text
+    assert len(result.citations) == 1
+    assert "やがぽん公開読み取り投影" in result.citations[0]
+    assert "Firebase現在値" not in result.citations[0]
+    corpus_manager._client.aio.models.generate_content.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ranking_data_contract_falls_back_to_collection_and_config_paths(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    ranking = reader._schema_contract_evidence(
+        "ranking",
+        27,
+        [],
+        observation="withheld-until-public-result",
+    )
+    config = reader._schema_contract_evidence(
+        "rankingConfig",
+        27,
+        [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": "voting"}},
+        }],
+        observation="public-documents-observed",
+    )
+    reader.evidence_for = AsyncMock(return_value=[ranking, config])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ranking", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("source search unavailable")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのrankingの構造はどうなっていた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`yagamy/27/ranking`" in result.text
+    assert "`yagamy/27/config/ranking`" in result.text
+    assert "`score`" in result.text
+    assert "結果公開前の得票値を出さない" in result.text
+    assert "99" not in result.text
+    assert len(result.citations) == 2
+    corpus_manager._client.aio.models.generate_content.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_data_contract_prefers_current_repository_contract_over_projection(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [],
+        observation="no-observed-public-fields",
+    )
+    source_hit = LexicalHit(
+        document_key="repo-map-contract",
+        channel_name="yagamifes-firebase:functions/yagamy/mapCalibration.js",
+        festival=27,
+        source_url=(
+            "https://github.com/YagamiFes-IT/yagamifes-firebase/"
+            "blob/main/functions/yagamy/mapCalibration.js"
+        ),
+        excerpt=(
+            "yagamy/27/maps/{mapId} has nested features and calibrations "
+            "subcollections in the current implementation."
+        ),
+        score=500,
+        authority="repository_context",
+        status="current",
+        source_type="source_code",
+        access_scope="guild",
+    )
+    reader.evidence_for = AsyncMock(return_value=[schema])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[source_hit])
+    corpus_manager._recover_from_lexical_hits = AsyncMock(
+        return_value=(
+            "`yagamy/27/maps/{mapId}` の下に `features` と `calibrations` の"
+            "サブコレクションがあるぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:exact:repo-map-contract]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        )
+    )
+    corpus_manager._recovered_claims_supported = Mock(return_value=True)
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=AssertionError("direct current repository evidence should answer")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのmapのFirestore構造ってどうなってた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`features`" in result.text
+    assert "`calibrations`" in result.text
+    assert "完全なスキーマではない" not in result.text
+    assert result.lexical_keys == ("repo-map-contract",)
+    corpus_manager._recover_from_lexical_hits.assert_awaited_once()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+
+
+def test_schema_renderer_rejects_forged_non_registry_path(monkeypatch, corpus_manager):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [],
+        observation="no-observed-public-fields",
+    )
+    forged = FirebaseEvidence(
+        document_key=schema.document_key,
+        title=schema.title,
+        body=schema.body.replace(
+            "collection_path: yagamy/27/maps",
+            "collection_path: users/private/maps",
+        ),
+        source_url=schema.source_url,
+        authority=schema.authority,
+        status=schema.status,
+    )
+
+    assert corpus_manager._parse_firebase_schema_contracts([forged]) == ()
+
+
+def test_schema_renderer_rejects_wrong_festival_and_untrusted_citation(
+    monkeypatch,
+    corpus_manager,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    schema = reader._schema_contract_evidence(
+        "maps",
+        28,
+        [],
+        observation="no-observed-public-fields",
+    )
+
+    assert corpus_manager._parse_firebase_schema_contracts(
+        [schema],
+        expected_festival=27,
+    ) == ()
+
+    forged_url = FirebaseEvidence(
+        document_key=schema.document_key,
+        title=schema.title,
+        body=schema.body,
+        source_url="https://attacker.example/login",
+        authority=schema.authority,
+        status=schema.status,
+    )
+    assert corpus_manager._parse_firebase_schema_contracts(
+        [forged_url],
+        expected_festival=28,
+    ) == ()
+
+
+def test_schema_projection_fallback_rejects_unrepresented_contract_details(
+    monkeypatch,
+    corpus_manager,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [],
+        observation="no-observed-public-fields",
+    )
+    contracts = corpus_manager._parse_firebase_schema_contracts(
+        [schema],
+        expected_festival=27,
+    )
+
+    assert corpus_manager._firebase_schema_fallback_allowed(
+        "27thのmapのFirestore構造は？",
+        contracts,
+    )
+    assert not corpus_manager._firebase_schema_fallback_allowed(
+        "27thのmap features.geometryの型と必須条件は？",
+        contracts,
+    )
+    assert not corpus_manager._firebase_schema_fallback_allowed(
+        "27thのmapでクライアントが書き込み可能なフィールドは？",
+        contracts,
+    )
+
+
+@pytest.mark.asyncio
 async def test_usage_question_uses_firebase_only_as_context_and_searches_manual(corpus_manager):
     evidence = FirebaseEvidence(
         document_key="firebase:yagamy/27/standbyPassEvents/event-1",
@@ -3139,6 +3431,90 @@ def test_response_sources_include_only_chunks_used_by_grounding_supports(corpus_
     ]
 
 
+@pytest.mark.parametrize(
+    "authority",
+    ("repository_context", "deployed_implementation"),
+)
+@pytest.mark.parametrize("status", ("historical", "unknown"))
+def test_current_grounding_rejects_stale_implementation_status(
+    corpus_manager,
+    authority,
+    status,
+):
+    context = SimpleNamespace(
+        title="stale implementation",
+        text="整理券の管理権限は広報にある。",
+        uri="https://github.example/stale",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "repo:rules"},
+            {"key": "authority", "string_value": authority},
+            {"key": "status", "string_value": status},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "access_scope", "string_value": "guild"},
+            {"key": "festival", "numeric_value": 27},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
+            )
+        ]
+    )
+
+    audit = corpus_manager._response_grounding_audit(
+        response,
+        question_kind=QuestionKind.AUTHORIZATION,
+        expected_festival=27,
+    )
+
+    assert audit.sources == []
+    assert audit.evidence == ()
+    assert audit.rejected_supported_chunks == 1
+
+
+def test_history_grounding_keeps_historical_repository_context(corpus_manager):
+    context = SimpleNamespace(
+        title="historical implementation",
+        text="2025年に整理券Rulesを変更した。",
+        uri="https://github.example/history",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "repo:rules"},
+            {"key": "authority", "string_value": "repository_context"},
+            {"key": "status", "string_value": "historical"},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "access_scope", "string_value": "guild"},
+            {"key": "festival", "numeric_value": 27},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
+            )
+        ]
+    )
+
+    audit = corpus_manager._response_grounding_audit(
+        response,
+        question_kind=QuestionKind.HISTORY,
+        expected_festival=27,
+    )
+
+    assert len(audit.evidence) == 1
+    assert audit.rejected_supported_chunks == 0
+
+
 def test_explicit_empty_grounding_supports_do_not_cite_retrieval_candidates(corpus_manager):
     context = SimpleNamespace(
         title="未使用候補",
@@ -3531,6 +3907,360 @@ def test_recovered_claims_must_be_supported_by_the_selected_evidence_body(
         "受付は10時開始だぽん。",
         ["受付は9時開始。"],
     ) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence"),
+    [
+        ("9時だぽん。", "19時。"),
+        ("27件だぽん。", "127件。"),
+        ("1位だぽん。", "11位。"),
+        ("公開だぽん。", "非公開。"),
+        ("許可だぽん。", "不許可。"),
+        ("可能だぽん。", "不可能。"),
+        ("非公開だぽん。", "公開。"),
+        ("未公開だぽん。", "公開。"),
+        ("不許可だぽん。", "許可。"),
+        ("未許可だぽん。", "許可。"),
+        ("不可能だぽん。", "可能。"),
+        ("一位だぽん。", "十一位。"),
+        ("十件だぽん。", "百十件。"),
+        ("整理券は四組だぽん。", "整理券は五組である。"),
+        ("割合は三パーセントだぽん。", "割合は二パーセントである。"),
+        ("候補は三つだぽん。", "候補は二つである。"),
+        ("score=-1だぽん。", "score=1。"),
+        ("公開予定だぽん。", "公開予定ではない。"),
+        ("有効だぽん。", "有効ではない。"),
+        ("確定だぽん。", "未確定。"),
+    ],
+)
+def test_recovered_claims_check_critical_atoms_before_substring_matches(
+    corpus_manager,
+    answer,
+    evidence,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is False
+
+
+def test_recovered_claims_accept_natural_wording_within_selected_authority(
+    corpus_manager,
+):
+    recording_contract = "正常処理後の生録音PCMは削除する。"
+    access_contract = (
+        "整理券機能全体の管理は、Firestoreのsupport userのrolesに"
+        "「神」または「整理券管理者」を持つ利用者だけが行う。"
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+        [recording_contract],
+    ) is True
+    assert corpus_manager._recovered_claims_supported(
+        "27thで整理券機能全体を管理できたロールは、"
+        "「神」または「整理券管理者」だぽん。",
+        ["27thの" + access_contract],
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "正常に処理が終わった録音PCMは残るぽん。",
+        "正常に処理が終わったPCMは残るぽん。",
+        "正常に処理が終わった録音PCMは削除するわけではないぽん。",
+        "正常に処理が終わった録音PCMは削除されることはないぽん。",
+        "録音PCMは削除されても残るぽん。",
+        "録音PCMは削除するが残るぽん。",
+        "録音PCMは削除対象外だぽん。",
+        "録音PCMは削除不要だぽん。",
+        "録音PCMは削除を実施しないぽん。",
+        "録音PCMは削除されるものではないぽん。",
+    ],
+)
+def test_recovered_recording_claims_reject_opposite_retention_polarity(
+    corpus_manager,
+    answer,
+):
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        ["正常処理後の生録音PCMは削除する。"],
+    ) is False
+
+
+def test_recovered_recording_claims_keep_anaphoric_polarity_on_the_pcm_subject(
+    corpus_manager,
+):
+    assert corpus_manager._recovered_claims_supported(
+        "録音PCMは削除され、残るぽん。",
+        ["録音PCMは削除する。メタデータは残る。"],
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence"),
+    [
+        (
+            "文字起こしは削除され、残らないぽん。",
+            "録音PCMは削除され、残らない。",
+        ),
+        (
+            "議事録は保存されるぽん。",
+            "文字起こしは保存される。",
+        ),
+    ],
+)
+def test_recovered_retention_claims_require_the_same_artifact_subject(
+    corpus_manager,
+    answer,
+    evidence,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence", "expected"),
+    [
+        (
+            "27thでは神または整理券管理者が管理ロールだぽん。",
+            "27thでは神または整理券管理者が管理ロールである。",
+            True,
+        ),
+        (
+            "27thでは神または広報が管理ロールだぽん。",
+            "27thでは神または整理券管理者が管理ロールである。",
+            False,
+        ),
+        (
+            "27thで整理券機能全体を管理できるrolesは神または整理券管理者だぽん。",
+            "27thで整理券機能全体を管理できるrolesは神または整理券管理者である。",
+            True,
+        ),
+        (
+            "27thで整理券機能全体を管理できるrolesは広報または整理券管理者だぽん。",
+            "27thで整理券機能全体を管理できるrolesは神または整理券管理者である。",
+            False,
+        ),
+        (
+            "神は整理券機能全体を管理できるぽん。",
+            "神は整理券機能全体を管理できる。",
+            True,
+        ),
+        (
+            "広報は整理券機能全体を管理できるぽん。",
+            "神または整理券管理者だけが整理券機能全体を管理できる。",
+            False,
+        ),
+        (
+            "整理券機能全体を管理できるのは神だぽん。",
+            "整理券機能全体を管理できるのは神である。",
+            True,
+        ),
+        (
+            "整理券機能全体を管理できるのは広報だぽん。",
+            "整理券機能全体を管理できるのは神である。",
+            False,
+        ),
+        (
+            "27thで管理できるロールは「神」だぽん。",
+            "27thで管理できるロールは「神奈川担当」である。",
+            False,
+        ),
+        (
+            "27thで管理できるロールは「管理者」だぽん。",
+            "27thで管理できるロールは「整理券管理者」である。",
+            False,
+        ),
+    ],
+)
+def test_recovered_permission_claims_bind_actors_regardless_of_marker_order(
+    corpus_manager,
+    answer,
+    evidence,
+    expected,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is expected
+
+
+def test_recovered_permission_claims_do_not_compose_actor_and_action_sources(
+    corpus_manager,
+):
+    assert corpus_manager._recovered_claims_supported(
+        "広報は整理券機能全体を管理できるぽん。",
+        ["担当部署は広報である。", "神は整理券機能全体を管理できる。"],
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence"),
+    [
+        (
+            "広報も整理券機能全体を管理可能だぽん。",
+            "神も整理券機能全体を管理可能である。",
+        ),
+        (
+            "広報であれば整理券機能全体を管理可能だぽん。",
+            "神であれば整理券機能全体を管理可能である。",
+        ),
+        (
+            "神も整理券機能全体を管理できないぽん。",
+            "神も整理券機能全体を管理できる。",
+        ),
+        (
+            "神も整理券機能全体を管理可能だぽん。",
+            "神も整理券機能全体を管理不可能である。",
+        ),
+    ],
+)
+def test_recovered_permission_claims_bind_common_japanese_actor_particles(
+    corpus_manager,
+    answer,
+    evidence,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is False
+
+
+def test_recovered_claims_allow_only_bounded_subcollection_translation(
+    corpus_manager,
+):
+    answer = (
+        "`yagamy/27/maps/{mapId}` の下に `features` と `calibrations` の"
+        "サブコレクションがあるぽん。"
+    )
+    repository_evidence = (
+        "`yagamy/27/maps/{mapId}` has nested `features` and `calibrations` "
+        "subcollections."
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [repository_evidence],
+    ) is True
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has nested features subcollections.",
+            "yagamy/27/maps/{mapId} has nested calibrations subcollections.",
+        ],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has nested features and calibrations collections."
+        ],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has features and calibrations, "
+            "but they are not subcollections."
+        ],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has features and calibrations; "
+            "no subcollections exist."
+        ],
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "`features` is a subcollectionぽん。",
+        "`features` はサブコレクションですぽん。",
+        "`features` はサブコレクションとして保存されるぽん。",
+    ],
+)
+def test_recovered_subcollection_claims_reject_negated_evidence(
+    corpus_manager,
+    answer,
+):
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        ["`features` exists but is not a subcollection."],
+    ) is False
+
+
+def test_recovered_claim_paraphrases_keep_negation_and_role_values_fail_closed(
+    corpus_manager,
+):
+    recording_contract = "正常処理後の生録音PCMは削除する。"
+    access_contract = (
+        "27thの整理券機能全体の管理は、Firestoreのsupport userのrolesに"
+        "「神」または「整理券管理者」を持つ利用者だけが行う。"
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除されない、残らないぽん。",
+        [recording_contract],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+        ["正常処理後の生録音PCMは削除せず保存する。"],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "録音PCMは削除され、残らないぽん。",
+        ["画像ファイルは削除する。"],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "27thで整理券機能全体を管理できたロールは、"
+        "「広報」または「整理券管理者」だぽん。",
+        [access_contract],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "27thで整理券機能全体を管理できたロールは神または整理券管理者だぽん。",
+        ["27thのrolesは神。", "整理券管理者は全体管理できる。"],
+    ) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "answer", "evidence_key"),
+    [
+        (
+            "正常に処理が終わった録音PCMは残りますか",
+            "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+            "builtin:yagapon-drive-storage",
+        ),
+        (
+            "27thで整理券機能全体を管理できたロールは何ですか",
+            "27thで整理券機能全体を管理できたロールは、"
+            "「神」または「整理券管理者」だぽん。",
+            "builtin:27th-standby-pass-access",
+        ),
+    ],
+)
+async def test_query_accepts_authoritative_exact_search_paraphrases(
+    corpus_manager,
+    question,
+    answer,
+    evidence_key,
+):
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                f"{answer}\n"
+                f"[[YAGAPON_EVIDENCE_KEYS:exact:{evidence_key}]]\n"
+                "[[YAGAPON_ANSWER_STATUS:complete]]"
+            ),
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        question,
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert answer in result.text
+    assert result.lexical_keys == (evidence_key,)
+    assert len(result.citations) == 1
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 def test_duplicate_semantic_chunks_keep_a_citation_for_recovery(
@@ -6050,6 +6780,12 @@ def test_retrieval_filter_blocks_raw_conversations_for_authorization(monkeypatch
     assert metadata_filter is not None
     assert 'authority = "deployed_implementation"' in metadata_filter
     assert 'authority = "conversation"' not in metadata_filter
+    assert 'authority != "deployed_implementation"' in metadata_filter
+    assert 'authority != "repository_context"' in metadata_filter
+    assert 'status = "deployed"' in metadata_filter
+    assert 'status = "current"' in metadata_filter
+    assert 'status = "historical"' not in metadata_filter
+    assert 'status = "unknown"' not in metadata_filter
     assert 'status != "raw"' in metadata_filter
 
 

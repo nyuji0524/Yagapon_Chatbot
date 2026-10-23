@@ -720,6 +720,138 @@ def test_sql_candidate_limit_uses_relevance_before_recency(tmp_path):
     assert hits[0].document_key == "specific"
 
 
+def test_data_contract_filters_non_direct_history_before_candidate_limit(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "source_type", "string_value": "source_code_history"},
+    ]
+    for index in range(100):
+        store.upsert_document(
+            f"documents/history-{index}",
+            f"ranking Firestore 構造の古い変更履歴 {index}",
+            [
+                *common,
+                {"key": "document_key", "string_value": f"history-{index}"},
+                {"key": "authority", "string_value": "repository_history"},
+                {"key": "status", "string_value": "historical"},
+                {"key": "end_at", "string_value": "2026-09-30"},
+            ],
+        )
+    store.upsert_document(
+        "documents/current-contract",
+        "ranking Firestore 構造の現行コレクション契約",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "access_scope", "string_value": "guild"},
+            {"key": "document_key", "string_value": "current-contract"},
+            {"key": "authority", "string_value": "repository_context"},
+            {"key": "status", "string_value": "current"},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "end_at", "string_value": "2025-01-01"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["ranking", "Firestore", "構造"],
+        festival=27,
+        question_kind="data_contract",
+        limit=4,
+    )
+
+    assert [hit.document_key for hit in hits] == ["current-contract"]
+
+
+def test_deployed_contract_survives_wordier_repository_candidate_crowd_out(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "source_type", "string_value": "source_code"},
+    ]
+    for index in range(100):
+        store.upsert_document(
+            f"documents/repository-{index}",
+            f"ranking Firestore 構造 権限 repository snapshot {index}",
+            [
+                *common,
+                {"key": "document_key", "string_value": f"repository-{index}"},
+                {"key": "authority", "string_value": "repository_context"},
+                {"key": "status", "string_value": "current"},
+            ],
+        )
+    store.upsert_document(
+        "documents/deployed-contract",
+        "ranking Firestore deployed contract",
+        [
+            *common,
+            {"key": "document_key", "string_value": "deployed-contract"},
+            {"key": "authority", "string_value": "deployed_implementation"},
+            {"key": "status", "string_value": "deployed"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["ranking", "Firestore", "構造", "権限"],
+        festival=27,
+        question_kind="data_contract",
+        limit=4,
+    )
+
+    assert hits[0].document_key == "deployed-contract"
+    assert hits[0].score < hits[1].score
+    assert len(hits) == 4
+
+
+def test_current_question_excludes_stale_implementation_before_limit(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "source_type", "string_value": "source_code"},
+    ]
+    cases = (
+        ("repository_context", "historical"),
+        ("repository_context", "unknown"),
+        ("repository_context", "current"),
+        ("deployed_implementation", "historical"),
+        ("deployed_implementation", "unknown"),
+        ("deployed_implementation", "deployed"),
+    )
+    for authority, status in cases:
+        key = f"{authority}-{status}"
+        store.upsert_document(
+            f"documents/{key}",
+            f"整理券 権限 implementation {key}",
+            [
+                *common,
+                {"key": "document_key", "string_value": key},
+                {"key": "authority", "string_value": authority},
+                {"key": "status", "string_value": status},
+            ],
+        )
+
+    hits = store.search_exact(
+        1,
+        ["整理券", "権限"],
+        festival=27,
+        question_kind="authorization",
+        limit=4,
+    )
+
+    assert [hit.document_key for hit in hits] == [
+        "deployed_implementation-deployed",
+        "repository_context-current",
+    ]
+
+
 def test_query_terms_keep_cross_team_and_data_contract_cues():
     shinkan = RagStore.query_terms("新歓webで外部や他局から要求された内容をまとめて")
     ranking = RagStore.query_terms("27thのrankingの構造と票数を教えて")

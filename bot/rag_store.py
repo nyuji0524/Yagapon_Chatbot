@@ -14,7 +14,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bot.knowledge_authority import is_history_narrative_source
+from bot.knowledge_authority import (
+    CURRENT_IMPLEMENTATION_AUTHORITIES,
+    CURRENT_STATUSES,
+    QuestionKind,
+    allows_unreviewed_evidence,
+    authority_score,
+    direct_authorities,
+    is_history_narrative_source,
+)
 
 SQLITE_CONNECT_TIMEOUT_SECONDS = 5.0
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -972,6 +980,45 @@ class RagStore:
             placeholders = ",".join("?" for _ in selected_source_types)
             conditions.append(f"source_type IN ({placeholders})")
             params.extend(selected_source_types)
+        normalized_kind: QuestionKind | None = None
+        if question_kind is not None:
+            try:
+                normalized_kind = QuestionKind(str(question_kind).strip().casefold())
+            except ValueError:
+                normalized_kind = None
+        authorities = (
+            direct_authorities(normalized_kind)
+            if normalized_kind is not None
+            else ()
+        )
+        current_implementation_authorities = sorted(
+            CURRENT_IMPLEMENTATION_AUTHORITIES.intersection(authorities)
+        )
+        if (
+            normalized_kind is not None
+            and not allows_unreviewed_evidence(normalized_kind)
+            and current_implementation_authorities
+        ):
+            authority_placeholders = ",".join(
+                "?" for _ in current_implementation_authorities
+            )
+            status_placeholders = ",".join("?" for _ in CURRENT_STATUSES)
+            conditions.append(
+                f"(authority NOT IN ({authority_placeholders}) "
+                f"OR status IN ({status_placeholders}))"
+            )
+            params.extend(current_implementation_authorities)
+            params.extend(sorted(CURRENT_STATUSES))
+        if normalized_kind is not None and not allows_unreviewed_evidence(normalized_kind):
+            # The caller applies the same direct-evidence policy after this
+            # query. Apply it before SQLite's candidate LIMIT as well, or a
+            # large repository-history generation can crowd every current
+            # schema/implementation record out of the candidate set before
+            # the caller gets a chance to reject the history rows.
+            placeholders = ",".join("?" for _ in authorities)
+            conditions.append(f"authority IN ({placeholders})")
+            params.extend(authorities)
+            conditions.append("status NOT IN ('draft', 'raw', 'deprecated')")
         if clean_terms:
             term_conditions = []
             for term in clean_terms:
@@ -1036,6 +1083,24 @@ class RagStore:
                 rows.extend(
                     row for row in record_rows if row["document_key"] not in known_keys
                 )
+            elif (
+                normalized_kind is not None
+                and not allows_unreviewed_evidence(normalized_kind)
+            ):
+                # Preserve a bounded lane for source snapshots that are known
+                # to represent the deployed implementation.  Relevance-first
+                # SQL retrieval can otherwise fill its candidate window with
+                # many longer repository-context chunks before the authority
+                # ranker below ever sees the deployed record.
+                deployed_rows = fetch_rows(
+                    "authority = ? AND status = ?",
+                    ("deployed_implementation", "deployed"),
+                    row_limit=max(8, limit * 2),
+                )
+                known_keys = {row["document_key"] for row in rows}
+                rows.extend(
+                    row for row in deployed_rows if row["document_key"] not in known_keys
+                )
         hits = []
         for row in rows:
             body = row["body"]
@@ -1072,7 +1137,23 @@ class RagStore:
                 end_at=row["end_at"] or "",
                 content_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             ))
-        hits.sort(key=lambda hit: hit.score, reverse=True)
+        if (
+            normalized_kind is not None
+            and not allows_unreviewed_evidence(normalized_kind)
+        ):
+            hits.sort(
+                key=lambda hit: (
+                    authority_score(
+                        normalized_kind,
+                        hit.authority,
+                        hit.status,
+                    ),
+                    hit.score,
+                ),
+                reverse=True,
+            )
+        else:
+            hits.sort(key=lambda hit: hit.score, reverse=True)
         if not is_history or limit < 2:
             return hits[:limit]
 

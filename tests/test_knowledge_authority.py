@@ -26,6 +26,8 @@ def test_question_classification_covers_source_authority_modes():
     assert classify_question("27thの大賞企画の結果と票数を教えて") == QuestionKind.RUNTIME
     assert classify_question("去年の今頃って何してた？") == QuestionKind.HISTORY
     assert classify_question("新歓Webで他局から要求があった内容をまとめて") == QuestionKind.HISTORY
+    assert classify_question("正常に処理が終わった録音PCMは残りますか") == QuestionKind.DATA_CONTRACT
+    assert classify_question("27thで整理券機能全体を管理できたロールは何ですか") == QuestionKind.AUTHORIZATION
 
 
 def test_authority_priority_changes_with_question_kind():
@@ -53,6 +55,34 @@ def test_history_does_not_short_circuit_on_current_source_code():
     assert can_answer_directly(QuestionKind.HISTORY, "reviewed_record", "approved")
     assert can_answer_directly(QuestionKind.HISTORY, "repository_history", "historical")
     assert not can_answer_directly(QuestionKind.RUNTIME, "repository_history", "historical")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        QuestionKind.RUNTIME,
+        QuestionKind.AUTHORIZATION,
+        QuestionKind.USAGE,
+        QuestionKind.DATA_CONTRACT,
+        QuestionKind.GENERAL,
+    ),
+)
+@pytest.mark.parametrize(
+    ("authority", "current_status"),
+    (
+        ("repository_context", "current"),
+        ("deployed_implementation", "deployed"),
+    ),
+)
+@pytest.mark.parametrize("status", ("historical", "unknown", ""))
+def test_current_questions_reject_stale_or_unknown_implementation(
+    kind,
+    authority,
+    current_status,
+    status,
+):
+    assert not can_answer_directly(kind, authority, status)
+    assert can_answer_directly(kind, authority, current_status)
 
 
 def test_compound_question_keeps_authority_facets_separate():
