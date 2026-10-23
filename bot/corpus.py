@@ -53,6 +53,8 @@ from bot.firebase_knowledge import (
 )
 from bot.knowledge_authority import (
     AUTHORITY_LABELS,
+    CURRENT_IMPLEMENTATION_AUTHORITIES,
+    CURRENT_STATUSES,
     QuestionKind,
     allows_unreviewed_evidence,
     authority_instruction,
@@ -477,12 +479,21 @@ def _select_lexical_context_hits(
     if limit <= 0:
         return []
     if question_kind is not QuestionKind.HISTORY:
+        authority_before_relevance = not allows_unreviewed_evidence(question_kind)
         return sorted(
             hits,
             key=lambda hit: (
                 can_answer_directly(question_kind, hit.authority, hit.status),
-                hit.score,
-                authority_score(question_kind, hit.authority, hit.status),
+                (
+                    authority_score(question_kind, hit.authority, hit.status)
+                    if authority_before_relevance
+                    else hit.score
+                ),
+                (
+                    hit.score
+                    if authority_before_relevance
+                    else authority_score(question_kind, hit.authority, hit.status)
+                ),
             ),
             reverse=True,
         )[:limit]
@@ -599,8 +610,26 @@ def retrieval_metadata_filter(
         clauses.append(festival_metadata_filter(festival))
     if target_date is not None:
         clauses.append(f'start_at = "{target_date}*"')
+    direct = direct_authorities(question_kind)
+    current_implementation_authorities = sorted(
+        CURRENT_IMPLEMENTATION_AUTHORITIES.intersection(direct)
+    )
+    if (
+        not allows_unreviewed_evidence(question_kind)
+        and current_implementation_authorities
+    ):
+        non_current_authorities = " AND ".join(
+            f'authority != "{authority}"'
+            for authority in current_implementation_authorities
+        )
+        current_statuses = " OR ".join(
+            f'status = "{status}"' for status in sorted(CURRENT_STATUSES)
+        )
+        clauses.append(f"(({non_current_authorities}) OR ({current_statuses}))")
     if not allows_unreviewed_evidence(question_kind):
-        authorities = " OR ".join(f'authority = "{authority}"' for authority in direct_authorities(question_kind))
+        authorities = " OR ".join(
+            f'authority = "{authority}"' for authority in direct
+        )
         clauses.append(f"({authorities})")
         clauses.extend(
             (
@@ -2833,6 +2862,13 @@ class CorpusManager:
             if guild_id
             else []
         )
+        if not allows_unreviewed_evidence(question_kind):
+            lexical_hits = [
+                hit
+                for hit in lexical_hits
+                if hit.authority not in CURRENT_IMPLEMENTATION_AUTHORITIES
+                or hit.status in CURRENT_STATUSES
+            ]
         lexical_hits = _select_lexical_context_hits(
             lexical_hits,
             question_kind=question_kind,
@@ -4692,6 +4728,14 @@ class CorpusManager:
                     # become visible merely because File Search returned it.
                     rejected_supported_chunks += 1
                     continue
+            if (
+                question_kind is not None
+                and not allows_unreviewed_evidence(question_kind)
+                and authority in CURRENT_IMPLEMENTATION_AUTHORITIES
+                and status not in CURRENT_STATUSES
+            ):
+                rejected_supported_chunks += 1
+                continue
             if (
                 question_kind is not None
                 and not allows_unreviewed_evidence(question_kind)

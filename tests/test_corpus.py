@@ -144,6 +144,41 @@ def test_non_history_context_keeps_direct_authority_priority():
     assert selected == [deployed]
 
 
+@pytest.mark.parametrize(
+    "question_kind",
+    (QuestionKind.AUTHORIZATION, QuestionKind.DATA_CONTRACT),
+)
+def test_current_context_prioritizes_deployed_over_wordier_repository_candidates(
+    question_kind,
+):
+    repository_hits = [
+        lexical_hit(
+            f"repository-{index}",
+            score=1_000 - index,
+            authority="repository_context",
+            source_type="source_code",
+            status="current",
+        )
+        for index in range(20)
+    ]
+    deployed = lexical_hit(
+        "deployed-contract",
+        score=100,
+        authority="deployed_implementation",
+        source_type="source_code",
+        status="deployed",
+    )
+
+    selected = _select_lexical_context_hits(
+        [*repository_hits, deployed],
+        question_kind=question_kind,
+        limit=4,
+    )
+
+    assert selected[0] == deployed
+    assert len(selected) == 4
+
+
 def test_small_history_context_limit_does_not_replace_best_hit():
     implementation = lexical_hit(
         "implementation",
@@ -3394,6 +3429,90 @@ def test_response_sources_include_only_chunks_used_by_grounding_supports(corpus_
         "[#資料1](https://knowledge.example/1)",
         "[#資料3](https://knowledge.example/3)",
     ]
+
+
+@pytest.mark.parametrize(
+    "authority",
+    ("repository_context", "deployed_implementation"),
+)
+@pytest.mark.parametrize("status", ("historical", "unknown"))
+def test_current_grounding_rejects_stale_implementation_status(
+    corpus_manager,
+    authority,
+    status,
+):
+    context = SimpleNamespace(
+        title="stale implementation",
+        text="整理券の管理権限は広報にある。",
+        uri="https://github.example/stale",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "repo:rules"},
+            {"key": "authority", "string_value": authority},
+            {"key": "status", "string_value": status},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "access_scope", "string_value": "guild"},
+            {"key": "festival", "numeric_value": 27},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
+            )
+        ]
+    )
+
+    audit = corpus_manager._response_grounding_audit(
+        response,
+        question_kind=QuestionKind.AUTHORIZATION,
+        expected_festival=27,
+    )
+
+    assert audit.sources == []
+    assert audit.evidence == ()
+    assert audit.rejected_supported_chunks == 1
+
+
+def test_history_grounding_keeps_historical_repository_context(corpus_manager):
+    context = SimpleNamespace(
+        title="historical implementation",
+        text="2025年に整理券Rulesを変更した。",
+        uri="https://github.example/history",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "repo:rules"},
+            {"key": "authority", "string_value": "repository_context"},
+            {"key": "status", "string_value": "historical"},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "access_scope", "string_value": "guild"},
+            {"key": "festival", "numeric_value": 27},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
+            )
+        ]
+    )
+
+    audit = corpus_manager._response_grounding_audit(
+        response,
+        question_kind=QuestionKind.HISTORY,
+        expected_festival=27,
+    )
+
+    assert len(audit.evidence) == 1
+    assert audit.rejected_supported_chunks == 0
 
 
 def test_explicit_empty_grounding_supports_do_not_cite_retrieval_candidates(corpus_manager):
@@ -6661,6 +6780,12 @@ def test_retrieval_filter_blocks_raw_conversations_for_authorization(monkeypatch
     assert metadata_filter is not None
     assert 'authority = "deployed_implementation"' in metadata_filter
     assert 'authority = "conversation"' not in metadata_filter
+    assert 'authority != "deployed_implementation"' in metadata_filter
+    assert 'authority != "repository_context"' in metadata_filter
+    assert 'status = "deployed"' in metadata_filter
+    assert 'status = "current"' in metadata_filter
+    assert 'status = "historical"' not in metadata_filter
+    assert 'status = "unknown"' not in metadata_filter
     assert 'status != "raw"' in metadata_filter
 
 

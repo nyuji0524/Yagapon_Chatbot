@@ -57,6 +57,34 @@ def test_history_does_not_short_circuit_on_current_source_code():
     assert not can_answer_directly(QuestionKind.RUNTIME, "repository_history", "historical")
 
 
+@pytest.mark.parametrize(
+    "kind",
+    (
+        QuestionKind.RUNTIME,
+        QuestionKind.AUTHORIZATION,
+        QuestionKind.USAGE,
+        QuestionKind.DATA_CONTRACT,
+        QuestionKind.GENERAL,
+    ),
+)
+@pytest.mark.parametrize(
+    ("authority", "current_status"),
+    (
+        ("repository_context", "current"),
+        ("deployed_implementation", "deployed"),
+    ),
+)
+@pytest.mark.parametrize("status", ("historical", "unknown", ""))
+def test_current_questions_reject_stale_or_unknown_implementation(
+    kind,
+    authority,
+    current_status,
+    status,
+):
+    assert not can_answer_directly(kind, authority, status)
+    assert can_answer_directly(kind, authority, current_status)
+
+
 def test_compound_question_keeps_authority_facets_separate():
     assert classify_question_facets(
         "新歓Webの現在の実装と、これまでの変更経緯を詳しく教えて"

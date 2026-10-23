@@ -29,6 +29,10 @@ AUTHORITY_LABELS = {
 }
 
 CURRENT_STATUSES = {"deployed", "current", "active", "approved", "verified"}
+CURRENT_IMPLEMENTATION_AUTHORITIES = {
+    "deployed_implementation",
+    "repository_context",
+}
 
 
 def is_history_narrative_source(source_type: str) -> bool:
@@ -170,7 +174,20 @@ _DIRECT_AUTHORITIES = {
 
 
 def can_answer_directly(kind: QuestionKind, authority: str, status: str) -> bool:
-    return authority in _DIRECT_AUTHORITIES[kind] and status not in {"draft", "raw", "deprecated"}
+    if authority not in _DIRECT_AUTHORITIES[kind] or status in {
+        "draft",
+        "raw",
+        "deprecated",
+    }:
+        return False
+    # An implementation snapshot is only evidence of current behavior when
+    # the indexer positively identified it as current/deployed. Legacy rows
+    # with missing status and historical snapshots must not establish a
+    # present-day authorization or data contract merely because their
+    # authority label is otherwise allowed for that question kind.
+    if authority in CURRENT_IMPLEMENTATION_AUTHORITIES:
+        return status in CURRENT_STATUSES
+    return True
 
 
 def allows_unreviewed_evidence(kind: QuestionKind) -> bool:
