@@ -3786,6 +3786,34 @@ def test_recovered_claims_must_be_supported_by_the_selected_evidence_body(
     ) is False
 
 
+@pytest.mark.parametrize(
+    ("answer", "evidence"),
+    [
+        ("9時だぽん。", "19時。"),
+        ("27件だぽん。", "127件。"),
+        ("1位だぽん。", "11位。"),
+        ("公開だぽん。", "非公開。"),
+        ("許可だぽん。", "不許可。"),
+        ("可能だぽん。", "不可能。"),
+        ("非公開だぽん。", "公開。"),
+        ("不許可だぽん。", "許可。"),
+        ("不可能だぽん。", "可能。"),
+        ("一位だぽん。", "十一位。"),
+        ("十件だぽん。", "百十件。"),
+        ("score=-1だぽん。", "score=1。"),
+        ("公開予定だぽん。", "公開予定ではない。"),
+        ("有効だぽん。", "有効ではない。"),
+        ("確定だぽん。", "未確定。"),
+    ],
+)
+def test_recovered_claims_check_critical_atoms_before_substring_matches(
+    corpus_manager,
+    answer,
+    evidence,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is False
+
+
 def test_recovered_claims_accept_natural_wording_within_selected_authority(
     corpus_manager,
 ):
@@ -3804,6 +3832,158 @@ def test_recovered_claims_accept_natural_wording_within_selected_authority(
         "「神」または「整理券管理者」だぽん。",
         ["27thの" + access_contract],
     ) is True
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "正常に処理が終わった録音PCMは残るぽん。",
+        "正常に処理が終わったPCMは残るぽん。",
+        "正常に処理が終わった録音PCMは削除するわけではないぽん。",
+        "正常に処理が終わった録音PCMは削除されることはないぽん。",
+        "録音PCMは削除されても残るぽん。",
+        "録音PCMは削除するが残るぽん。",
+        "録音PCMは削除対象外だぽん。",
+        "録音PCMは削除不要だぽん。",
+        "録音PCMは削除を実施しないぽん。",
+        "録音PCMは削除されるものではないぽん。",
+    ],
+)
+def test_recovered_recording_claims_reject_opposite_retention_polarity(
+    corpus_manager,
+    answer,
+):
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        ["正常処理後の生録音PCMは削除する。"],
+    ) is False
+
+
+def test_recovered_recording_claims_keep_anaphoric_polarity_on_the_pcm_subject(
+    corpus_manager,
+):
+    assert corpus_manager._recovered_claims_supported(
+        "録音PCMは削除され、残るぽん。",
+        ["録音PCMは削除する。メタデータは残る。"],
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence", "expected"),
+    [
+        (
+            "27thでは神または整理券管理者が管理ロールだぽん。",
+            "27thでは神または整理券管理者が管理ロールである。",
+            True,
+        ),
+        (
+            "27thでは神または広報が管理ロールだぽん。",
+            "27thでは神または整理券管理者が管理ロールである。",
+            False,
+        ),
+        (
+            "27thで整理券機能全体を管理できるrolesは神または整理券管理者だぽん。",
+            "27thで整理券機能全体を管理できるrolesは神または整理券管理者である。",
+            True,
+        ),
+        (
+            "27thで整理券機能全体を管理できるrolesは広報または整理券管理者だぽん。",
+            "27thで整理券機能全体を管理できるrolesは神または整理券管理者である。",
+            False,
+        ),
+        (
+            "神は整理券機能全体を管理できるぽん。",
+            "神は整理券機能全体を管理できる。",
+            True,
+        ),
+        (
+            "広報は整理券機能全体を管理できるぽん。",
+            "神または整理券管理者だけが整理券機能全体を管理できる。",
+            False,
+        ),
+        (
+            "整理券機能全体を管理できるのは神だぽん。",
+            "整理券機能全体を管理できるのは神である。",
+            True,
+        ),
+        (
+            "整理券機能全体を管理できるのは広報だぽん。",
+            "整理券機能全体を管理できるのは神である。",
+            False,
+        ),
+        (
+            "27thで管理できるロールは「神」だぽん。",
+            "27thで管理できるロールは「神奈川担当」である。",
+            False,
+        ),
+        (
+            "27thで管理できるロールは「管理者」だぽん。",
+            "27thで管理できるロールは「整理券管理者」である。",
+            False,
+        ),
+    ],
+)
+def test_recovered_permission_claims_bind_actors_regardless_of_marker_order(
+    corpus_manager,
+    answer,
+    evidence,
+    expected,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is expected
+
+
+def test_recovered_permission_claims_do_not_compose_actor_and_action_sources(
+    corpus_manager,
+):
+    assert corpus_manager._recovered_claims_supported(
+        "広報は整理券機能全体を管理できるぽん。",
+        ["担当部署は広報である。", "神は整理券機能全体を管理できる。"],
+    ) is False
+
+
+def test_recovered_claims_allow_only_bounded_subcollection_translation(
+    corpus_manager,
+):
+    answer = (
+        "`yagamy/27/maps/{mapId}` の下に `features` と `calibrations` の"
+        "サブコレクションがあるぽん。"
+    )
+    repository_evidence = (
+        "`yagamy/27/maps/{mapId}` has nested `features` and `calibrations` "
+        "subcollections."
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [repository_evidence],
+    ) is True
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has nested features subcollections.",
+            "yagamy/27/maps/{mapId} has nested calibrations subcollections.",
+        ],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has nested features and calibrations collections."
+        ],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has features and calibrations, "
+            "but they are not subcollections."
+        ],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        [
+            "yagamy/27/maps/{mapId} has features and calibrations; "
+            "no subcollections exist."
+        ],
+    ) is False
 
 
 def test_recovered_claim_paraphrases_keep_negation_and_role_values_fail_closed(

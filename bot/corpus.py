@@ -293,7 +293,9 @@ _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
 # lexical overlap.  This keeps a nearby but different number, role, state, or
 # identifier from authorizing a regenerated claim.
 _CRITICAL_GROUNDING_ATOM_RE = re.compile(
-    r"(?:権限|認可|許可|禁止|公開|非公開|有効|無効|稼働|停止|開催|中止|"
+    r"(?:権限|認可|不許可|許可|禁止|公開予定ではない|公開ではない|"
+    r"非公開|公開|有効ではない|無効|有効|不可能|可能ではない|"
+    r"未確定|稼働|停止|開催|中止|"
     r"会場|場所|担当|責任者|局長|副局長|企画長|テーマ|名称|保存先|"
     r"コレクション|フィールド|締切|期限|必須|可能|不可|首位|最下位|"
     r"デプロイ済み|実装済み|運用中|決定済み|確定|未定|終了済み|受付中|"
@@ -301,11 +303,19 @@ _CRITICAL_GROUNDING_ATOM_RE = re.compile(
     r"\b(?:true|false|null)\b)",
     re.IGNORECASE,
 )
+_RECOVERY_JAPANESE_NUMBER_UNIT_RE = re.compile(
+    r"[〇零一二三四五六七八九十百千万億兆]+"
+    r"(?:時|分|秒|日|月|年|件|名|人|円|票|割|位|枠|個|台|回)"
+)
+_RECOVERY_SIGNED_NUMBER_PREFIX = "signed-number:"
 _RECOVERY_PROPER_TOKEN_RE = re.compile(
     r"(?:[A-Za-z][A-Za-z0-9_.:/\-]{1,}(?:[ァ-ヶ一-龠]+)?|"
     r"(?:[A-Za-z]{1,16}|[一-龠]{1,8})(?:さん|くん|氏)|[ァ-ヶー]{3,})"
 )
-_RECOVERY_ROLE_MARKER_RE = re.compile(r"(?:ロール|\broles?\b)", re.IGNORECASE)
+_RECOVERY_ROLE_MARKER_RE = re.compile(
+    r"(?:ロール|(?<![A-Za-z0-9_])roles?(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
 _RECOVERY_QUOTED_VALUE_RE = re.compile(r"[「『]([^」』]{1,64})[」』]")
 _RECOVERY_ROLE_VALUE_SUFFIX_RE = re.compile(
     r"(?:だ|です|である)?ぽん[。.!！?？]*$|(?:だ|です|である)[。.!！?？]*$"
@@ -314,7 +324,57 @@ _RECOVERY_ELLIPTICAL_NON_RETENTION_RE = re.compile(
     r"(?:残らない|残りません|残存しない|保持されない|保存されない)$"
 )
 _RECOVERY_NEGATED_DELETION_RE = re.compile(
-    r"削除(?:(?:し|され)(?:て)?(?:い)?(?:ない|ません|ず)|せず)"
+    r"削除(?:(?:し|され)(?:て)?(?:い)?(?:ない|ません|ず)|せず|"
+    r"(?:する|される)?(?:こと|わけ|もの)(?:は|では)?(?:ない|ありません)|"
+    r"[はを]?(?:行わ|実施し)(?:ない|ません)|対象(?:ではない|外)|"
+    r"不要|できない)"
+)
+_RECOVERY_NEGATIVE_RETENTION_RE = re.compile(
+    r"(?:残らない|残りません|残存しない|"
+    r"保持(?:しない|されない)|保存(?:しない|されない))"
+)
+_RECOVERY_POSITIVE_RETENTION_RE = re.compile(
+    r"(?:残る|残ります|残っている|残存する|残存します|"
+    r"保持(?:する|される)|保存(?:する|される)|永続保存)"
+)
+_RECOVERY_RETENTION_SCOPE_RE = re.compile(
+    r"(?:録音pcm|pcm|録音|文字起こし|議事録|音声|データ|ファイル)",
+    re.IGNORECASE,
+)
+_RECOVERY_PERMISSION_PREDICATE_RE = re.compile(
+    r"(?:(?:管理|操作).{0,16}(?:でき|可能|行(?:う|える|った)|する|した)|"
+    r"(?:編集|利用|閲覧|作成|更新|削除).{0,16}(?:でき|可能)|"
+    r"(?:管理|操作)(?:ロール|roles?))",
+    re.IGNORECASE,
+)
+_RECOVERY_PERMISSION_ACTOR_RE = re.compile(
+    r"(?P<actor>[^、,。.!！？?\n]{1,64}?)(?:が|"
+    r"(?<!また)(?<!もしく)(?<!あるい)は)"
+    r"(?=[^、,。.!！？?\n]{0,48}(?:管理|操作|編集|利用|閲覧|作成|更新|削除))"
+)
+_RECOVERY_PERMISSION_POST_ACTOR_RE = re.compile(
+    r"(?:管理|操作|編集|利用|閲覧|作成|更新|削除)"
+    r"(?:でき(?:る|た)?|可能)(?:なの|の)?(?:は|が)[「『]?"
+    r"(?P<actor>[^、,。.!！？?\n」』]{1,64}?)"
+    r"(?=(?:だけ|のみ)?(?:だ|です|である|ぽん)?[」』]?(?:[。.!！？?\n]|$))"
+)
+_RECOVERY_SUBCOLLECTION_NEGATIVE_RE = re.compile(
+    r"(?:サブコレクション(?:が|は)?(?:ない|存在しない)|"
+    r"サブコレクション(?:では|じゃ)ない|"
+    r"\bno\s+(?:nested\s+)?subcollections?\b|"
+    r"\bnot\s+(?:a\s+|nested\s+)?subcollections?\b|"
+    r"\bsubcollections?\s+(?:do(?:es)?\s+not|doesn't|don't)\s+exist\b|"
+    r"\bwithout\b[^.!?\n]{0,80}\bsubcollections?\b|"
+    r"\b(?:is|are)\s+not\s+(?:a\s+|nested\s+)?subcollections?\b)",
+    re.IGNORECASE,
+)
+_RECOVERY_SUBCOLLECTION_POSITIVE_RE = re.compile(
+    r"(?:サブコレクション(?:がある|は存在する)|"
+    r"\b(?:has|have|contains?|includes?)\b[^.!?\n]{0,120}"
+    r"\bsubcollections?\b|"
+    r"\bsubcollections?\s+(?:exist|are\s+present)\b|"
+    r"\b(?:is|are)\s+(?:a\s+|nested\s+)?subcollections?\b)",
+    re.IGNORECASE,
 )
 
 
@@ -3844,9 +3904,22 @@ class CorpusManager:
         normalized = unicodedata.normalize("NFKC", value.casefold())
         # Source contracts commonly use the Firestore field name ``roles``
         # while a natural Japanese answer calls the same field a ``ロール``.
-        # Canonicalize that exact terminology pair without relaxing the
-        # lexical threshold or any role values carried by the claim.
+        # Source excerpts also commonly use ``subcollections`` while the
+        # Japanese answer says ``サブコレクション``. Canonicalize only those
+        # structural terms; identifiers and role values remain exact atoms.
         normalized = normalized.replace("ロール", "roles")
+        normalized = normalized.replace("サブコレクション", "subcollection")
+        normalized = normalized.replace("コレクション", "collection")
+        normalized = re.sub(
+            r"(?<![A-Za-z0-9_])subcollections?(?![A-Za-z0-9_])",
+            "subcollection",
+            normalized,
+        )
+        normalized = re.sub(
+            r"(?<![A-Za-z0-9_])collections?(?![A-Za-z0-9_])",
+            "collection",
+            normalized,
+        )
         return re.sub(r"[\s*_`#>\-\[\]()（）「」『』、,。.!！?？:：;；]", "", normalized)
 
     @classmethod
@@ -3945,14 +4018,14 @@ class CorpusManager:
     @classmethod
     def _recovery_required_atoms(cls, raw_clause: str, clause: str) -> tuple[str, ...]:
         atoms = []
+        atoms.extend(
+            f"{_RECOVERY_SIGNED_NUMBER_PREFIX}{match.group(0)}"
+            for match in re.finditer(r"(?<![\d.])[+-]\d+(?:\.\d+)?", raw_clause)
+        )
         atoms.extend(re.findall(r"\d+", clause))
         atoms.extend(
             cls._normalized_grounding_text(match.group(0))
-            for match in re.finditer(
-                r"[〇零一二三四五六七八九十百千万億兆]+"
-                r"(?:時|分|秒|日|月|年|件|名|人|円|票|割|位|枠|個|台|回)",
-                raw_clause,
-            )
+            for match in _RECOVERY_JAPANESE_NUMBER_UNIT_RE.finditer(raw_clause)
         )
         atoms.extend(
             cls._normalized_grounding_text(match.group(0))
@@ -4000,30 +4073,297 @@ class CorpusManager:
             return ()
         return tuple(dict.fromkeys(atoms))
 
+    @classmethod
+    def _recovery_permission_atoms(cls, raw_claim: str) -> tuple[str, ...]:
+        """Extract permission actors independently of role-marker word order."""
+        atoms = list(cls._recovery_role_atoms(raw_claim))
+        if not (
+            _RECOVERY_ROLE_MARKER_RE.search(raw_claim)
+            or _RECOVERY_PERMISSION_PREDICATE_RE.search(raw_claim)
+        ):
+            return tuple(atoms)
+
+        for connector in re.finditer(r"(?:または|もしくは|あるいは)", raw_claim):
+            left = raw_claim[: connector.start()]
+            right = raw_claim[connector.end() :]
+            left = re.split(r"[、,。.!！？?「『」』\s]+", left)[-1]
+            left = re.split(r"(?:は|が|を|に|で|の)", left)[-1]
+            right = right.lstrip("「『 \t")
+            right = re.split(
+                r"(?:は|が|を|に|で|だ|です|である)|[、,。.!！？?「『」』\s]+",
+                right,
+                maxsplit=1,
+            )[0]
+            for value in (left, right):
+                atom = cls._normalized_grounding_text(value)
+                if atom and len(atom) <= 32 and not re.search(r"\d", atom):
+                    atoms.append(atom)
+
+        if _RECOVERY_PERMISSION_PREDICATE_RE.search(raw_claim):
+            for match in _RECOVERY_PERMISSION_ACTOR_RE.finditer(raw_claim):
+                actor = match.group("actor")
+                actor = re.split(r"[、,。.!！？?「『」』\s]+", actor)[-1]
+                actor = re.split(r"(?:は|が|を|に|で|の)", actor)[-1]
+                atom = cls._normalized_grounding_text(actor)
+                if (
+                    atom
+                    and len(atom) <= 32
+                    and not re.search(r"\d", atom)
+                    and "または" not in actor
+                    and "もしくは" not in actor
+                    and "あるいは" not in actor
+                    and not _RECOVERY_ROLE_MARKER_RE.search(actor)
+                ):
+                    atoms.append(atom)
+
+            for match in _RECOVERY_PERMISSION_POST_ACTOR_RE.finditer(raw_claim):
+                actor = match.group("actor").strip("「『 」")
+                actor = re.sub(r"(?:だ|です|である)$", "", actor)
+                if any(
+                    connector in actor
+                    for connector in ("または", "もしくは", "あるいは")
+                ):
+                    continue
+                atom = cls._normalized_grounding_text(actor)
+                if atom and len(atom) <= 32 and not re.search(r"\d", atom):
+                    atoms.append(atom)
+
+        return tuple(dict.fromkeys(atom for atom in atoms if atom))
+
+    @classmethod
+    def _recovery_retention_state(cls, value: str) -> str | None:
+        """Return retained/non-retained only for explicit lifecycle predicates."""
+        normalized = cls._normalized_grounding_text(value)
+        states = set()
+        if "削除" in normalized:
+            states.add(
+                "retained"
+                if _RECOVERY_NEGATED_DELETION_RE.search(normalized)
+                else "not_retained"
+            )
+        if _RECOVERY_NEGATIVE_RETENTION_RE.search(normalized):
+            states.add("not_retained")
+        if _RECOVERY_POSITIVE_RETENTION_RE.search(normalized):
+            states.add("retained")
+        if len(states) > 1:
+            return "conflicting"
+        return next(iter(states), None)
+
+    @classmethod
+    def _recovery_retention_conflicts(
+        cls,
+        raw_clause: str,
+        raw_evidence: str,
+    ) -> bool:
+        """Reject opposite lifecycle claims about the same concrete object."""
+        answer_state = cls._recovery_retention_state(raw_clause)
+        if answer_state is None:
+            return False
+        if answer_state == "conflicting":
+            return True
+        answer_scopes = {
+            cls._normalized_grounding_text(match.group(0))
+            for match in _RECOVERY_RETENTION_SCOPE_RE.finditer(raw_clause)
+        }
+        if not answer_scopes:
+            return False
+
+        for segment in re.split(r"[。.!！?？\n]+", raw_evidence):
+            evidence_scopes = {
+                cls._normalized_grounding_text(match.group(0))
+                for match in _RECOVERY_RETENTION_SCOPE_RE.finditer(segment)
+            }
+            if not any(
+                answer_scope in evidence_scope or evidence_scope in answer_scope
+                for answer_scope in answer_scopes
+                for evidence_scope in evidence_scopes
+            ):
+                continue
+            evidence_state = cls._recovery_retention_state(segment)
+            if evidence_state == "conflicting":
+                return True
+            if evidence_state is not None and evidence_state != answer_state:
+                return True
+        return False
+
     @staticmethod
-    def _recovery_atom_in_evidence(atom: str, evidence: str) -> bool:
+    def _recovery_subcollection_state(value: str) -> str | None:
+        """Return the asserted existence state for a subcollection statement."""
+        surface = unicodedata.normalize("NFKC", value.casefold())
+        states = set()
+        if _RECOVERY_SUBCOLLECTION_NEGATIVE_RE.search(surface):
+            states.add("absent")
+        if _RECOVERY_SUBCOLLECTION_POSITIVE_RE.search(surface):
+            states.add("present")
+        if len(states) > 1:
+            return "conflicting"
+        return next(iter(states), None)
+
+    @classmethod
+    def _recovery_subcollection_conflicts(
+        cls,
+        raw_clause: str,
+        raw_evidence: str,
+    ) -> bool:
+        answer_state = cls._recovery_subcollection_state(raw_clause)
+        if answer_state is None:
+            return False
+        if answer_state == "conflicting":
+            return True
+        evidence_state = cls._recovery_subcollection_state(raw_evidence)
+        return evidence_state == "conflicting" or (
+            evidence_state is not None and evidence_state != answer_state
+        )
+
+    @classmethod
+    def _recovery_permission_atom_in_evidence(
+        cls,
+        atom: str,
+        raw_evidence: str,
+        normalized_evidence: str,
+    ) -> bool:
+        """Match a permission actor as a value, never as part of another role."""
+        evidence_atoms = cls._recovery_permission_atoms(raw_evidence)
+        if evidence_atoms:
+            return atom in evidence_atoms
+
+        surface = unicodedata.normalize("NFKC", raw_evidence.casefold())
+        if re.fullmatch(r"[a-z0-9_.:/-]+", atom, re.IGNORECASE):
+            return bool(
+                re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(atom)}(?![A-Za-z0-9_])",
+                    surface,
+                    re.IGNORECASE,
+                )
+            )
+
+        if atom not in normalized_evidence:
+            return False
+        left_boundaries = (
+            "「",
+            "『",
+            "（",
+            "(",
+            "[",
+            "【",
+            "、",
+            ",",
+            ":",
+            "：",
+            "=",
+            " ",
+            "\n",
+            "\t",
+            "は",
+            "が",
+            "を",
+            "に",
+            "の",
+            "で",
+            "と",
+            "または",
+            "もしくは",
+            "あるいは",
+        )
+        right_boundaries = (
+            "」",
+            "』",
+            "）",
+            ")",
+            "]",
+            "】",
+            "、",
+            ",",
+            "。",
+            ".",
+            ":",
+            "：",
+            " ",
+            "\n",
+            "\t",
+            "は",
+            "が",
+            "を",
+            "に",
+            "の",
+            "で",
+            "と",
+            "だ",
+            "です",
+            "である",
+            "だけ",
+            "のみ",
+            "または",
+            "もしくは",
+            "あるいは",
+        )
+        for match in re.finditer(re.escape(atom), surface, re.IGNORECASE):
+            left = surface[: match.start()]
+            right = surface[match.end() :]
+            if (not left or left.endswith(left_boundaries)) and (
+                not right or right.startswith(right_boundaries)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _recovery_atom_in_evidence(
+        atom: str,
+        evidence: str,
+        raw_evidence: str = "",
+    ) -> bool:
+        if atom.startswith(_RECOVERY_SIGNED_NUMBER_PREFIX):
+            signed_number = atom.removeprefix(_RECOVERY_SIGNED_NUMBER_PREFIX)
+            raw_numbers = re.findall(
+                r"(?<![\d.])[+-]\d+(?:\.\d+)?",
+                unicodedata.normalize("NFKC", raw_evidence),
+            )
+            return signed_number in raw_numbers
         if atom.isdecimal():
             return atom in re.findall(r"\d+", evidence)
+        if _RECOVERY_JAPANESE_NUMBER_UNIT_RE.fullmatch(atom):
+            return atom in _RECOVERY_JAPANESE_NUMBER_UNIT_RE.findall(evidence)
         # A positive state must not be authorized solely by the corresponding
-        # negative word containing it as a suffix.
-        opposites = {
-            "公開": "非公開",
-            "有効": "無効",
-            "許可": "不許可",
-            "可能": "不可能",
+        # negative expression containing it as a substring.
+        negative_patterns = {
+            "公開": r"(?:非公開|未公開|公開(?:予定)?(?:では|じゃ|は)?ない)",
+            "有効": r"(?:無効|有効(?:では|じゃ|は)?ない)",
+            "許可": r"(?:不許可|未許可|許可(?:され|し)?(?:てい)?ない|許可(?:では|じゃ|は)?ない)",
+            "可能": r"(?:不可能|可能(?:では|じゃ|は)?ない)",
+            "確定": r"(?:未確定|確定(?:し|され)?(?:てい)?ない|確定(?:では|じゃ|は)?ない)",
         }
-        if opposite := opposites.get(atom):
-            evidence = evidence.replace(opposite, "")
+        if pattern := negative_patterns.get(atom):
+            evidence = re.sub(pattern, "", evidence)
         return atom in evidence
 
     @classmethod
-    def _recovery_clause_supported(cls, raw_clause: str, clause: str, evidence: str) -> bool:
+    def _recovery_clause_supported(
+        cls,
+        raw_clause: str,
+        clause: str,
+        evidence: str,
+        raw_evidence: str = "",
+        polarity_clause: str | None = None,
+    ) -> bool:
+        if raw_evidence and cls._recovery_retention_conflicts(
+            polarity_clause or raw_clause,
+            raw_evidence,
+        ):
+            return False
+        if raw_evidence and cls._recovery_subcollection_conflicts(
+            raw_clause,
+            raw_evidence,
+        ):
+            return False
+        atoms = cls._recovery_required_atoms(raw_clause, clause)
+        if any(
+            not cls._recovery_atom_in_evidence(atom, evidence, raw_evidence)
+            for atom in atoms
+        ):
+            return False
+
         if clause in evidence:
             return True
-
-        atoms = cls._recovery_required_atoms(raw_clause, clause)
-        if any(not cls._recovery_atom_in_evidence(atom, evidence) for atom in atoms):
-            return False
 
         clause_bigrams = cls._grounding_bigrams(clause)
         if not clause_bigrams:
@@ -4042,6 +4382,8 @@ class CorpusManager:
         clause: str,
         previous_clause: tuple[str, str] | None,
         evidence: str,
+        raw_evidence: str,
+        polarity_clause: str | None = None,
     ) -> bool:
         """Allow only deletion-backed, subject-preserving non-retention wording."""
         if not _RECOVERY_ELLIPTICAL_NON_RETENTION_RE.fullmatch(clause):
@@ -4054,7 +4396,13 @@ class CorpusManager:
         evidence_positive = _RECOVERY_NEGATED_DELETION_RE.sub("", evidence)
         if "削除" not in previous_positive or "削除" not in evidence_positive:
             return False
-        return cls._recovery_clause_supported(previous_raw, previous, evidence)
+        return cls._recovery_clause_supported(
+            previous_raw,
+            previous,
+            evidence,
+            raw_evidence,
+            polarity_clause,
+        )
 
     @classmethod
     def _recovered_claims_supported(
@@ -4069,29 +4417,73 @@ class CorpusManager:
         body; critical values must be present in that same body.
         """
         claims = cls._grounding_claims(answer_text)
-        evidence = [cls._normalized_grounding_text(value) for value in evidence_texts]
-        evidence = [value for value in evidence if value]
+        evidence = []
+        for value in evidence_texts:
+            normalized = cls._normalized_grounding_text(value)
+            if normalized:
+                evidence.append((value, normalized))
         if not claims or not evidence:
             return False
 
         for claim in claims:
-            role_atoms = cls._recovery_role_atoms(claim)
-            if role_atoms and not any(
-                all(cls._recovery_atom_in_evidence(atom, source) for atom in role_atoms)
-                for source in evidence
-            ):
-                return False
+            permission_atoms = cls._recovery_permission_atoms(claim)
+            claim_evidence = evidence
+            if permission_atoms:
+                claim_evidence = [
+                    (raw_source, normalized_source)
+                    for raw_source, normalized_source in evidence
+                    if all(
+                        cls._recovery_permission_atom_in_evidence(
+                            atom,
+                            raw_source,
+                            normalized_source,
+                        )
+                        for atom in permission_atoms
+                    )
+                ]
+                if not claim_evidence:
+                    return False
 
             previous_clause = None
             for raw_clause, clause in cls._grounding_clauses(claim):
+                polarity_clause = raw_clause
+                needs_previous_context = False
+                if (
+                    previous_clause is not None
+                    and cls._recovery_retention_state(raw_clause) is not None
+                    and not _RECOVERY_RETENTION_SCOPE_RE.search(raw_clause)
+                    and _RECOVERY_RETENTION_SCOPE_RE.search(previous_clause[0])
+                ):
+                    polarity_clause = f"{previous_clause[0]}、{raw_clause}"
+                    needs_previous_context = True
+
                 if not any(
-                    cls._recovery_clause_supported(raw_clause, clause, source)
-                    or cls._elliptical_non_retention_supported(
-                        clause,
-                        previous_clause,
-                        source,
+                    (
+                        not needs_previous_context
+                        or cls._recovery_clause_supported(
+                            previous_clause[0],
+                            previous_clause[1],
+                            normalized_source,
+                            raw_source,
+                        )
                     )
-                    for source in evidence
+                    and (
+                        cls._recovery_clause_supported(
+                            raw_clause,
+                            clause,
+                            normalized_source,
+                            raw_source,
+                            polarity_clause,
+                        )
+                        or cls._elliptical_non_retention_supported(
+                            clause,
+                            previous_clause,
+                            normalized_source,
+                            raw_source,
+                            polarity_clause,
+                        )
+                    )
+                    for raw_source, normalized_source in claim_evidence
                 ):
                     return False
                 previous_clause = (raw_clause, clause)
