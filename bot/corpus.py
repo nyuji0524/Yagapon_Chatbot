@@ -2362,7 +2362,7 @@ class CorpusManager:
                     for item in runtime_evidence
                 )
                 texts.extend(
-                    f"{item.citation}\n{item.text}"
+                    item.text
                     for item in semantic_evidence
                 )
                 return texts
