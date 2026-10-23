@@ -179,6 +179,35 @@ def test_current_context_prioritizes_deployed_over_wordier_repository_candidates
     assert len(selected) == 4
 
 
+def test_current_context_preserves_curated_contract_among_deployed_fragments():
+    deployed_hits = [
+        lexical_hit(
+            f"deployed-{index}",
+            score=1_000 - index,
+            authority="deployed_implementation",
+            source_type="source_code",
+            status="deployed",
+        )
+        for index in range(20)
+    ]
+    curated = lexical_hit(
+        "curated-drive-contract",
+        score=1_500,
+        authority="curated",
+        source_type="builtin_reference",
+        status="active",
+    )
+
+    selected = _select_lexical_context_hits(
+        [*deployed_hits, curated],
+        question_kind=QuestionKind.DATA_CONTRACT,
+        limit=4,
+    )
+
+    assert selected[0] == deployed_hits[0]
+    assert curated in selected
+
+
 def test_small_history_context_limit_does_not_replace_best_hit():
     implementation = lexical_hit(
         "implementation",

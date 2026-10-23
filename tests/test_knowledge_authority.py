@@ -101,6 +101,37 @@ def test_compound_question_keeps_authority_facets_separate():
 @pytest.mark.parametrize(
     "question",
     (
+        "Google Driveでは議事録はどこに保存されますか",
+        "生文字起こしは議事録と同じファイルに入りますか。保存先も教えてください",
+        "議事録の保存先を教えて",
+        "議事録はどこに保存されるか教えて",
+        "Google Driveでは会議記録はどこに保存されますか",
+    ),
+)
+def test_minutes_storage_questions_are_data_contract_only(question):
+    assert classify_question_facets(question) == (QuestionKind.DATA_CONTRACT,)
+
+
+def test_minutes_creation_question_is_usage_only():
+    for question in ("議事録の作成手順を教えて", "会議記録の作成手順を教えて"):
+        assert classify_question_facets(question) == (QuestionKind.USAGE,)
+
+
+def test_minutes_content_question_is_history():
+    for question in (
+        "10/9の議事録の内容を教えて",
+        "10/9の会議内容を教えて",
+        "10/9の会議内容は？",
+        "10/9の会議記録を見せて",
+        "10/9の議事録の要点を教えて",
+        "会議で話したことをまとめて",
+    ):
+        assert classify_question_facets(question) == (QuestionKind.HISTORY,)
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
         "IT局へのフィードバックは？",
         "どんな指摘がありましたか？",
         "今年の反省を教えて",
