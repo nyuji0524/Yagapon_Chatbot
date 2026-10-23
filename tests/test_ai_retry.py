@@ -2,14 +2,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from google.genai.errors import ServerError
 
 from bot.ai_retry import (
     RateLimitCircuitBreaker,
     RateLimitExceeded,
     is_rate_limit_error,
+    is_transient_api_error,
     new_genai_client,
     rate_limit_diagnostic,
     retry_rate_limit,
+    retry_transient_api,
 )
 
 
@@ -45,6 +48,12 @@ class GeneratedInteractionsRateLimit(RuntimeError):
         ]
       }
     }"""
+
+
+class ApiError(RuntimeError):
+    def __init__(self, status_code: int):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
 
 
 @pytest.mark.asyncio
@@ -91,6 +100,96 @@ async def test_non_rate_limit_error_is_not_retried():
     assert operation.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_transient_api_retry_recovers_from_503():
+    operation = AsyncMock(side_effect=[ApiError(503), "ok"])
+    sleep = AsyncMock()
+
+    result = await retry_transient_api(
+        operation,
+        operation_name="file_search_test",
+        attempts=3,
+        initial_delay=2,
+        sleep=sleep,
+    )
+
+    assert result == "ok"
+    assert operation.await_count == 2
+    sleep.assert_awaited_once_with(2)
+
+
+@pytest.mark.asyncio
+async def test_transient_api_retry_reads_google_genai_retry_info_with_bounded_delay():
+    failure = ServerError(
+        503,
+        {
+            "error": {
+                "code": 503,
+                "status": "UNAVAILABLE",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": "90s",
+                    }
+                ],
+            }
+        },
+    )
+    operation = AsyncMock(side_effect=[failure, "ok"])
+    sleep = AsyncMock()
+
+    result = await retry_transient_api(
+        operation,
+        operation_name="file_search_test",
+        attempts=2,
+        max_delay=7,
+        sleep=sleep,
+    )
+
+    assert result == "ok"
+    sleep.assert_awaited_once_with(7)
+
+
+@pytest.mark.asyncio
+async def test_transient_api_retry_is_bounded_and_reraises_original_error():
+    failure = ApiError(503)
+    operation = AsyncMock(side_effect=failure)
+    sleep = AsyncMock()
+
+    with pytest.raises(ApiError) as raised:
+        await retry_transient_api(
+            operation,
+            operation_name="file_search_test",
+            attempts=3,
+            initial_delay=2,
+            sleep=sleep,
+        )
+
+    assert raised.value is failure
+    assert operation.await_count == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [2, 4]
+
+
+@pytest.mark.asyncio
+async def test_transient_api_retry_does_not_retry_permanent_4xx():
+    operation = AsyncMock(side_effect=ApiError(400))
+
+    with pytest.raises(ApiError):
+        await retry_transient_api(operation, operation_name="file_search_test")
+
+    assert operation.await_count == 1
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+def test_transient_api_error_statuses(status):
+    assert is_transient_api_error(ApiError(status)) is True
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+def test_permanent_api_error_statuses(status):
+    assert is_transient_api_error(ApiError(status)) is False
+
+
 def test_generated_interactions_429_is_detected_and_diagnosed():
     exc = GeneratedInteractionsRateLimit("quota")
 
@@ -99,6 +198,54 @@ def test_generated_interactions_429_is_detected_and_diagnosed():
     assert "status=RESOURCE_EXHAUSTED" in diagnostic
     assert "quotaId=RequestsPerMinute" in diagnostic
     assert "model:gemini-3.5-transcribe" in diagnostic
+
+
+def test_google_genai_unwrapped_error_details_are_diagnosed():
+    exc = ServerError(
+        429,
+        {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "Quota exceeded",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                    "retryDelay": "42s",
+                },
+                {
+                    "violations": [
+                        {
+                            "quotaId": "RequestsPerMinute",
+                            "quotaDimensions": {"model": "gemini-test"},
+                        }
+                    ]
+                },
+            ],
+        },
+    )
+
+    diagnostic = rate_limit_diagnostic(exc)
+
+    assert "status=RESOURCE_EXHAUSTED" in diagnostic
+    assert "retry_delay=42s" in diagnostic
+    assert "quotaId=RequestsPerMinute" in diagnostic
+    assert "model:gemini-test" in diagnostic
+
+
+def test_google_genai_malformed_retry_details_are_ignored_safely():
+    exc = ServerError(
+        429,
+        {
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "Quota exceeded",
+            "details": None,
+        },
+    )
+
+    diagnostic = rate_limit_diagnostic(exc)
+
+    assert "status=RESOURCE_EXHAUSTED" in diagnostic
+    assert "message=Quota exceeded" in diagnostic
 
 
 @pytest.mark.asyncio

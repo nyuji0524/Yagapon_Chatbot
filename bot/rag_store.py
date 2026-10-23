@@ -33,6 +33,42 @@ _LOW_INFORMATION_QUERY_TERMS = {
     "課題",
 }
 
+# Two-kanji subjects are common in short Discord questions, but accepting every
+# two-character fragment also adds particles, time words and generic verbs to
+# exact search. Keep a small, domain-neutral noun allowlist for high-signal
+# questions while the ordinary Japanese extractor remains three characters or
+# longer.
+_HIGH_INFORMATION_SHORT_QUERY_TERMS = {
+    "通知",
+    "投票",
+    "会場",
+    "地図",
+    "権限",
+    "担当",
+    "結果",
+    "構造",
+    "組織",
+    "役職",
+    "企画",
+    "協賛",
+    "新歓",
+    "本祭",
+    "会議",
+    "議題",
+    "決定",
+    "申請",
+    "受付",
+    "発券",
+    "順位",
+    "票数",
+    "場所",
+    "日程",
+    "予算",
+    "経費",
+    "在庫",
+    "部室",
+}
+
 def default_rag_db_path() -> Path:
     configured = os.environ.get("YAGAPON_RAG_DB_PATH")
     if configured:
@@ -535,7 +571,10 @@ class RagStore:
                 "",
                 segment,
             )
-            if 3 <= len(segment) <= 24 and segment not in stop_terms:
+            if (
+                3 <= len(segment) <= 24
+                or segment in _HIGH_INFORMATION_SHORT_QUERY_TERMS
+            ) and segment not in stop_terms:
                 terms.append(segment)
                 # Preserve a compound for precision, but also expose its
                 # subject when a common operational suffix would otherwise
