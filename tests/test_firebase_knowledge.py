@@ -93,7 +93,62 @@ def test_firebase_projection_drops_unapproved_fields(monkeypatch):
     assert len(evidence) == 1
     assert "AI鬼ごっこ" in evidence[0].body
     assert "private@example.com" not in evidence[0].body
+    assert "collection_path: festival/28/events" in evidence[0].body
     assert evidence[0].authority == "live_data"
+
+
+def test_evidence_path_comes_from_registry_not_fetched_document_name(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        # Treat the entire fetched name as untrusted. It may select ordering,
+        # but it must not redefine the path rendered as the contract.
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "users/private.person@example.com/secrets/map"
+        ),
+        "fields": {
+            "mapId": {"stringValue": "public-map"},
+            "status": {"stringValue": "published"},
+        },
+    }
+
+    evidence = reader._rank(
+        "27thのmapのFirestore構造はどうなっていた？",
+        "maps",
+        COLLECTIONS["maps"]["fields"],
+        [document],
+        27,
+    )
+
+    assert len(evidence) == 1
+    assert "collection_path: yagamy/27/maps" in evidence[0].body
+    assert "private.person@example.com" not in repr(evidence[0])
+    assert evidence[0].source_url.endswith("/data/~2Fyagamy~2F27~2Fmaps")
+
+
+def test_known_document_evidence_uses_registry_document_path(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "wrong/path/from-fetched-data"
+        ),
+        "fields": {"status": {"stringValue": "result"}},
+    }
+
+    evidence = reader._rank(
+        "27thのrankingの構造はどうなっていた？",
+        "rankingConfig",
+        COLLECTIONS["rankingConfig"]["fields"],
+        [document],
+        27,
+    )
+
+    assert len(evidence) == 1
+    assert "document_path: yagamy/27/config/ranking" in evidence[0].body
+    assert "wrong/path" not in repr(evidence[0])
 
 
 def test_nested_projection_drops_unknown_children_and_sensitive_urls(monkeypatch):
@@ -615,9 +670,65 @@ def test_generic_festival_runtime_question_does_not_become_a_false_search_term()
         source_type="ranking",
     ) == []
     assert FirebaseKnowledgeReader._terms(
+        "firebaseを読んで、27thの大賞企画の結果を票数も含めて教えて",
+        source_type="ranking",
+    ) == []
+    assert FirebaseKnowledgeReader._terms(
+        "27thのmapのFirestore構造をフィールドも含めて教えて",
+        source_type="maps",
+    ) == []
+    assert FirebaseKnowledgeReader._terms(
         "27thのmapのfirestore構造ってどうなってた？",
         source_type="maps",
     ) == []
+
+
+def test_query_modifiers_do_not_remove_real_firebase_value_filters():
+    assert FirebaseKnowledgeReader._terms(
+        "ITラボの票数も含めて教えて",
+        source_type="ranking",
+    ) == ["ITラボ"]
+    assert FirebaseKnowledgeReader._terms(
+        "schemaVersionも含めてmapを教えて",
+        source_type="maps",
+    ) == ["schemaVersion"]
+
+
+@pytest.mark.asyncio
+async def test_ranking_include_modifier_does_not_filter_every_public_result(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+
+    async def collection(name, _path, _statuses):
+        if name == "ranking":
+            return [
+                _ranking_document(
+                    "winner",
+                    event_name="優勝企画",
+                    category="exhibition",
+                    score=50,
+                )
+            ]
+        return [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": "result"}},
+        }]
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    evidence = await reader.evidence_for(
+        "firebaseを読んで、27thの大賞企画の結果を票数も含めて教えて",
+        QuestionKind.RUNTIME,
+        festival=27,
+    )
+
+    assert any("優勝企画" in item.body for item in evidence)
+    assert any('"score": 50' in item.body for item in evidence)
 
 
 @pytest.mark.parametrize("phrase", ["一覧", "すべて", "全て", "全部", "全件"])
@@ -939,6 +1050,93 @@ async def test_ranking_question_fetches_only_public_aggregate_and_status(
     ]
     assert any("優勝企画" in item.body and '"score": 50' in item.body for item in evidence)
     assert any(f'"status": "{public_status}"' in item.body for item in evidence)
+
+
+@pytest.mark.asyncio
+async def test_data_contract_emits_value_free_reviewed_schema_evidence(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+
+    async def collection(name, _path, _statuses):
+        if name == "ranking":
+            return [
+                _ranking_document(
+                    "winner",
+                    event_name="優勝企画",
+                    category="exhibition",
+                    score=50,
+                )
+            ]
+        return [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": "result"}},
+        }]
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    evidence = await reader.evidence_for(
+        "27thのrankingの構造はどうなっていた？",
+        QuestionKind.DATA_CONTRACT,
+        festival=27,
+    )
+
+    schema = [item for item in evidence if item.document_key.startswith("firebase:schema:")]
+    assert [item.document_key for item in schema] == [
+        "firebase:schema:ranking",
+        "firebase:schema:rankingConfig",
+    ]
+    assert "collection_path: yagamy/27/ranking" in schema[0].body
+    assert 'allowlisted_fields: ["eventId", "eventName", "category", "score"]' in schema[0].body
+    assert 'observed_fields: ["eventId", "eventName", "category", "score"]' in schema[0].body
+    assert "document_path: yagamy/27/config/ranking" in schema[1].body
+    assert all("優勝企画" not in item.body and '"score": 50' not in item.body for item in schema)
+
+
+@pytest.mark.asyncio
+async def test_data_contract_schema_keeps_unpublished_ranking_values_withheld(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "public")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+
+    async def collection(name, _path, _statuses):
+        if name == "ranking":
+            return [
+                _ranking_document(
+                    "winner",
+                    event_name="未公開の優勝企画",
+                    category="exhibition",
+                    score=99,
+                )
+            ]
+        return [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": "voting"}},
+        }]
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    evidence = await reader.evidence_for(
+        "27thのrankingの構造はどうなっていた？",
+        QuestionKind.DATA_CONTRACT,
+        festival=27,
+    )
+
+    ranking_schema = next(
+        item for item in evidence if item.document_key == "firebase:schema:ranking"
+    )
+    assert "observation: withheld-until-public-result" in ranking_schema.body
+    assert "observed_fields: []" in ranking_schema.body
+    assert all("未公開の優勝企画" not in item.body for item in evidence)
+    assert all('"score": 99' not in item.body for item in evidence)
 
 
 @pytest.mark.parametrize("config_status", ["voting", "draft", "", None])

@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bot.knowledge_authority import is_history_narrative_source
+from bot.knowledge_authority import (
+    QuestionKind,
+    allows_unreviewed_evidence,
+    direct_authorities,
+    is_history_narrative_source,
+)
 
 SQLITE_CONNECT_TIMEOUT_SECONDS = 5.0
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -972,6 +977,23 @@ class RagStore:
             placeholders = ",".join("?" for _ in selected_source_types)
             conditions.append(f"source_type IN ({placeholders})")
             params.extend(selected_source_types)
+        normalized_kind: QuestionKind | None = None
+        if question_kind is not None:
+            try:
+                normalized_kind = QuestionKind(str(question_kind).strip().casefold())
+            except ValueError:
+                normalized_kind = None
+        if normalized_kind is not None and not allows_unreviewed_evidence(normalized_kind):
+            # The caller applies the same direct-evidence policy after this
+            # query. Apply it before SQLite's candidate LIMIT as well, or a
+            # large repository-history generation can crowd every current
+            # schema/implementation record out of the candidate set before
+            # the caller gets a chance to reject the history rows.
+            authorities = direct_authorities(normalized_kind)
+            placeholders = ",".join("?" for _ in authorities)
+            conditions.append(f"authority IN ({placeholders})")
+            params.extend(authorities)
+            conditions.append("status NOT IN ('draft', 'raw', 'deprecated')")
         if clean_terms:
             term_conditions = []
             for term in clean_terms:

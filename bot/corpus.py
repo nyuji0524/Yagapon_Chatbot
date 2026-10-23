@@ -44,6 +44,8 @@ from bot.festival import (
 )
 from bot.firebase_knowledge import (
     COLLECTIONS,
+    FIREBASE_SCHEMA_CONTRACT_SOURCES,
+    FIREBASE_SCHEMA_CONTRACT_VERSION,
     FirebaseEvidence,
     FirebaseKnowledgeReader,
     firebase_projected_fields_are_safe,
@@ -1319,6 +1321,19 @@ class _FirebaseListGroup:
     completeness: str
     order: str
     items: tuple[_FirebaseListItem, ...]
+
+
+@dataclass(frozen=True)
+class _FirebaseSchemaContract:
+    festival: int
+    source_type: str
+    path_kind: str
+    path: str
+    allowlisted_fields: tuple[str, ...]
+    observed_fields: tuple[str, ...]
+    observation: str
+    title: str
+    source_url: str
 
 
 @dataclass(frozen=True)
@@ -2728,6 +2743,8 @@ class CorpusManager:
         cross_source_history = question_kind is QuestionKind.HISTORY and any(
             is_history_narrative_source(hit.source_type) for hit in lexical_hits
         )
+        schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
+        schema_sources: list[str] = []
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -2760,6 +2777,23 @@ class CorpusManager:
                 question_kind,
                 festival=festival,
             )
+            if question_kind is QuestionKind.DATA_CONTRACT:
+                schema_contracts = self._parse_firebase_schema_contracts(
+                    firebase_evidence
+                )
+                schema_keys = {
+                    f"firebase:schema:{contract.source_type}"
+                    for contract in schema_contracts
+                }
+                schema_evidence = [
+                    item
+                    for item in firebase_evidence
+                    if item.document_key in schema_keys
+                ]
+                schema_sources = self._firebase_sources(schema_evidence, [])
+            else:
+                schema_contracts = ()
+                schema_sources = []
             if comprehensive and self._is_firebase_only_exhaustive_request(question):
                 firebase_groups = self._parse_firebase_list_groups(firebase_evidence)
                 firebase_sources = self._firebase_sources(firebase_evidence, [])
@@ -3124,7 +3158,17 @@ class CorpusManager:
                             recovery_semantic_evidence,
                         )
             no_answer = not sources or not has_answer
-            if no_answer:
+            if no_answer and schema_contracts and schema_sources:
+                # Source code may describe nested collections and invariants
+                # that the public projection intentionally omits, so always
+                # give normal grounded retrieval the first chance to answer.
+                # This deterministic projection is the safe fallback when the
+                # broader answer cannot pass grounding.
+                answer = self._render_firebase_schema_contracts(schema_contracts)
+                sources = schema_sources
+                has_answer = True
+                no_answer = False
+            elif no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
                     "年度や用語を変えて質問するか、資料を追加してほしいぽん。"
@@ -3143,6 +3187,14 @@ class CorpusManager:
             )
         except Exception:
             log.exception("RAG query failed")
+            if schema_contracts and schema_sources:
+                return RagAnswer(
+                    text=self._render_firebase_schema_contracts(schema_contracts),
+                    citations=tuple(schema_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,
@@ -3236,6 +3288,190 @@ class CorpusManager:
     def _is_firebase_only_exhaustive_request(question: str) -> bool:
         """Keep the deterministic list path limited to current-value list requests."""
         return is_explicit_firebase_list_query(question)
+
+    @staticmethod
+    def _parse_firebase_schema_contracts(
+        evidence: list[FirebaseEvidence],
+    ) -> tuple[_FirebaseSchemaContract, ...]:
+        """Revalidate schema projections before deterministic rendering.
+
+        Evidence bodies are still untrusted data.  Paths and allowlists must
+        exactly match the in-process reviewed registry; Firestore may only add
+        a subset of safely projected, observed field names.
+        """
+        schema_items = [
+            item
+            for item in evidence
+            if item.document_key.startswith("firebase:schema:")
+        ]
+        if not schema_items:
+            return ()
+
+        header_pattern = re.compile(
+            r"\AFirestore公開データ契約（(?P<festival>\d+)th / "
+            r"(?P<source_type>[A-Za-z][A-Za-z0-9]*)）\Z"
+        )
+        allowed_observations = {
+            "public-documents-observed",
+            "no-observed-public-fields",
+            "withheld-until-public-result",
+            "lookup-unavailable",
+        }
+        contracts: list[_FirebaseSchemaContract] = []
+        seen_source_types: set[str] = set()
+        for item in schema_items:
+            lines = item.body.splitlines()
+            if len(lines) != 8:
+                return ()
+            header = header_pattern.fullmatch(lines[0])
+            if header is None:
+                return ()
+            festival = int(header.group("festival"))
+            source_type = header.group("source_type")
+            if (
+                source_type not in FIREBASE_SCHEMA_CONTRACT_SOURCES
+                or source_type in seen_source_types
+                or (contracts and festival != contracts[0].festival)
+                or item.document_key != f"firebase:schema:{source_type}"
+                or item.authority != "live_data"
+                or item.status != "current"
+                or lines[1]
+                != f"schema_contract: {FIREBASE_SCHEMA_CONTRACT_VERSION}"
+                or lines[2] != f"reference: schema:{source_type}"
+                or lines[7]
+                != "scope: public-readonly-projection; not-a-complete-firestore-schema"
+            ):
+                return ()
+
+            config = COLLECTIONS[source_type]
+            path_kind = (
+                "document_path"
+                if config.get("document") is True
+                else "collection_path"
+            )
+            path = str(config["path"]).format(festival=festival)
+            if lines[3] != f"{path_kind}: {path}":
+                return ()
+
+            if not lines[4].startswith("allowlisted_fields: ") or not lines[5].startswith(
+                "observed_fields: "
+            ):
+                return ()
+            try:
+                allowlisted = json.loads(lines[4].removeprefix("allowlisted_fields: "))
+                observed = json.loads(lines[5].removeprefix("observed_fields: "))
+            except (TypeError, ValueError):
+                return ()
+            expected_allowlist = tuple(str(value) for value in config["fields"])
+            if (
+                not isinstance(allowlisted, list)
+                or tuple(allowlisted) != expected_allowlist
+                or not isinstance(observed, list)
+                or any(not isinstance(value, str) for value in observed)
+            ):
+                return ()
+            observed_fields = tuple(observed)
+            expected_observed_order = tuple(
+                field for field in expected_allowlist if field in set(observed_fields)
+            )
+            if observed_fields != expected_observed_order:
+                return ()
+
+            if not lines[6].startswith("observation: "):
+                return ()
+            observation = lines[6].removeprefix("observation: ")
+            if observation not in allowed_observations:
+                return ()
+            if (
+                (observation == "public-documents-observed" and not observed_fields)
+                or (
+                    observation
+                    in {
+                        "no-observed-public-fields",
+                        "withheld-until-public-result",
+                        "lookup-unavailable",
+                    }
+                    and observed_fields
+                )
+                or (
+                    observation == "withheld-until-public-result"
+                    and source_type != "ranking"
+                )
+            ):
+                return ()
+
+            seen_source_types.add(source_type)
+            contracts.append(
+                _FirebaseSchemaContract(
+                    festival=festival,
+                    source_type=source_type,
+                    path_kind=path_kind,
+                    path=path,
+                    allowlisted_fields=expected_allowlist,
+                    observed_fields=observed_fields,
+                    observation=observation,
+                    title=item.title,
+                    source_url=item.source_url,
+                )
+            )
+        return tuple(contracts)
+
+    @staticmethod
+    def _render_firebase_schema_contracts(
+        contracts: tuple[_FirebaseSchemaContract, ...],
+    ) -> str:
+        """Render a reviewed public projection without model inference."""
+        labels = {
+            "ranking": "大賞企画の公開集計",
+            "rankingConfig": "大賞企画の公開状態",
+            "maps": "公開マップ",
+        }
+        lines = [
+            "# Firestore公開データ構造",
+            "",
+            (
+                "以下は、やがぽんが読み取りを許可された公開・読み取り専用の投影だぽん。"
+            ),
+            "",
+        ]
+        for contract in contracts:
+            path_label = (
+                "ドキュメント"
+                if contract.path_kind == "document_path"
+                else "コレクション"
+            )
+            lines.extend(
+                (
+                    f"## {contract.festival}th {labels[contract.source_type]}",
+                    f"- {path_label}: `{contract.path}`",
+                    "- 読み取り許可フィールド: "
+                    + ", ".join(f"`{field}`" for field in contract.allowlisted_fields),
+                )
+            )
+            if contract.observed_fields:
+                lines.append(
+                    "- 現在の公開データで観測したフィールド: "
+                    + ", ".join(f"`{field}`" for field in contract.observed_fields)
+                )
+            elif contract.observation == "withheld-until-public-result":
+                lines.append(
+                    "- 現在の観測フィールド: 結果公開前の得票値を出さないため表示していないぽん。"
+                )
+            elif contract.observation == "lookup-unavailable":
+                lines.append(
+                    "- 現在の観測フィールド: Firestoreを確認できなかったため未確認だぽん。"
+                )
+            else:
+                lines.append(
+                    "- 現在の観測フィールド: 今回取得した公開データでは確認できなかったぽん。"
+                )
+            lines.append("")
+        lines.append(
+            "※ これは公開用allowlistと現在観測できたフィールド名の一覧で、"
+            "非公開データ、未許可フィールド、サブコレクションを含むFirestore全体の"
+            "完全なスキーマではないぽん。"
+        )
+        return "\n".join(lines).rstrip()
 
     @classmethod
     def _parse_firebase_list_groups(

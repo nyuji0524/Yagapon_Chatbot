@@ -720,6 +720,52 @@ def test_sql_candidate_limit_uses_relevance_before_recency(tmp_path):
     assert hits[0].document_key == "specific"
 
 
+def test_data_contract_filters_non_direct_history_before_candidate_limit(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "source_type", "string_value": "source_code_history"},
+    ]
+    for index in range(100):
+        store.upsert_document(
+            f"documents/history-{index}",
+            f"ranking Firestore 構造の古い変更履歴 {index}",
+            [
+                *common,
+                {"key": "document_key", "string_value": f"history-{index}"},
+                {"key": "authority", "string_value": "repository_history"},
+                {"key": "status", "string_value": "historical"},
+                {"key": "end_at", "string_value": "2026-09-30"},
+            ],
+        )
+    store.upsert_document(
+        "documents/current-contract",
+        "ranking Firestore 構造の現行コレクション契約",
+        [
+            {"key": "guild_id", "numeric_value": 1},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "access_scope", "string_value": "guild"},
+            {"key": "document_key", "string_value": "current-contract"},
+            {"key": "authority", "string_value": "repository_context"},
+            {"key": "status", "string_value": "current"},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "end_at", "string_value": "2025-01-01"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["ranking", "Firestore", "構造"],
+        festival=27,
+        question_kind="data_contract",
+        limit=4,
+    )
+
+    assert [hit.document_key for hit in hits] == ["current-contract"]
+
+
 def test_query_terms_keep_cross_team_and_data_contract_cues():
     shinkan = RagStore.query_terms("新歓webで外部や他局から要求された内容をまとめて")
     ranking = RagStore.query_terms("27thのrankingの構造と票数を教えて")

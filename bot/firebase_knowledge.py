@@ -156,6 +156,7 @@ COLLECTIONS = {
         "keywords": r"開催時間|終了時間|会期|当日設定|公開設定|config|設定値",
         # Rules expose this known public document, not a list of the config collection.
         "path": "yagamy/{festival}/config/standbyPass",
+        "document": True,
         "fields": (
             "name", "status", "startAt", "endAt", "openingAt", "closingAt",
             "enabled", "isEnabled", "isActive", "festival", "day1StartOfDayAt",
@@ -163,6 +164,13 @@ COLLECTIONS = {
         ),
     },
 }
+
+# Only these reviewed public projections currently have enough information for
+# a deterministic data-contract answer.  Keep this list deliberately narrower
+# than COLLECTIONS: adding a runtime reader must not silently make its storage
+# contract answerable without a matching review.
+FIREBASE_SCHEMA_CONTRACT_SOURCES = frozenset({"ranking", "rankingConfig", "maps"})
+FIREBASE_SCHEMA_CONTRACT_VERSION = "reviewed-public-projection-v1"
 
 _FIREBASE_LIST_NOUN = (
     r"(?:公開)?通知|お知らせ|企画|イベント|整理券(?:対象|企画|イベント)?|"
@@ -425,6 +433,31 @@ class FirebaseKnowledgeReader:
                 result_by_name.get("rankingConfig")
             )
             for (name, config), documents in zip(selected, results, strict=True):
+                if kind is QuestionKind.DATA_CONTRACT and name in FIREBASE_SCHEMA_CONTRACT_SOURCES:
+                    if isinstance(documents, BaseException):
+                        schema_documents: list[dict[str, Any]] = []
+                        observation = "lookup-unavailable"
+                    elif name == "ranking" and not ranking_public:
+                        # Field names from unpublished aggregate documents are
+                        # not required to describe the reviewed projection. Do
+                        # not inspect them until the existing result gate opens.
+                        schema_documents = []
+                        observation = "withheld-until-public-result"
+                    else:
+                        schema_documents = documents
+                        observation = (
+                            "public-documents-observed"
+                            if self._observed_allowlisted_fields(name, documents)
+                            else "no-observed-public-fields"
+                        )
+                    evidence.append(
+                        self._schema_contract_evidence(
+                            name,
+                            year,
+                            schema_documents,
+                            observation=observation,
+                        )
+                    )
                 if isinstance(documents, BaseException):
                     log.warning("Firebase collection lookup failed for %s: %s", name, documents)
                     continue
@@ -632,15 +665,12 @@ class FirebaseKnowledgeReader:
         if not selected:
             return []
 
-        collection_path = selected[0]["path"].rsplit("/", 1)[0]
+        registry_path = self._registry_path(source_type, festival)
         # Firebase Console encodes a Firestore path with ``~2F`` and expects
-        # the root slash too. Every item in this collection deliberately shares
-        # one URL so Discord emits at most one login preview for the citation.
-        console_path = "~2F" + quote(collection_path, safe="").replace("%2F", "~2F")
-        url = (
-            f"https://console.firebase.google.com/project/{self.project_id}/"
-            f"firestore/databases/-default-/data/{console_path}"
-        )
+        # the root slash too.  Use only the reviewed registry path here; a
+        # document ``name`` is fetched data and must never redefine the path we
+        # present as the public data contract.
+        url = self._console_url(registry_path)
         citation_title = f"{festival}th {_SOURCE_LABELS.get(source_type, source_type)}"
         returned_count = len(selected)
         matched_count = len(ranked)
@@ -665,7 +695,12 @@ class FirebaseKnowledgeReader:
                         f"completeness={completeness}; order={order}"
                     )
                 header += f"\nitem: {position}/{returned_count}"
-            body_lines = [header, f"reference: {reference}"]
+            path_key = self._registry_path_kind(source_type)
+            body_lines = [
+                header,
+                f"{path_key}: {registry_path}",
+                f"reference: {reference}",
+            ]
             if item.get("computed_rank"):
                 body_lines.append(f"computed_rank: {item['computed_rank']}")
             body_lines.append(
@@ -681,6 +716,95 @@ class FirebaseKnowledgeReader:
                 )
             )
         return evidence
+
+    @staticmethod
+    def _registry_path(source_type: str, festival: int) -> str:
+        """Resolve a Firestore path exclusively from the reviewed registry."""
+        return str(COLLECTIONS[source_type]["path"]).format(festival=festival)
+
+    @staticmethod
+    def _registry_path_kind(source_type: str) -> str:
+        return (
+            "document_path"
+            if COLLECTIONS[source_type].get("document") is True
+            else "collection_path"
+        )
+
+    def _console_url(self, registry_path: str) -> str:
+        console_path = "~2F" + quote(registry_path, safe="").replace("%2F", "~2F")
+        return (
+            f"https://console.firebase.google.com/project/{self.project_id}/"
+            f"firestore/databases/-default-/data/{console_path}"
+        )
+
+    @classmethod
+    def _observed_allowlisted_fields(
+        cls,
+        source_type: str,
+        documents: list[dict[str, Any]],
+    ) -> tuple[str, ...]:
+        """Return safe top-level field names observed in fetched public data.
+
+        Values still pass through the same projection used for ordinary
+        evidence.  A field containing private data or an unreviewed nested
+        shape is therefore not reported merely because its key existed.
+        """
+        observed: set[str] = set()
+        for document in documents:
+            fields = _document_fields(document)
+            for key in COLLECTIONS[source_type]["fields"]:
+                if key not in fields or fields[key] in (None, "", (), [], {}):
+                    continue
+                if cls._project_field(source_type, key, fields[key]) is not _DROP:
+                    observed.add(str(key))
+        return tuple(
+            str(key)
+            for key in COLLECTIONS[source_type]["fields"]
+            if key in observed
+        )
+
+    def _schema_contract_evidence(
+        self,
+        source_type: str,
+        festival: int,
+        documents: list[dict[str, Any]],
+        *,
+        observation: str,
+    ) -> FirebaseEvidence:
+        """Build a value-free, deterministic public schema projection.
+
+        The path and allowlist originate only in COLLECTIONS.  Firestore data
+        contributes field *names* after safe projection, never a path or an
+        unpublished value.
+        """
+        registry_path = self._registry_path(source_type, festival)
+        path_kind = self._registry_path_kind(source_type)
+        reference = f"schema:{source_type}"
+        allowlisted_fields = tuple(str(item) for item in COLLECTIONS[source_type]["fields"])
+        observed_fields = self._observed_allowlisted_fields(source_type, documents)
+        body = "\n".join(
+            (
+                f"Firestore公開データ契約（{festival}th / {source_type}）",
+                f"schema_contract: {FIREBASE_SCHEMA_CONTRACT_VERSION}",
+                f"reference: {reference}",
+                f"{path_kind}: {registry_path}",
+                "allowlisted_fields: "
+                + json.dumps(allowlisted_fields, ensure_ascii=False),
+                "observed_fields: "
+                + json.dumps(observed_fields, ensure_ascii=False),
+                f"observation: {observation}",
+                "scope: public-readonly-projection; not-a-complete-firestore-schema",
+            )
+        )
+        return FirebaseEvidence(
+            document_key=f"firebase:{reference}",
+            title=(
+                f"{festival}th {_SOURCE_LABELS.get(source_type, source_type)}"
+                "の公開データ契約"
+            ),
+            body=body,
+            source_url=self._console_url(registry_path),
+        )
 
     @classmethod
     def _wire_field_paths(cls, source_type: str) -> tuple[str, ...]:
@@ -725,18 +849,22 @@ class FirebaseKnowledgeReader:
         question = re.sub(r"(?:第\s*)?\d+(?:th|回)", " ", question, flags=re.IGNORECASE)
         if source_type in {"ranking", "rankingConfig"}:
             question = re.sub(
-                r"(?:firebase|firestore)(?:を)?(?:読んで|見て|確認して)?|"
-                r"大賞企画|Y-?1(?:グランプリ)?|ランキング|ranking|"
-                r"(?:公開)?状態|結果|得票(?:数)?|票数|順位|構造|スキーマ|schema|"
-                r"あわせて|合わせて|(?:票数)?(?:つき|付き)|どうなって(?:いた|いる|る|た)?",
+                r"(?:firebase|firestore)(?![A-Za-z0-9_])(?:を)?(?:読んで|見て|確認して)?|"
+                r"大賞企画|Y-?1(?:グランプリ)?|ランキング|"
+                r"ranking(?![A-Za-z0-9_])|"
+                r"(?:公開)?状態|結果|得票(?:数)?|票数|順位|構造|"
+                r"フィールド|fields?(?![A-Za-z0-9_])|スキーマ|"
+                r"schema(?![A-Za-z0-9_])|"
+                r"(?:票数)?(?:つき|付き)|どうなって(?:いた|いる|る|た)?",
                 " ",
                 question,
                 flags=re.IGNORECASE,
             )
         elif source_type == "maps":
             question = re.sub(
-                r"(?:firebase|firestore)(?:を)?(?:読んで|見て|確認して)?|"
-                r"map|地図|マップ|構造|スキーマ|schema|現在|状態|"
+                r"(?:firebase|firestore)(?![A-Za-z0-9_])(?:を)?(?:読んで|見て|確認して)?|"
+                r"map(?![A-Za-z0-9_])|地図|マップ|構造|フィールド|"
+                r"fields?(?![A-Za-z0-9_])|スキーマ|schema(?![A-Za-z0-9_])|現在|状態|"
                 r"どうなって(?:いた|いる|る|た)?",
                 " ",
                 question,
@@ -749,6 +877,17 @@ class FirebaseKnowledgeReader:
         )
         terms = []
         for part in stripped.split():
+            # Request modifiers can remain after the entity/intent terms above
+            # are removed (for example ``票数も含めて`` -> ``も含めて``).
+            # They are not value filters.  Strip only a trailing modifier so a
+            # real selector such as ``ITラボも含めて`` remains ``ITラボ``.
+            part = re.sub(
+                r"(?:も|を)?(?:含めて|あわせて|合わせて|まとめて)$",
+                "",
+                part,
+            )
+            if part in {"詳しく", "具体的に", "詳細に"}:
+                continue
             part = re.sub(r"(?:の|は|を|が|に|で|と)+$", "", part)
             if len(part) >= 2:
                 terms.append(part)

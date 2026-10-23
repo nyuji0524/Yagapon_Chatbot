@@ -30,7 +30,7 @@ from bot.corpus import (
     trusted_festival_mapping_response,
 )
 from bot.festival import CalendarWindow
-from bot.firebase_knowledge import FirebaseEvidence
+from bot.firebase_knowledge import FirebaseEvidence, FirebaseKnowledgeReader
 from bot.knowledge_authority import QuestionKind
 from bot.knowledge_pipeline import (
     KnowledgePipelineBusy,
@@ -2524,6 +2524,188 @@ async def test_data_contract_firebase_sample_still_searches_source_code(corpus_m
         "fileSearchStores/test"
     ]
     assert "firebase-runtime" in call.kwargs["contents"]
+
+
+@pytest.mark.asyncio
+async def test_map_data_contract_falls_back_to_reviewed_public_projection(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": (
+            "projects/demo-project/databases/(default)/documents/"
+            "yagamy/27/maps/yagami-campus"
+        ),
+        "fields": {
+            "mapId": {"stringValue": "yagami-campus"},
+            "status": {"stringValue": "published"},
+            "schemaVersion": {"integerValue": "1"},
+            "floorId": {"stringValue": "campus"},
+        },
+    }
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [document],
+        observation="public-documents-observed",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[schema])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("source search unavailable")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのmapのFirestore構造ってどうなってた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`yagamy/27/maps`" in result.text
+    assert "`mapId`" in result.text
+    assert "`schemaVersion`" in result.text
+    assert "`floorId`" in result.text
+    assert "完全なスキーマではない" in result.text
+    assert len(result.citations) == 1
+    corpus_manager._client.aio.models.generate_content.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ranking_data_contract_falls_back_to_collection_and_config_paths(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    ranking = reader._schema_contract_evidence(
+        "ranking",
+        27,
+        [],
+        observation="withheld-until-public-result",
+    )
+    config = reader._schema_contract_evidence(
+        "rankingConfig",
+        27,
+        [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": "voting"}},
+        }],
+        observation="public-documents-observed",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(
+        return_value=[ranking, config]
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ranking", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("source search unavailable")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのrankingの構造はどうなっていた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`yagamy/27/ranking`" in result.text
+    assert "`yagamy/27/config/ranking`" in result.text
+    assert "`score`" in result.text
+    assert "結果公開前の得票値を出さない" in result.text
+    assert "99" not in result.text
+    assert len(result.citations) == 2
+    corpus_manager._client.aio.models.generate_content.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_data_contract_prefers_current_repository_contract_over_projection(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [],
+        observation="no-observed-public-fields",
+    )
+    source_hit = LexicalHit(
+        document_key="repo-map-contract",
+        channel_name="yagamifes-firebase:functions/yagamy/mapCalibration.js",
+        festival=27,
+        source_url=(
+            "https://github.com/YagamiFes-IT/yagamifes-firebase/"
+            "blob/main/functions/yagamy/mapCalibration.js"
+        ),
+        excerpt=(
+            "yagamy/27/maps/{mapId} has nested features and calibrations "
+            "subcollections in the current implementation."
+        ),
+        score=500,
+        authority="repository_context",
+        status="current",
+        source_type="source_code",
+        access_scope="guild",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[schema])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[source_hit])
+    corpus_manager._recover_from_lexical_hits = AsyncMock(
+        return_value=(
+            "`yagamy/27/maps/{mapId}` の下に `features` と `calibrations` の"
+            "サブコレクションがあるぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:exact:repo-map-contract]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        )
+    )
+    corpus_manager._recovered_claims_supported = Mock(return_value=True)
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=AssertionError("direct current repository evidence should answer")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのmapのFirestore構造ってどうなってた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`features`" in result.text
+    assert "`calibrations`" in result.text
+    assert "完全なスキーマではない" not in result.text
+    assert result.lexical_keys == ("repo-map-contract",)
+    corpus_manager._recover_from_lexical_hits.assert_awaited_once()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+
+
+def test_schema_renderer_rejects_forged_non_registry_path(monkeypatch, corpus_manager):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [],
+        observation="no-observed-public-fields",
+    )
+    forged = FirebaseEvidence(
+        document_key=schema.document_key,
+        title=schema.title,
+        body=schema.body.replace(
+            "collection_path: yagamy/27/maps",
+            "collection_path: users/private/maps",
+        ),
+        source_url=schema.source_url,
+    )
+
+    assert corpus_manager._parse_firebase_schema_contracts([forged]) == ()
 
 
 @pytest.mark.asyncio

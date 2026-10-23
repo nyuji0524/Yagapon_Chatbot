@@ -943,6 +943,9 @@ def test_checked_in_manifest_covers_every_reviewed_source(monkeypatch):
     assert fetches["YagamiFes-IT/Yaga_Support"] == "archive"
     assert fetches["YagamiFes-IT/yagamifes-firebase"] == "archive"
     assert fetches["YagamiFes-IT/YagamiFes-IT-Knowledge"] == "archive"
+    includes = {repository.name: repository.include for repository in repositories}
+    assert "docs/queue/" in includes["YagamiFes-IT/Yaga_Support"]
+    assert "docs/27th-map-data.md" in includes["YagamiFes-IT/yagamifes-firebase"]
 
 
 def test_repository_env_can_only_narrow_reviewed_manifest(monkeypatch, tmp_path):

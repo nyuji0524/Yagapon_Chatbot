@@ -6,12 +6,12 @@ repositories:
     ref: main
     private: true
     history: true
-    include: [lib/, test/, docs/current_spec/, pubspec.yaml, firebase.json]
+    include: [lib/, test/, docs/current_spec/, docs/queue/, pubspec.yaml, firebase.json]
   - name: YagamiFes-IT/yagamifes-firebase
     ref: main
     private: true
     history: true
-    include: [functions/, firestore.rules, firestore.indexes.json, firebase.json]
+    include: [functions/, docs/27th-map-data.md, firestore.rules, firestore.indexes.json, firebase.json]
   - name: YagamiFes-IT/Yagamifes_Web_2025
     ref: main
     private: true

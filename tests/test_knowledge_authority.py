@@ -26,6 +26,8 @@ def test_question_classification_covers_source_authority_modes():
     assert classify_question("27thの大賞企画の結果と票数を教えて") == QuestionKind.RUNTIME
     assert classify_question("去年の今頃って何してた？") == QuestionKind.HISTORY
     assert classify_question("新歓Webで他局から要求があった内容をまとめて") == QuestionKind.HISTORY
+    assert classify_question("正常に処理が終わった録音PCMは残りますか") == QuestionKind.DATA_CONTRACT
+    assert classify_question("27thで整理券機能全体を管理できたロールは何ですか") == QuestionKind.AUTHORIZATION
 
 
 def test_authority_priority_changes_with_question_kind():
