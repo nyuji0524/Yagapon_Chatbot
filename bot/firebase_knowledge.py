@@ -804,6 +804,11 @@ class FirebaseKnowledgeReader:
             ),
             body=body,
             source_url=self._console_url(registry_path),
+            # The contract path and allowlist come from the deployed reader
+            # registry, not from a Firestore document.  Current observations
+            # are supplementary and never widen that reviewed projection.
+            authority="deployed_implementation",
+            status="deployed",
         )
 
     @classmethod

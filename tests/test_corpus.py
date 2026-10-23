@@ -2533,6 +2533,7 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
 ):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
     reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
     document = {
         "name": (
             "projects/demo-project/databases/(default)/documents/"
@@ -2551,7 +2552,7 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
         [document],
         observation="public-documents-observed",
     )
-    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[schema])
+    reader.evidence_for = AsyncMock(return_value=[schema])
     corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
     corpus_manager._client.aio.models.generate_content = AsyncMock(
@@ -2571,6 +2572,8 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
     assert "`floorId`" in result.text
     assert "完全なスキーマではない" in result.text
     assert len(result.citations) == 1
+    assert "やがぽん公開読み取り投影" in result.citations[0]
+    assert "Firebase現在値" not in result.citations[0]
     corpus_manager._client.aio.models.generate_content.assert_awaited()
 
 
@@ -2581,6 +2584,7 @@ async def test_ranking_data_contract_falls_back_to_collection_and_config_paths(
 ):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
     reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
     ranking = reader._schema_contract_evidence(
         "ranking",
         27,
@@ -2599,9 +2603,7 @@ async def test_ranking_data_contract_falls_back_to_collection_and_config_paths(
         }],
         observation="public-documents-observed",
     )
-    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(
-        return_value=[ranking, config]
-    )
+    reader.evidence_for = AsyncMock(return_value=[ranking, config])
     corpus_manager.rag_store.query_terms = Mock(return_value=["ranking", "構造"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
     corpus_manager._client.aio.models.generate_content = AsyncMock(
@@ -2631,6 +2633,7 @@ async def test_data_contract_prefers_current_repository_contract_over_projection
 ):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
     reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
     schema = reader._schema_contract_evidence(
         "maps",
         27,
@@ -2655,7 +2658,7 @@ async def test_data_contract_prefers_current_repository_contract_over_projection
         source_type="source_code",
         access_scope="guild",
     )
-    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[schema])
+    reader.evidence_for = AsyncMock(return_value=[schema])
     corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[source_hit])
     corpus_manager._recover_from_lexical_hits = AsyncMock(
@@ -2689,6 +2692,7 @@ async def test_data_contract_prefers_current_repository_contract_over_projection
 def test_schema_renderer_rejects_forged_non_registry_path(monkeypatch, corpus_manager):
     monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
     reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
     schema = reader._schema_contract_evidence(
         "maps",
         27,
@@ -2703,9 +2707,76 @@ def test_schema_renderer_rejects_forged_non_registry_path(monkeypatch, corpus_ma
             "collection_path: users/private/maps",
         ),
         source_url=schema.source_url,
+        authority=schema.authority,
+        status=schema.status,
     )
 
     assert corpus_manager._parse_firebase_schema_contracts([forged]) == ()
+
+
+def test_schema_renderer_rejects_wrong_festival_and_untrusted_citation(
+    monkeypatch,
+    corpus_manager,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    schema = reader._schema_contract_evidence(
+        "maps",
+        28,
+        [],
+        observation="no-observed-public-fields",
+    )
+
+    assert corpus_manager._parse_firebase_schema_contracts(
+        [schema],
+        expected_festival=27,
+    ) == ()
+
+    forged_url = FirebaseEvidence(
+        document_key=schema.document_key,
+        title=schema.title,
+        body=schema.body,
+        source_url="https://attacker.example/login",
+        authority=schema.authority,
+        status=schema.status,
+    )
+    assert corpus_manager._parse_firebase_schema_contracts(
+        [forged_url],
+        expected_festival=28,
+    ) == ()
+
+
+def test_schema_projection_fallback_rejects_unrepresented_contract_details(
+    monkeypatch,
+    corpus_manager,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    schema = reader._schema_contract_evidence(
+        "maps",
+        27,
+        [],
+        observation="no-observed-public-fields",
+    )
+    contracts = corpus_manager._parse_firebase_schema_contracts(
+        [schema],
+        expected_festival=27,
+    )
+
+    assert corpus_manager._firebase_schema_fallback_allowed(
+        "27thのmapのFirestore構造は？",
+        contracts,
+    )
+    assert not corpus_manager._firebase_schema_fallback_allowed(
+        "27thのmap features.geometryの型と必須条件は？",
+        contracts,
+    )
+    assert not corpus_manager._firebase_schema_fallback_allowed(
+        "27thのmapでクライアントが書き込み可能なフィールドは？",
+        contracts,
+    )
 
 
 @pytest.mark.asyncio

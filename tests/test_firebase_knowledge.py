@@ -1090,6 +1090,8 @@ async def test_data_contract_emits_value_free_reviewed_schema_evidence(monkeypat
         "firebase:schema:ranking",
         "firebase:schema:rankingConfig",
     ]
+    assert all(item.authority == "deployed_implementation" for item in schema)
+    assert all(item.status == "deployed" for item in schema)
     assert "collection_path: yagamy/27/ranking" in schema[0].body
     assert 'allowlisted_fields: ["eventId", "eventName", "category", "score"]' in schema[0].body
     assert 'observed_fields: ["eventId", "eventName", "category", "score"]' in schema[0].body

@@ -2756,6 +2756,7 @@ class CorpusManager:
         )
         schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
         schema_sources: list[str] = []
+        schema_fallback_allowed = False
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -2790,18 +2791,15 @@ class CorpusManager:
             )
             if question_kind is QuestionKind.DATA_CONTRACT:
                 schema_contracts = self._parse_firebase_schema_contracts(
-                    firebase_evidence
+                    firebase_evidence,
+                    expected_festival=festival,
                 )
-                schema_keys = {
-                    f"firebase:schema:{contract.source_type}"
-                    for contract in schema_contracts
-                }
-                schema_evidence = [
-                    item
-                    for item in firebase_evidence
-                    if item.document_key in schema_keys
-                ]
-                schema_sources = self._firebase_sources(schema_evidence, [])
+                schema_fallback_allowed = self._firebase_schema_fallback_allowed(
+                    question,
+                    schema_contracts,
+                )
+                if schema_fallback_allowed:
+                    schema_sources = self._firebase_schema_sources(schema_contracts)
             else:
                 schema_contracts = ()
                 schema_sources = []
@@ -2854,6 +2852,19 @@ class CorpusManager:
                 evidence: list[FirebaseEvidence],
                 parsed: ParsedModelAnswer,
             ) -> list[FirebaseEvidence]:
+                # Runtime documents may be useful context, but only an
+                # authority approved for this question kind may become the
+                # cited, sole basis of an answer.  Schema-contract evidence is
+                # explicitly tagged as deployed implementation by its builder.
+                evidence = [
+                    item
+                    for item in evidence
+                    if can_answer_directly(
+                        question_kind,
+                        item.authority,
+                        item.status,
+                    )
+                ]
                 if not parsed.explicit_status:
                     return evidence
                 selected = set(parsed.evidence_keys)
@@ -3169,7 +3180,12 @@ class CorpusManager:
                             recovery_semantic_evidence,
                         )
             no_answer = not sources or not has_answer
-            if no_answer and schema_contracts and schema_sources:
+            if (
+                no_answer
+                and schema_fallback_allowed
+                and schema_contracts
+                and schema_sources
+            ):
                 # Source code may describe nested collections and invariants
                 # that the public projection intentionally omits, so always
                 # give normal grounded retrieval the first chance to answer.
@@ -3198,7 +3214,7 @@ class CorpusManager:
             )
         except Exception:
             log.exception("RAG query failed")
-            if schema_contracts and schema_sources:
+            if schema_fallback_allowed and schema_contracts and schema_sources:
                 return RagAnswer(
                     text=self._render_firebase_schema_contracts(schema_contracts),
                     citations=tuple(schema_sources),
@@ -3300,9 +3316,11 @@ class CorpusManager:
         """Keep the deterministic list path limited to current-value list requests."""
         return is_explicit_firebase_list_query(question)
 
-    @staticmethod
     def _parse_firebase_schema_contracts(
+        self,
         evidence: list[FirebaseEvidence],
+        *,
+        expected_festival: int | None = None,
     ) -> tuple[_FirebaseSchemaContract, ...]:
         """Revalidate schema projections before deterministic rendering.
 
@@ -3330,6 +3348,14 @@ class CorpusManager:
         }
         contracts: list[_FirebaseSchemaContract] = []
         seen_source_types: set[str] = set()
+        project_id = self.firebase_knowledge.project_id
+        if not project_id or re.fullmatch(r"[a-z][a-z0-9-]{4,62}", project_id) is None:
+            return ()
+        source_labels = {
+            "ranking": "大賞企画の公開集計",
+            "rankingConfig": "大賞企画の公開状態",
+            "maps": "公開マップ",
+        }
         for item in schema_items:
             lines = item.body.splitlines()
             if len(lines) != 8:
@@ -3343,9 +3369,10 @@ class CorpusManager:
                 source_type not in FIREBASE_SCHEMA_CONTRACT_SOURCES
                 or source_type in seen_source_types
                 or (contracts and festival != contracts[0].festival)
+                or (expected_festival is not None and festival != expected_festival)
                 or item.document_key != f"firebase:schema:{source_type}"
-                or item.authority != "live_data"
-                or item.status != "current"
+                or item.authority != "deployed_implementation"
+                or item.status != "deployed"
                 or lines[1]
                 != f"schema_contract: {FIREBASE_SCHEMA_CONTRACT_VERSION}"
                 or lines[2] != f"reference: schema:{source_type}"
@@ -3361,7 +3388,15 @@ class CorpusManager:
                 else "collection_path"
             )
             path = str(config["path"]).format(festival=festival)
-            if lines[3] != f"{path_kind}: {path}":
+            expected_title = (
+                f"{festival}th {source_labels[source_type]}の公開データ契約"
+            )
+            expected_source_url = self.firebase_knowledge._console_url(path)
+            if (
+                lines[3] != f"{path_kind}: {path}"
+                or item.title != expected_title
+                or item.source_url != expected_source_url
+            ):
                 return ()
 
             if not lines[4].startswith("allowlisted_fields: ") or not lines[5].startswith(
@@ -3421,11 +3456,68 @@ class CorpusManager:
                     allowlisted_fields=expected_allowlist,
                     observed_fields=observed_fields,
                     observation=observation,
-                    title=item.title,
-                    source_url=item.source_url,
+                    title=expected_title,
+                    source_url=expected_source_url,
                 )
             )
         return tuple(contracts)
+
+    @staticmethod
+    def _firebase_schema_fallback_allowed(
+        question: str,
+        contracts: tuple[_FirebaseSchemaContract, ...],
+    ) -> bool:
+        """Limit deterministic projections to broad read-schema overviews.
+
+        The projection cannot establish write permissions, validation rules,
+        nested collections, types, or required fields.  Those questions must
+        be answered from repository/deployed implementation evidence instead.
+        """
+        if not contracts:
+            return False
+        normalized = unicodedata.normalize("NFKC", question).casefold()
+        if not re.search(
+            r"firestore|データ構造|スキーマ|schema|構造|フィールド|fields?",
+            normalized,
+        ):
+            return False
+        if re.search(
+            r"書き込|書込|更新|作成|削除|write|create|update|delete|"
+            r"security|セキュリティ|rules?|ルール|権限|permission|"
+            r"必須|required|型|types?|サブコレクション|nested|"
+            r"features?|geometry|calibrations?|完全な",
+            normalized,
+        ):
+            return False
+        source_types = {contract.source_type for contract in contracts}
+        asks_ranking = bool(
+            re.search(r"ranking|ランキング|大賞企画|y-?1(?:グランプリ)?", normalized)
+        )
+        asks_maps = bool(re.search(r"(?<![a-z])maps?(?![a-z])|地図|マップ", normalized))
+        if asks_ranking and not source_types.issubset({"ranking", "rankingConfig"}):
+            return False
+        if asks_maps and source_types != {"maps"}:
+            return False
+        return asks_ranking or asks_maps
+
+    @staticmethod
+    def _firebase_schema_sources(
+        contracts: tuple[_FirebaseSchemaContract, ...],
+    ) -> list[str]:
+        """Render citations whose title and URL were rebuilt from the registry."""
+        rendered: list[str] = []
+        for contract in contracts:
+            label = (
+                "やがぽん公開読み取り投影: "
+                f"{_escape_citation_component(contract.title)}"
+            )
+            if not citation_reference_is_safe(label, contract.source_url):
+                log.warning("Blocked unsafe Firebase schema citation metadata")
+                continue
+            value = f"[{label}]({contract.source_url})"
+            if value not in rendered:
+                rendered.append(value)
+        return rendered
 
     @staticmethod
     def _render_firebase_schema_contracts(
@@ -3438,10 +3530,11 @@ class CorpusManager:
             "maps": "公開マップ",
         }
         lines = [
-            "# Firestore公開データ構造",
+            "# Firestore公開読み取り投影",
             "",
             (
-                "以下は、やがぽんが読み取りを許可された公開・読み取り専用の投影だぽん。"
+                "以下は、現在デプロイされているやがぽんが対象年度のデータに対して"
+                "読み取りを許可された、公開・読み取り専用の投影だぽん。"
             ),
             "",
         ]
@@ -3478,7 +3571,8 @@ class CorpusManager:
                 )
             lines.append("")
         lines.append(
-            "※ これは公開用allowlistと現在観測できたフィールド名の一覧で、"
+            "※ これは現在の公開用allowlistと、取得できた場合の観測フィールド名の一覧だぽん。"
+            "対象年度当時の完全なスキーマや書き込み権限を証明するものではなく、"
             "非公開データ、未許可フィールド、サブコレクションを含むFirestore全体の"
             "完全なスキーマではないぽん。"
         )
