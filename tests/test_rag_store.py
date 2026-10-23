@@ -809,6 +809,49 @@ def test_deployed_contract_survives_wordier_repository_candidate_crowd_out(tmp_p
     assert len(hits) == 4
 
 
+def test_strict_search_preserves_curated_contract_among_deployed_fragments(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+    ]
+    for index in range(100):
+        store.upsert_document(
+            f"documents/deployed-{index}",
+            f"Google Drive 議事録 source fragment {index}",
+            [
+                *common,
+                {"key": "document_key", "string_value": f"deployed-{index}"},
+                {"key": "authority", "string_value": "deployed_implementation"},
+                {"key": "status", "string_value": "deployed"},
+                {"key": "source_type", "string_value": "source_code"},
+            ],
+        )
+    store.upsert_document(
+        "documents/curated-drive-contract",
+        "Google Drive GoogleDrive 議事録の保存先は会議フォルダです",
+        [
+            *common,
+            {"key": "document_key", "string_value": "curated-drive-contract"},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "active"},
+            {"key": "source_type", "string_value": "builtin_reference"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["Google", "Drive", "GoogleDrive", "議事録"],
+        festival=27,
+        question_kind="data_contract",
+        limit=4,
+    )
+
+    assert hits[0].authority == "deployed_implementation"
+    assert any(hit.document_key == "curated-drive-contract" for hit in hits)
+
+
 def test_current_question_excludes_stale_implementation_before_limit(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     common = [

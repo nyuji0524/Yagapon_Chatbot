@@ -480,7 +480,7 @@ def _select_lexical_context_hits(
         return []
     if question_kind is not QuestionKind.HISTORY:
         authority_before_relevance = not allows_unreviewed_evidence(question_kind)
-        return sorted(
+        ranked = sorted(
             hits,
             key=lambda hit: (
                 can_answer_directly(question_kind, hit.authority, hit.status),
@@ -496,7 +496,50 @@ def _select_lexical_context_hits(
                 ),
             ),
             reverse=True,
-        )[:limit]
+        )
+        if not authority_before_relevance:
+            return ranked[:limit]
+
+        # Strict current-state questions need both authority and lexical
+        # relevance.  Taking every row from the highest-priority authority
+        # first lets numerous deployed source fragments crowd a concise,
+        # curated contract out of the prompt.  Reserve one direct hit per
+        # authority, in authority order, then use relevance for the remaining
+        # slots.  This preserves the deployed lane without turning it into a
+        # deployed-only lane.
+        selected: list[LexicalHit] = []
+        selected_keys: set[str] = set()
+        selected_authorities: set[str] = set()
+        for hit in ranked:
+            if not can_answer_directly(
+                question_kind,
+                hit.authority,
+                hit.status,
+            ) or hit.authority in selected_authorities:
+                continue
+            selected.append(hit)
+            selected_keys.add(hit.document_key)
+            selected_authorities.add(hit.authority)
+            if len(selected) >= limit:
+                return selected
+
+        relevance_ranked = sorted(
+            hits,
+            key=lambda hit: (
+                can_answer_directly(question_kind, hit.authority, hit.status),
+                hit.score,
+                authority_score(question_kind, hit.authority, hit.status),
+            ),
+            reverse=True,
+        )
+        for hit in relevance_ranked:
+            if hit.document_key in selected_keys:
+                continue
+            selected.append(hit)
+            selected_keys.add(hit.document_key)
+            if len(selected) >= limit:
+                break
+        return selected[:limit]
 
     ranked = sorted(
         hits,

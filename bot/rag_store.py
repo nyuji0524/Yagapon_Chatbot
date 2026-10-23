@@ -20,6 +20,7 @@ from bot.knowledge_authority import (
     QuestionKind,
     allows_unreviewed_evidence,
     authority_score,
+    can_answer_directly,
     direct_authorities,
     is_history_narrative_source,
 )
@@ -1141,8 +1142,14 @@ class RagStore:
             normalized_kind is not None
             and not allows_unreviewed_evidence(normalized_kind)
         ):
-            hits.sort(
+            authority_ranked = sorted(
+                hits,
                 key=lambda hit: (
+                    can_answer_directly(
+                        normalized_kind,
+                        hit.authority,
+                        hit.status,
+                    ),
                     authority_score(
                         normalized_kind,
                         hit.authority,
@@ -1152,6 +1159,47 @@ class RagStore:
                 ),
                 reverse=True,
             )
+            selected: list[LexicalHit] = []
+            selected_keys: set[str] = set()
+            selected_authorities: set[str] = set()
+            for hit in authority_ranked:
+                if not can_answer_directly(
+                    normalized_kind,
+                    hit.authority,
+                    hit.status,
+                ) or hit.authority in selected_authorities:
+                    continue
+                selected.append(hit)
+                selected_keys.add(hit.document_key)
+                selected_authorities.add(hit.authority)
+                if len(selected) >= limit:
+                    return selected
+
+            relevance_ranked = sorted(
+                hits,
+                key=lambda hit: (
+                    can_answer_directly(
+                        normalized_kind,
+                        hit.authority,
+                        hit.status,
+                    ),
+                    hit.score,
+                    authority_score(
+                        normalized_kind,
+                        hit.authority,
+                        hit.status,
+                    ),
+                ),
+                reverse=True,
+            )
+            for hit in relevance_ranked:
+                if hit.document_key in selected_keys:
+                    continue
+                selected.append(hit)
+                selected_keys.add(hit.document_key)
+                if len(selected) >= limit:
+                    break
+            hits = selected
         else:
             hits.sort(key=lambda hit: hit.score, reverse=True)
         if not is_history or limit < 2:
