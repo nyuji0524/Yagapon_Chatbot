@@ -305,7 +305,9 @@ _CRITICAL_GROUNDING_ATOM_RE = re.compile(
 )
 _RECOVERY_JAPANESE_NUMBER_UNIT_RE = re.compile(
     r"[〇零一二三四五六七八九十百千万億兆]+"
-    r"(?:時|分|秒|日|月|年|件|名|人|円|票|割|位|枠|個|台|回)"
+    r"(?:パーセント|グループ|ページ|チーム|"
+    r"時間|企画|文字|時|分|秒|日|月|年|件|名|人|円|票|割|位|"
+    r"枠|個|台|回|組|つ|枚|本|校|局|倍|点|階|棟|室|席|[%％])"
 )
 _RECOVERY_SIGNED_NUMBER_PREFIX = "signed-number:"
 _RECOVERY_PROPER_TOKEN_RE = re.compile(
@@ -348,7 +350,8 @@ _RECOVERY_PERMISSION_PREDICATE_RE = re.compile(
     re.IGNORECASE,
 )
 _RECOVERY_PERMISSION_ACTOR_RE = re.compile(
-    r"(?P<actor>[^、,。.!！？?\n]{1,64}?)(?:が|"
+    r"(?P<actor>[^、,。.!！？?\n]{1,64}?)(?:"
+    r"であれば|の場合(?:は|に)?|については|も|が|"
     r"(?<!また)(?<!もしく)(?<!あるい)は)"
     r"(?=[^、,。.!！？?\n]{0,48}(?:管理|操作|編集|利用|閲覧|作成|更新|削除))"
 )
@@ -369,12 +372,39 @@ _RECOVERY_SUBCOLLECTION_NEGATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 _RECOVERY_SUBCOLLECTION_POSITIVE_RE = re.compile(
-    r"(?:サブコレクション(?:がある|は存在する)|"
+    r"(?:サブコレクション(?:がある|は存在する|(?:です|である)(?=ぽん|[。.!！?？\n]|$)|"
+    r"として(?:保存|作成|配置|存在))|"
     r"\b(?:has|have|contains?|includes?)\b[^.!?\n]{0,120}"
-    r"\bsubcollections?\b|"
-    r"\bsubcollections?\s+(?:exist|are\s+present)\b|"
-    r"\b(?:is|are)\s+(?:a\s+|nested\s+)?subcollections?\b)",
+    r"\bsubcollections?(?=\b|ぽん)|"
+    r"\bsubcollections?\s+(?:exist|are\s+present)(?=\b|ぽん)|"
+    r"\b(?:is|are)\s+(?:a\s+|nested\s+)?subcollections?(?=\b|ぽん))",
     re.IGNORECASE,
+)
+_RECOVERY_CRITICAL_POLARITY_PATTERNS = (
+    (
+        re.compile(
+            r"(?:非公開|未公開|公開(?:予定)?(?:では|じゃ|は)?ない|"
+            r"公開(?:し|され)(?:てい)?(?:ない|ません))"
+        ),
+        re.compile(r"公開"),
+    ),
+    (
+        re.compile(
+            r"(?:不許可|未許可|許可(?:され|し)?(?:てい)?(?:ない|ません)|"
+            r"許可(?:では|じゃ|は)?ない)"
+        ),
+        re.compile(r"許可"),
+    ),
+    (
+        re.compile(
+            r"(?:管理|操作|編集|利用|閲覧|作成|更新|削除).{0,16}"
+            r"(?:できない|できません|不可能|可能(?:では|じゃ|は)?ない|不可)"
+        ),
+        re.compile(
+            r"(?:管理|操作|編集|利用|閲覧|作成|更新|削除).{0,16}"
+            r"(?:できる|できます|可能)"
+        ),
+    ),
 )
 
 
@@ -3597,8 +3627,9 @@ class CorpusManager:
             "# Firestore公開読み取り投影",
             "",
             (
-                "以下は、現在デプロイされているやがぽんが対象年度のデータに対して"
-                "読み取りを許可された、公開・読み取り専用の投影だぽん。"
+                "以下は、現在デプロイされているやがぽんが対象年度のFirestoreから"
+                "取得できた場合に、公開回答へ投影するフィールドのallowlistだぽん。"
+                "Firestore RulesやIAM上の読み取り許可を示すものではないぽん。"
             ),
             "",
         ]
@@ -3613,7 +3644,7 @@ class CorpusManager:
                     f"## {contract.festival}th "
                     f"{labels.get(contract.source_type, contract.source_type)}",
                     f"- {path_label}: `{contract.path}`",
-                    "- 読み取り許可フィールド: "
+                    "- 公開回答への投影allowlist: "
                     + ", ".join(f"`{field}`" for field in contract.allowlisted_fields),
                 )
             )
@@ -3637,7 +3668,7 @@ class CorpusManager:
             lines.append("")
         lines.append(
             "※ これは現在の公開用allowlistと、取得できた場合の観測フィールド名の一覧だぽん。"
-            "対象年度当時の完全なスキーマや書き込み権限を証明するものではなく、"
+            "対象年度当時の完全なスキーマや読み書きの権限を証明するものではなく、"
             "非公開データ、未許可フィールド、サブコレクションを含むFirestore全体の"
             "完全なスキーマではないぽん。"
         )
@@ -4155,7 +4186,7 @@ class CorpusManager:
         raw_clause: str,
         raw_evidence: str,
     ) -> bool:
-        """Reject opposite lifecycle claims about the same concrete object."""
+        """Reject lifecycle claims not bound to the same concrete object."""
         answer_state = cls._recovery_retention_state(raw_clause)
         if answer_state is None:
             return False
@@ -4168,6 +4199,7 @@ class CorpusManager:
         if not answer_scopes:
             return False
 
+        matched_scope = False
         for segment in re.split(r"[。.!！?？\n]+", raw_evidence):
             evidence_scopes = {
                 cls._normalized_grounding_text(match.group(0))
@@ -4179,10 +4211,55 @@ class CorpusManager:
                 for evidence_scope in evidence_scopes
             ):
                 continue
+            matched_scope = True
             evidence_state = cls._recovery_retention_state(segment)
             if evidence_state == "conflicting":
                 return True
             if evidence_state is not None and evidence_state != answer_state:
+                return True
+        # Similar lifecycle wording about another stored artifact must never
+        # authorize a claim about PCM, transcripts, minutes, or vice versa.
+        return not matched_scope
+
+    @classmethod
+    def _recovery_critical_polarity_state(cls, value: str) -> tuple[str | None, ...]:
+        """Extract publication/permission polarity without substring reversal."""
+        normalized = cls._normalized_grounding_text(value)
+        states: list[str | None] = []
+        for negative_pattern, positive_pattern in _RECOVERY_CRITICAL_POLARITY_PATTERNS:
+            negative = bool(negative_pattern.search(normalized))
+            positive_surface = negative_pattern.sub("", normalized)
+            positive = bool(positive_pattern.search(positive_surface))
+            if negative and positive:
+                states.append("conflicting")
+            elif negative:
+                states.append("negative")
+            elif positive:
+                states.append("positive")
+            else:
+                states.append(None)
+        return tuple(states)
+
+    @classmethod
+    def _recovery_critical_polarity_conflicts(
+        cls,
+        raw_clause: str,
+        raw_evidence: str,
+    ) -> bool:
+        answer_states = cls._recovery_critical_polarity_state(raw_clause)
+        evidence_states = cls._recovery_critical_polarity_state(raw_evidence)
+        for answer_state, evidence_state in zip(
+            answer_states,
+            evidence_states,
+            strict=True,
+        ):
+            if answer_state == "conflicting" or evidence_state == "conflicting":
+                return True
+            if (
+                answer_state is not None
+                and evidence_state is not None
+                and answer_state != evidence_state
+            ):
                 return True
         return False
 
@@ -4350,10 +4427,22 @@ class CorpusManager:
             raw_evidence,
         ):
             return False
+        if raw_evidence and cls._recovery_critical_polarity_conflicts(
+            raw_clause,
+            raw_evidence,
+        ):
+            return False
         if raw_evidence and cls._recovery_subcollection_conflicts(
             raw_clause,
             raw_evidence,
         ):
+            return False
+        if (
+            re.search(r"サブコレクション|subcollections?", raw_clause, re.IGNORECASE)
+            and cls._recovery_subcollection_state(raw_clause) is None
+        ):
+            # Unknown grammatical forms must not fall through to fuzzy
+            # character overlap for a structural existence assertion.
             return False
         atoms = cls._recovery_required_atoms(raw_clause, clause)
         if any(
@@ -4427,6 +4516,10 @@ class CorpusManager:
 
         for claim in claims:
             permission_atoms = cls._recovery_permission_atoms(claim)
+            if _RECOVERY_PERMISSION_PREDICATE_RE.search(claim) and not permission_atoms:
+                # A permission claim without a bound actor is unsafe to
+                # regenerate.  Do not let generic lexical overlap authorize it.
+                return False
             claim_evidence = evidence
             if permission_atoms:
                 claim_evidence = [

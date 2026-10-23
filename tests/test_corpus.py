@@ -2570,6 +2570,10 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
     assert "`mapId`" in result.text
     assert "`schemaVersion`" in result.text
     assert "`floorId`" in result.text
+    assert "公開回答への投影allowlist" in result.text
+    assert "Firestore RulesやIAM上の読み取り許可を示すものではない" in result.text
+    assert "読み取りを許可された" not in result.text
+    assert "読み取り許可フィールド" not in result.text
     assert "完全なスキーマではない" in result.text
     assert len(result.citations) == 1
     assert "やがぽん公開読み取り投影" in result.citations[0]
@@ -3796,10 +3800,15 @@ def test_recovered_claims_must_be_supported_by_the_selected_evidence_body(
         ("許可だぽん。", "不許可。"),
         ("可能だぽん。", "不可能。"),
         ("非公開だぽん。", "公開。"),
+        ("未公開だぽん。", "公開。"),
         ("不許可だぽん。", "許可。"),
+        ("未許可だぽん。", "許可。"),
         ("不可能だぽん。", "可能。"),
         ("一位だぽん。", "十一位。"),
         ("十件だぽん。", "百十件。"),
+        ("整理券は四組だぽん。", "整理券は五組である。"),
+        ("割合は三パーセントだぽん。", "割合は二パーセントである。"),
+        ("候補は三つだぽん。", "候補は二つである。"),
         ("score=-1だぽん。", "score=1。"),
         ("公開予定だぽん。", "公開予定ではない。"),
         ("有効だぽん。", "有効ではない。"),
@@ -3866,6 +3875,27 @@ def test_recovered_recording_claims_keep_anaphoric_polarity_on_the_pcm_subject(
         "録音PCMは削除され、残るぽん。",
         ["録音PCMは削除する。メタデータは残る。"],
     ) is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "evidence"),
+    [
+        (
+            "文字起こしは削除され、残らないぽん。",
+            "録音PCMは削除され、残らない。",
+        ),
+        (
+            "議事録は保存されるぽん。",
+            "文字起こしは保存される。",
+        ),
+    ],
+)
+def test_recovered_retention_claims_require_the_same_artifact_subject(
+    corpus_manager,
+    answer,
+    evidence,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is False
 
 
 @pytest.mark.parametrize(
@@ -3941,6 +3971,35 @@ def test_recovered_permission_claims_do_not_compose_actor_and_action_sources(
     ) is False
 
 
+@pytest.mark.parametrize(
+    ("answer", "evidence"),
+    [
+        (
+            "広報も整理券機能全体を管理可能だぽん。",
+            "神も整理券機能全体を管理可能である。",
+        ),
+        (
+            "広報であれば整理券機能全体を管理可能だぽん。",
+            "神であれば整理券機能全体を管理可能である。",
+        ),
+        (
+            "神も整理券機能全体を管理できないぽん。",
+            "神も整理券機能全体を管理できる。",
+        ),
+        (
+            "神も整理券機能全体を管理可能だぽん。",
+            "神も整理券機能全体を管理不可能である。",
+        ),
+    ],
+)
+def test_recovered_permission_claims_bind_common_japanese_actor_particles(
+    corpus_manager,
+    answer,
+    evidence,
+):
+    assert corpus_manager._recovered_claims_supported(answer, [evidence]) is False
+
+
 def test_recovered_claims_allow_only_bounded_subcollection_translation(
     corpus_manager,
 ):
@@ -3983,6 +4042,24 @@ def test_recovered_claims_allow_only_bounded_subcollection_translation(
             "yagamy/27/maps/{mapId} has features and calibrations; "
             "no subcollections exist."
         ],
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "`features` is a subcollectionぽん。",
+        "`features` はサブコレクションですぽん。",
+        "`features` はサブコレクションとして保存されるぽん。",
+    ],
+)
+def test_recovered_subcollection_claims_reject_negated_evidence(
+    corpus_manager,
+    answer,
+):
+    assert corpus_manager._recovered_claims_supported(
+        answer,
+        ["`features` exists but is not a subcollection."],
     ) is False
 
 
