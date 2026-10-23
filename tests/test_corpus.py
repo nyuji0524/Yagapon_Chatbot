@@ -3715,6 +3715,107 @@ def test_recovered_claims_must_be_supported_by_the_selected_evidence_body(
     ) is False
 
 
+def test_recovered_claims_accept_natural_wording_within_selected_authority(
+    corpus_manager,
+):
+    recording_contract = "正常処理後の生録音PCMは削除する。"
+    access_contract = (
+        "整理券機能全体の管理は、Firestoreのsupport userのrolesに"
+        "「神」または「整理券管理者」を持つ利用者だけが行う。"
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+        [recording_contract],
+    ) is True
+    assert corpus_manager._recovered_claims_supported(
+        "27thで整理券機能全体を管理できたロールは、"
+        "「神」または「整理券管理者」だぽん。",
+        ["27thの" + access_contract],
+    ) is True
+
+
+def test_recovered_claim_paraphrases_keep_negation_and_role_values_fail_closed(
+    corpus_manager,
+):
+    recording_contract = "正常処理後の生録音PCMは削除する。"
+    access_contract = (
+        "27thの整理券機能全体の管理は、Firestoreのsupport userのrolesに"
+        "「神」または「整理券管理者」を持つ利用者だけが行う。"
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除されない、残らないぽん。",
+        [recording_contract],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+        ["正常処理後の生録音PCMは削除せず保存する。"],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "録音PCMは削除され、残らないぽん。",
+        ["画像ファイルは削除する。"],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "27thで整理券機能全体を管理できたロールは、"
+        "「広報」または「整理券管理者」だぽん。",
+        [access_contract],
+    ) is False
+    assert corpus_manager._recovered_claims_supported(
+        "27thで整理券機能全体を管理できたロールは神または整理券管理者だぽん。",
+        ["27thのrolesは神。", "整理券管理者は全体管理できる。"],
+    ) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "answer", "evidence_key"),
+    [
+        (
+            "正常に処理が終わった録音PCMは残りますか",
+            "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+            "builtin:yagapon-drive-storage",
+        ),
+        (
+            "27thで整理券機能全体を管理できたロールは何ですか",
+            "27thで整理券機能全体を管理できたロールは、"
+            "「神」または「整理券管理者」だぽん。",
+            "builtin:27th-standby-pass-access",
+        ),
+    ],
+)
+async def test_query_accepts_authoritative_exact_search_paraphrases(
+    corpus_manager,
+    question,
+    answer,
+    evidence_key,
+):
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                f"{answer}\n"
+                f"[[YAGAPON_EVIDENCE_KEYS:exact:{evidence_key}]]\n"
+                "[[YAGAPON_ANSWER_STATUS:complete]]"
+            ),
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        question,
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert answer in result.text
+    assert result.lexical_keys == (evidence_key,)
+    assert len(result.citations) == 1
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
 def test_duplicate_semantic_chunks_keep_a_citation_for_recovery(
     corpus_manager,
     monkeypatch,

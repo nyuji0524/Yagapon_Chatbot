@@ -305,6 +305,17 @@ _RECOVERY_PROPER_TOKEN_RE = re.compile(
     r"(?:[A-Za-z][A-Za-z0-9_.:/\-]{1,}(?:[ァ-ヶ一-龠]+)?|"
     r"(?:[A-Za-z]{1,16}|[一-龠]{1,8})(?:さん|くん|氏)|[ァ-ヶー]{3,})"
 )
+_RECOVERY_ROLE_MARKER_RE = re.compile(r"(?:ロール|\broles?\b)", re.IGNORECASE)
+_RECOVERY_QUOTED_VALUE_RE = re.compile(r"[「『]([^」』]{1,64})[」』]")
+_RECOVERY_ROLE_VALUE_SUFFIX_RE = re.compile(
+    r"(?:だ|です|である)?ぽん[。.!！?？]*$|(?:だ|です|である)[。.!！?？]*$"
+)
+_RECOVERY_ELLIPTICAL_NON_RETENTION_RE = re.compile(
+    r"(?:残らない|残りません|残存しない|保持されない|保存されない)$"
+)
+_RECOVERY_NEGATED_DELETION_RE = re.compile(
+    r"削除(?:(?:し|され)(?:て)?(?:い)?(?:ない|ません|ず)|せず)"
+)
 
 
 def _explicit_answer_status_required(value: str | None) -> bool:
@@ -3732,6 +3743,11 @@ class CorpusManager:
     @staticmethod
     def _normalized_grounding_text(value: str) -> str:
         normalized = unicodedata.normalize("NFKC", value.casefold())
+        # Source contracts commonly use the Firestore field name ``roles``
+        # while a natural Japanese answer calls the same field a ``ロール``.
+        # Canonicalize that exact terminology pair without relaxing the
+        # lexical threshold or any role values carried by the claim.
+        normalized = normalized.replace("ロール", "roles")
         return re.sub(r"[\s*_`#>\-\[\]()（）「」『』、,。.!！?？:：;；]", "", normalized)
 
     @classmethod
@@ -3851,6 +3867,40 @@ class CorpusManager:
                 atoms.append(atom)
         return tuple(dict.fromkeys(atom for atom in atoms if atom))
 
+    @classmethod
+    def _recovery_role_atoms(cls, raw_claim: str) -> tuple[str, ...]:
+        """Return role values that must coexist in one selected evidence body."""
+        if not _RECOVERY_ROLE_MARKER_RE.search(raw_claim):
+            return ()
+
+        quoted = [
+            cls._normalized_grounding_text(match.group(1))
+            for match in _RECOVERY_QUOTED_VALUE_RE.finditer(raw_claim)
+        ]
+        quoted = [value for value in quoted if value]
+        if quoted:
+            return tuple(dict.fromkeys(quoted))
+
+        marker = _RECOVERY_ROLE_MARKER_RE.search(raw_claim)
+        assert marker is not None
+        values = raw_claim[marker.end() :]
+        values = re.sub(r"^(?:名)?(?:は|が|に|:|：)?[、,\s]*", "", values)
+        values = _RECOVERY_ROLE_VALUE_SUFFIX_RE.sub("", values.strip())
+        if not values:
+            return ()
+
+        parts = re.split(r"(?:または|もしくは|あるいは)", values)
+        atoms = [
+            cls._normalized_grounding_text(part)
+            for part in parts
+            if cls._normalized_grounding_text(part)
+        ]
+        # Long prose after a role marker is not a stable identifier. In that
+        # case ordinary atom and bigram verification remains fail-closed.
+        if not atoms or any(len(atom) > 32 for atom in atoms):
+            return ()
+        return tuple(dict.fromkeys(atoms))
+
     @staticmethod
     def _recovery_atom_in_evidence(atom: str, evidence: str) -> bool:
         if atom.isdecimal():
@@ -3888,6 +3938,26 @@ class CorpusManager:
         )
 
     @classmethod
+    def _elliptical_non_retention_supported(
+        cls,
+        clause: str,
+        previous_clause: tuple[str, str] | None,
+        evidence: str,
+    ) -> bool:
+        """Allow only deletion-backed, subject-preserving non-retention wording."""
+        if not _RECOVERY_ELLIPTICAL_NON_RETENTION_RE.fullmatch(clause):
+            return False
+        if previous_clause is None:
+            return False
+
+        previous_raw, previous = previous_clause
+        previous_positive = _RECOVERY_NEGATED_DELETION_RE.sub("", previous)
+        evidence_positive = _RECOVERY_NEGATED_DELETION_RE.sub("", evidence)
+        if "削除" not in previous_positive or "削除" not in evidence_positive:
+            return False
+        return cls._recovery_clause_supported(previous_raw, previous, evidence)
+
+    @classmethod
     def _recovered_claims_supported(
         cls,
         answer_text: str,
@@ -3906,12 +3976,26 @@ class CorpusManager:
             return False
 
         for claim in claims:
+            role_atoms = cls._recovery_role_atoms(claim)
+            if role_atoms and not any(
+                all(cls._recovery_atom_in_evidence(atom, source) for atom in role_atoms)
+                for source in evidence
+            ):
+                return False
+
+            previous_clause = None
             for raw_clause, clause in cls._grounding_clauses(claim):
                 if not any(
                     cls._recovery_clause_supported(raw_clause, clause, source)
+                    or cls._elliptical_non_retention_supported(
+                        clause,
+                        previous_clause,
+                        source,
+                    )
                     for source in evidence
                 ):
                     return False
+                previous_clause = (raw_clause, clause)
         return True
 
     @staticmethod
