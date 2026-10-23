@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -22,7 +23,12 @@ from google.genai import types
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
 from bot.ai_models import generation_config, log_usage, rag_model
-from bot.ai_retry import retry_rate_limit
+from bot.ai_retry import (
+    RateLimitExceeded,
+    is_transient_api_error,
+    retry_rate_limit,
+    retry_transient_api,
+)
 from bot.discord_visibility import normalized_channel_ids
 from bot.festival import (
     calendar_date_from_query,
@@ -160,6 +166,18 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(value, maximum))
 
 
+def _bounded_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        log.warning("Invalid %s; using %s", name, default)
+        value = default
+    if not math.isfinite(value):
+        log.warning("Non-finite %s; using %s", name, default)
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env(
     "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 2048, 512, 4096
 )
@@ -172,7 +190,87 @@ RAG_LEXICAL_CANDIDATES = 16
 RAG_COMPREHENSIVE_LEXICAL_CANDIDATES = 32
 RAG_LEXICAL_CONTEXT_HITS = 6
 RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS = 12
+RAG_GROUNDING_COVERAGE_THRESHOLD = _bounded_float_env(
+    "YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD",
+    0.8,
+    0.5,
+    1.0,
+)
 GLOBAL_NO_EVIDENCE_MARKER = "[[YAGAPON_NO_RELEVANT_EVIDENCE]]"
+
+# A modest coverage allowance is for connective/style text, not factual values.
+# Claims containing these high-impact facts must remain completely covered by a
+# locally authorized grounding segment even when the aggregate threshold passes.
+_CRITICAL_GROUNDING_CLAIM_RE = re.compile(
+    r"[0-9０-９]|"
+    r"(?:[〇零一二三四五六七八九十百千万億兆]+)(?:時|分|秒|日|月|年|件|名|人|円|票|割|位|枠|個|台|回)|"
+    r"(?:権限|認可|許可|禁止|公開|非公開|有効|無効|稼働|停止|開催|中止|"
+    r"会場|場所|担当|責任者|局長|副局長|企画長|テーマ|名称|保存先|"
+    r"コレクション|フィールド|締切|期限|必須|可能|不可|首位|最下位|"
+    r"デプロイ済み|実装済み|運用中|決定済み|確定|未定|終了済み|受付中|"
+    r"(?:閲覧|編集|削除|作成|更新|操作|利用)(?:できる|できない))|"
+    r"\b(?:true|false|null)\b",
+    re.IGNORECASE,
+)
+
+# Only presentation-only labels may bypass claim coverage.  Keep this list
+# deliberately small: headings such as ``受付開始は9時`` are factual claims and
+# must be audited just like ordinary sentences.
+_NONFACTUAL_GROUNDING_HEADINGS = {
+    "回答",
+    "概要",
+    "まとめ",
+    "結論",
+    "補足",
+    "注意",
+    "参照",
+    "参考",
+    "出典",
+    "詳細",
+    "一覧",
+    "関連情報",
+    "権限・認可",
+    "データ構造・保存先",
+    "現在の状態・実装",
+    "方針・決定",
+    "操作方法",
+    "経緯・過去の記録",
+    "人物・担当",
+}
+_NONFACTUAL_GROUNDING_CLAIMS = {
+    "以下のとおり",
+    "以下の通り",
+    "確認できた内容は以下のとおり",
+    "確認できた内容は以下の通り",
+    "まとめると以下のとおり",
+    "まとめると以下の通り",
+    "参考",
+}
+_GROUNDING_CONTROL_LINE_RE = re.compile(
+    r"\[\[YAGAPON_(?:ANSWER_STATUS:(?:complete|partial|no_evidence)|"
+    r"EVIDENCE_KEYS:[A-Za-z0-9:._/,\-]*)\]\]"
+)
+_GROUNDING_CLAUSE_SPLIT_RE = re.compile(r"[、,，;；]+")
+_RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
+
+# Critical atoms are checked against one selected evidence body in addition to
+# lexical overlap.  This keeps a nearby but different number, role, state, or
+# identifier from authorizing a regenerated claim.
+_CRITICAL_GROUNDING_ATOM_RE = re.compile(
+    r"(?:権限|認可|許可|禁止|公開|非公開|有効|無効|稼働|停止|開催|中止|"
+    r"会場|場所|担当|責任者|局長|副局長|企画長|テーマ|名称|保存先|"
+    r"コレクション|フィールド|締切|期限|必須|可能|不可|首位|最下位|"
+    r"デプロイ済み|実装済み|運用中|決定済み|確定|未定|終了済み|受付中|"
+    r"(?:閲覧|編集|削除|作成|更新|操作|利用)(?:できる|できない)|"
+    r"\b(?:true|false|null)\b)",
+    re.IGNORECASE,
+)
+_RECOVERY_PROPER_TOKEN_RE = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9_.:/\-]{1,}(?:[ァ-ヶ一-龠]+)?|"
+    r"(?:[A-Za-z]{1,16}|[一-龠]{1,8})(?:さん|くん|氏)|[ァ-ヶー]{3,})"
+)
+
+
 def _explicit_answer_status_required(value: str | None) -> bool:
     """Fail closed unless legacy answer parsing is explicitly requested."""
     return (value if value is not None else "true").strip().casefold() != "false"
@@ -1276,32 +1374,48 @@ class CorpusManager:
     async def delete_corpus(self, store_name: str):
         loop = asyncio.get_running_loop()
 
-        # Force-delete bounded pages. Never retry a page that made no progress.
-        for attempt in range(CORPUS_DELETE_MAX_PASSES):
-            docs = await loop.run_in_executor(
+        async def list_documents(page_size: int):
+            return await loop.run_in_executor(
                 None,
                 lambda: list(
                     self._client.file_search_stores.documents.list(
                         parent=store_name,
-                        config={"page_size": 20},
+                        config={"page_size": page_size},
                     )
                 ),
+            )
+
+        # Force-delete bounded pages. Never retry a page that made no progress.
+        for attempt in range(CORPUS_DELETE_MAX_PASSES):
+            docs = await retry_transient_api(
+                lambda: list_documents(20),
+                operation_name="file_search_delete_corpus_list",
             )
             if not docs:
                 break
             deleted = 0
             for doc in docs:
                 try:
-                    await loop.run_in_executor(
-                        None,
-                        lambda d=doc: self._client.file_search_stores.documents.delete(
-                            name=d.name,
-                            config={"force": True},
-                        ),
+                    async def delete_document(d=doc):
+                        return await loop.run_in_executor(
+                            None,
+                            lambda: self._client.file_search_stores.documents.delete(
+                                name=d.name,
+                                config={"force": True},
+                            ),
+                        )
+
+                    await retry_transient_api(
+                        delete_document,
+                        operation_name="file_search_delete_corpus_document",
                     )
                     deleted += 1
                 except Exception as e:
-                    log.warning(f"Failed to delete doc {doc.name}: {e}")
+                    if self._remote_document_absent(e):
+                        deleted += 1
+                        log.info("Document already absent from File Search: %s", doc.name)
+                    else:
+                        log.warning(f"Failed to delete doc {doc.name}: {e}")
             log.info(
                 "Deleted %s/%s docs from %s (pass %s/%s)",
                 deleted,
@@ -1313,14 +1427,9 @@ class CorpusManager:
             if deleted == 0:
                 raise RuntimeError(f"Corpus deletion made no progress for {store_name}; aborting safely")
         else:
-            remaining = await loop.run_in_executor(
-                None,
-                lambda: list(
-                    self._client.file_search_stores.documents.list(
-                        parent=store_name,
-                        config={"page_size": 1},
-                    )
-                ),
+            remaining = await retry_transient_api(
+                lambda: list_documents(1),
+                operation_name="file_search_delete_corpus_verify",
             )
             if remaining:
                 raise RuntimeError(
@@ -1328,25 +1437,42 @@ class CorpusManager:
                 )
 
         # ストアを削除
-        await loop.run_in_executor(
-            None,
-            lambda: self._client.file_search_stores.delete(
-                name=store_name,
-            ),
-        )
+        async def delete_store():
+            return await loop.run_in_executor(
+                None,
+                lambda: self._client.file_search_stores.delete(name=store_name),
+            )
+
+        try:
+            await retry_transient_api(
+                delete_store,
+                operation_name="file_search_delete_corpus_store",
+            )
+        except Exception as exc:
+            # The first request may have removed the store even if its response
+            # was lost. A subsequent 404 is therefore successful reconciliation.
+            if not self._remote_document_absent(exc):
+                raise
+            log.info("Corpus already absent from File Search: %s", store_name)
         log.info(f"Deleted corpus: {store_name}")
 
     async def list_remote_documents(self, store_name: str) -> list[dict]:
         """Return File Search names and custom metadata for reconciliation."""
         loop = asyncio.get_running_loop()
-        documents = await loop.run_in_executor(
-            None,
-            lambda: list(
-                self._client.file_search_stores.documents.list(
-                    parent=store_name,
-                    config={"page_size": 20},
-                )
-            ),
+        async def list_documents():
+            return await loop.run_in_executor(
+                None,
+                lambda: list(
+                    self._client.file_search_stores.documents.list(
+                        parent=store_name,
+                        config={"page_size": 20},
+                    )
+                ),
+            )
+
+        documents = await retry_transient_api(
+            list_documents,
+            operation_name="file_search_list_documents",
         )
         return [
             {
@@ -1659,6 +1785,12 @@ class CorpusManager:
                         ),
                     )
 
+                # Starting an upload is not idempotent and the API exposes no
+                # request token. Retry only an explicit 429 rejection here;
+                # 408/5xx stays fail-closed so an accepted-but-lost response
+                # cannot create an untracked duplicate. Polling the returned
+                # operation below is read-only and may safely retry all
+                # transient statuses.
                 operation = await retry_rate_limit(
                     start_upload,
                     operation_name="file_search_upload",
@@ -1667,24 +1799,31 @@ class CorpusManager:
                     max_delay=30,
                 )
 
-                waited = 0
+                deadline = time.monotonic() + UPLOAD_TIMEOUT_SECONDS
                 while getattr(operation, "done", True) is not True:
-                    if waited >= UPLOAD_TIMEOUT_SECONDS:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise TimeoutError(f"Indexing timed out after {UPLOAD_TIMEOUT_SECONDS}s")
-                    await asyncio.sleep(UPLOAD_POLL_SECONDS)
-                    waited += UPLOAD_POLL_SECONDS
+                    await asyncio.sleep(min(UPLOAD_POLL_SECONDS, remaining))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"Indexing timed out after {UPLOAD_TIMEOUT_SECONDS}s")
+
                     async def poll_operation():
                         return await loop.run_in_executor(
                             None,
                             lambda op=operation: self._client.operations.get(op),
                         )
 
-                    operation = await retry_rate_limit(
-                        poll_operation,
-                        operation_name="file_search_upload_poll",
-                        attempts=5,
-                        initial_delay=2,
-                        max_delay=30,
+                    operation = await asyncio.wait_for(
+                        retry_transient_api(
+                            poll_operation,
+                            operation_name="file_search_upload_poll",
+                            attempts=5,
+                            initial_delay=2,
+                            max_delay=30,
+                        ),
+                        timeout=remaining,
                     )
 
                 if getattr(operation, "error", None):
@@ -1715,12 +1854,18 @@ class CorpusManager:
                         exc,
                     )
                     try:
-                        await loop.run_in_executor(
-                            None,
-                            lambda: self._client.file_search_stores.documents.delete(
-                                name=document_name,
-                                config={"force": True},
-                            ),
+                        async def rollback_document():
+                            return await loop.run_in_executor(
+                                None,
+                                lambda: self._client.file_search_stores.documents.delete(
+                                    name=document_name,
+                                    config={"force": True},
+                                ),
+                            )
+
+                        await retry_transient_api(
+                            rollback_document,
+                            operation_name="file_search_upload_rollback",
                         )
                     except Exception as rollback_exc:
                         if not self._remote_document_absent(rollback_exc):
@@ -1732,8 +1877,17 @@ class CorpusManager:
                     return None
                 log.info(f"Uploaded: {display_name} -> {store_name}")
                 return document_name
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 log.error(f"Upload error ({display_name}): {e}")
+                if (
+                    is_transient_api_error(e)
+                    or isinstance(e, (RateLimitExceeded, TimeoutError))
+                ):
+                    # Preserve the safe root type for operator diagnostics and
+                    # for a later idempotent channel-level rerun.
+                    raise
                 return None
 
     @staticmethod
@@ -1755,12 +1909,18 @@ class CorpusManager:
         deleted_names: list[str] = []
         for name in document_names:
             try:
-                await loop.run_in_executor(
-                    None,
-                    lambda n=name: self._client.file_search_stores.documents.delete(
-                        name=n,
-                        config={"force": True},
-                    ),
+                async def delete_document(n=name):
+                    return await loop.run_in_executor(
+                        None,
+                        lambda: self._client.file_search_stores.documents.delete(
+                            name=n,
+                            config={"force": True},
+                        ),
+                    )
+
+                await retry_transient_api(
+                    delete_document,
+                    operation_name="file_search_delete_document",
                 )
                 deleted_names.append(name)
             except Exception as exc:
@@ -2179,6 +2339,34 @@ class CorpusManager:
                 selected = set(parsed.evidence_keys)
                 return [item for item in evidence if item.key in selected]
 
+            def selected_evidence_texts(
+                hits: list[LexicalHit],
+                runtime_evidence: list[FirebaseEvidence],
+                semantic_evidence: list[_GroundingEvidence],
+            ) -> list[str]:
+                texts = [
+                    "\n".join(
+                        str(value or "")
+                        for value in (
+                            getattr(hit, "channel_name", ""),
+                            f"{hit.festival}th" if getattr(hit, "festival", None) is not None else "",
+                            getattr(hit, "start_at", ""),
+                            getattr(hit, "end_at", ""),
+                            getattr(hit, "excerpt", ""),
+                        )
+                    )
+                    for hit in hits
+                ]
+                texts.extend(
+                    f"{item.title}\n{item.body}"
+                    for item in runtime_evidence
+                )
+                texts.extend(
+                    item.text
+                    for item in semantic_evidence
+                )
+                return texts
+
             def observe_answer_contract(parsed: ParsedModelAnswer, *, stage: str) -> None:
                 if not parsed.explicit_status:
                     log.warning(
@@ -2238,6 +2426,27 @@ class CorpusManager:
                     sources = []
                     return False
 
+                if not self._recovered_claims_supported(
+                    recovered.text,
+                    selected_evidence_texts(
+                        recovered_hits,
+                        used_firebase,
+                        used_semantic,
+                    ),
+                ):
+                    log.warning(
+                        "Rejected regenerated RAG answer not supported by selected evidence "
+                        "(kind=%s guild=%s exact=%s runtime=%s semantic=%s)",
+                        question_kind.value,
+                        guild_id,
+                        len(recovered_hits),
+                        len(used_firebase),
+                        len(used_semantic),
+                    )
+                    has_answer = False
+                    sources = []
+                    return False
+
                 # The retry used only locally filtered exact/runtime evidence,
                 # plus semantic excerpts that passed the grounding audit.
                 used_lexical_hits = recovered_hits
@@ -2254,6 +2463,7 @@ class CorpusManager:
                 QuestionKind.RUNTIME,
                 QuestionKind.GENERAL,
             }
+            direct_declared_no_evidence = False
             if (
                 not comprehensive
                 and not cross_source_history
@@ -2276,20 +2486,44 @@ class CorpusManager:
                 remaining_output_tokens = max_output_tokens
                 parsed = parse_model_answer(authoritative_answer or "")
                 observe_answer_contract(parsed, stage="direct")
+                direct_declared_no_evidence = (
+                    parsed.explicit_status and parsed.status is AnswerStatus.NO_EVIDENCE
+                )
                 if usable(parsed):
                     used_lexical_hits = selected_lexical_hits(authoritative_hits, parsed)
                     used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
                     sources = self._lexical_sources(used_lexical_hits, [])
                     sources.extend(self._firebase_sources(used_firebase, sources))
-                    if sources:
+                    if sources and self._recovered_claims_supported(
+                        parsed.text,
+                        selected_evidence_texts(
+                            used_lexical_hits,
+                            used_firebase,
+                            [],
+                        ),
+                    ):
                         answer = parsed.text
                         has_answer = True
+                    elif sources:
+                        log.warning(
+                            "Rejected direct RAG answer not supported by selected evidence "
+                            "(kind=%s guild=%s exact=%s runtime=%s)",
+                            question_kind.value,
+                            guild_id,
+                            len(used_lexical_hits),
+                            len(used_firebase),
+                        )
+                        sources = []
 
             if not has_answer:
                 search_hits = (
                     lexical_hits
                     if comprehensive or cross_source_history
-                    else [hit for hit in lexical_hits if hit not in authoritative_hits]
+                    else [
+                        hit
+                        for hit in lexical_hits
+                        if not direct_declared_no_evidence or hit not in authoritative_hits
+                    ]
                 )
                 if not allows_unreviewed_evidence(question_kind):
                     search_hits = [
@@ -2442,6 +2676,10 @@ class CorpusManager:
             system_instruction + "\n\n【検証済み根拠からの回答】\n"
             "この呼び出しで上に提示された根拠データ（exact-search、firebase-runtime、"
             "監査済み検索抜粋）のみを読み、質問へ直接答えられる場合は、その範囲で具体的に回答するぽん。"
+            "回答できる場合は、実際に使った全根拠のkeyを exact:<document_key>、"
+            "runtime:<document_key>、semantic:<index> の提示形式どおりに列挙した"
+            " [[YAGAPON_EVIDENCE_KEYS:key1,key2]] 行を回答状態行の直前へ必ず出すぽん。"
+            "使っていないkeyや提示されていないkeyは列挙しないぽん。"
             "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
             "提示されていない事実は補完しないぽん。"
@@ -2768,38 +3006,188 @@ class CorpusManager:
         return rendered
 
     @staticmethod
-    def _grounding_claims(answer_text: str) -> list[str]:
+    def _normalized_grounding_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value.casefold())
+        return re.sub(r"[\s*_`#>\-\[\]()（）「」『』、,。.!！?？:：;；]", "", normalized)
+
+    @classmethod
+    def _normalized_grounding_claim(cls, value: str) -> str:
+        normalized = cls._normalized_grounding_text(value)
+        return re.sub(r"(?:だ|です|ます)?ぽん$", "", normalized)
+
+    @classmethod
+    def _grounding_claims(cls, answer_text: str) -> list[str]:
         claims = []
         for raw in re.split(r"(?<=[。！？!?])|\n+", answer_text):
             value = raw.strip()
-            if not value or value.startswith("[[YAGAPON_") or re.fullmatch(r"#{1,6}\s+.*", value):
+            if not value or _GROUNDING_CONTROL_LINE_RE.fullmatch(value):
                 continue
+
+            heading = re.fullmatch(r"#{1,6}\s+(.+)", value)
+            if heading:
+                value = heading.group(1).strip()
+                if cls._normalized_grounding_text(value) in {
+                    cls._normalized_grounding_text(item)
+                    for item in _NONFACTUAL_GROUNDING_HEADINGS
+                }:
+                    continue
+
             value = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", value).strip()
+            if (
+                cls._normalized_grounding_claim(value)
+                in _NONFACTUAL_GROUNDING_CLAIMS
+            ):
+                continue
             if re.search(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠]", value):
                 claims.append(value)
         return claims
 
+    @classmethod
+    def _grounding_clauses(cls, claim: str) -> list[tuple[str, str]]:
+        clauses = []
+        for raw_clause in _GROUNDING_CLAUSE_SPLIT_RE.split(claim):
+            raw_clause = raw_clause.strip()
+            normalized = cls._normalized_grounding_claim(raw_clause)
+            if normalized:
+                clauses.append((raw_clause, normalized))
+        return clauses
+
     @staticmethod
-    def _normalized_grounding_text(value: str) -> str:
-        return re.sub(r"[\s*_`#>\-\[\]()（）「」『』、,。.!！?？:：;；]", "", value.casefold())
+    def _covered_grounding_characters(claim: str, segments: list[str]) -> int:
+        covered = [False] * len(claim)
+        for segment in segments:
+            if claim in segment:
+                return len(claim)
+            start = claim.find(segment)
+            while start >= 0:
+                covered[start : start + len(segment)] = [True] * len(segment)
+                start = claim.find(segment, start + 1)
+        return sum(covered)
 
     @classmethod
     def _grounding_claims_covered(cls, answer_text: str, segment_texts: list[str]) -> bool:
-        claims = [cls._normalized_grounding_text(value) for value in cls._grounding_claims(answer_text)]
-        claims = [value for value in claims if value]
+        raw_claims = cls._grounding_claims(answer_text)
+        claims = [
+            (raw, cls._normalized_grounding_claim(raw))
+            for raw in raw_claims
+            if cls._normalized_grounding_claim(raw)
+        ]
         if not claims:
             return True
         segments = [cls._normalized_grounding_text(value) for value in segment_texts]
         segments = [value for value in segments if value]
         if not segments:
             return False
-        combined = "".join(segments)
-        for claim in claims:
-            if claim in combined:
-                continue
-            if any(claim in segment for segment in segments):
-                continue
+
+        for raw_claim, claim in claims:
+            covered = cls._covered_grounding_characters(claim, segments)
+            if covered / len(claim) < RAG_GROUNDING_COVERAGE_THRESHOLD:
+                return False
+
+            # A sentence can legitimately be linked to several chunks one
+            # clause at a time. Each high-impact clause must nevertheless occur
+            # whole in one authorized answer segment; unrelated fragments may
+            # never be assembled into a number/permission/state claim.
+            for raw_clause, critical_core in cls._grounding_clauses(raw_claim):
+                if _CRITICAL_GROUNDING_CLAIM_RE.search(raw_clause) and not any(
+                    critical_core in segment for segment in segments
+                ):
+                    return False
+        return True
+
+    @staticmethod
+    def _grounding_bigrams(value: str) -> set[str]:
+        return {
+            value[index : index + 2]
+            for index in range(max(0, len(value) - 1))
+            if re.search(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠]", value[index : index + 2])
+        }
+
+    @classmethod
+    def _recovery_required_atoms(cls, raw_clause: str, clause: str) -> tuple[str, ...]:
+        atoms = []
+        atoms.extend(re.findall(r"\d+", clause))
+        atoms.extend(
+            cls._normalized_grounding_text(match.group(0))
+            for match in re.finditer(
+                r"[〇零一二三四五六七八九十百千万億兆]+"
+                r"(?:時|分|秒|日|月|年|件|名|人|円|票|割|位|枠|個|台|回)",
+                raw_clause,
+            )
+        )
+        atoms.extend(
+            cls._normalized_grounding_text(match.group(0))
+            for match in _CRITICAL_GROUNDING_ATOM_RE.finditer(raw_clause)
+        )
+        for match in _RECOVERY_PROPER_TOKEN_RE.finditer(raw_clause):
+            atom = cls._normalized_grounding_text(match.group(0))
+            if re.fullmatch(r"[一-龠]{2,8}(?:さん|くん|氏)", atom):
+                atom = re.sub(r"(?:さん|くん|氏)$", "", atom)
+            if len(atom) >= 2:
+                atoms.append(atom)
+        return tuple(dict.fromkeys(atom for atom in atoms if atom))
+
+    @staticmethod
+    def _recovery_atom_in_evidence(atom: str, evidence: str) -> bool:
+        if atom.isdecimal():
+            return atom in re.findall(r"\d+", evidence)
+        # A positive state must not be authorized solely by the corresponding
+        # negative word containing it as a suffix.
+        opposites = {
+            "公開": "非公開",
+            "有効": "無効",
+            "許可": "不許可",
+            "可能": "不可能",
+        }
+        if opposite := opposites.get(atom):
+            evidence = evidence.replace(opposite, "")
+        return atom in evidence
+
+    @classmethod
+    def _recovery_clause_supported(cls, raw_clause: str, clause: str, evidence: str) -> bool:
+        if clause in evidence:
+            return True
+
+        atoms = cls._recovery_required_atoms(raw_clause, clause)
+        if any(not cls._recovery_atom_in_evidence(atom, evidence) for atom in atoms):
             return False
+
+        clause_bigrams = cls._grounding_bigrams(clause)
+        if not clause_bigrams:
+            return False
+        matched = clause_bigrams & cls._grounding_bigrams(evidence)
+        minimum_matches = 1 if len(clause_bigrams) == 1 else 2
+        return (
+            len(matched) >= minimum_matches
+            and len(matched) / len(clause_bigrams)
+            >= _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
+        )
+
+    @classmethod
+    def _recovered_claims_supported(
+        cls,
+        answer_text: str,
+        evidence_texts: list[str],
+    ) -> bool:
+        """Verify regenerated claims against the exact evidence the model cited.
+
+        Evidence keys are model output and therefore are not themselves proof.
+        Every substantive clause must overlap one selected, locally authorized
+        body; critical values must be present in that same body.
+        """
+        claims = cls._grounding_claims(answer_text)
+        evidence = [cls._normalized_grounding_text(value) for value in evidence_texts]
+        evidence = [value for value in evidence if value]
+        if not claims or not evidence:
+            return False
+
+        for claim in claims:
+            for raw_clause, clause in cls._grounding_clauses(claim):
+                if not any(
+                    cls._recovery_clause_supported(raw_clause, clause, source)
+                    for source in evidence
+                ):
+                    return False
         return True
 
     @staticmethod
@@ -2840,6 +3228,9 @@ class CorpusManager:
         supports = getattr(grounding, "grounding_supports", None)
         invalid_supports = 0
         support_indices: list[tuple[object, tuple[int, ...]]] = []
+        missing_required_supports = bool(
+            supports is None and chunks and REQUIRE_GROUNDING_SUPPORTS
+        )
         if supports is None and chunks:
             log.warning(
                 "File Search grounding_supports missing; semantic citation fallback "
@@ -2847,8 +3238,11 @@ class CorpusManager:
                 REQUIRE_GROUNDING_SUPPORTS,
                 len(chunks),
             )
-            if REQUIRE_GROUNDING_SUPPORTS:
-                return _GroundingAudit(invalid_supports=1, claim_coverage_complete=False)
+            if missing_required_supports:
+                # The original answer has no model-provided chunk-to-claim link,
+                # so it remains invalid. Still authorize each retrieval candidate
+                # locally below; safe chunk text can then support a fresh answer.
+                invalid_supports += 1
             supported_indices = list(range(len(chunks)))
         elif supports is not None:
             supported_indices: list[int] = []
@@ -2999,7 +3393,12 @@ class CorpusManager:
                 continue
             rendered = f"[{label}]({url})" if url else label
             citation = ""
-            if rendered not in seen_citations and len(seen_citations) < limit:
+            if rendered in seen_citations:
+                # Every semantic key must retain a usable source. File Search
+                # commonly returns multiple chunks from one document, and a
+                # recovery may cite a later chunk rather than the first one.
+                citation = rendered
+            elif len(seen_citations) < limit:
                 seen_citations.add(rendered)
                 citation = rendered
             allowed_indices.add(index)
@@ -3011,7 +3410,7 @@ class CorpusManager:
                 )
             )
 
-        claim_coverage_complete = True
+        claim_coverage_complete = not missing_required_supports
         if answer_text is not None and supports is not None:
             safe_segments = []
             for support, indices in support_indices:
@@ -3043,7 +3442,7 @@ class CorpusManager:
         allow_unrestricted_conversations: bool = False,
     ) -> list[str]:
         """File Search grounding metadataをDiscord上で読める参照一覧へ変換する。"""
-        return cls._response_grounding_audit(
+        audit = cls._response_grounding_audit(
             response,
             limit=limit,
             expected_festival=expected_festival,
@@ -3053,7 +3452,8 @@ class CorpusManager:
             question_kind=question_kind,
             allowed_channel_ids=allowed_channel_ids,
             allow_unrestricted_conversations=allow_unrestricted_conversations,
-        ).sources
+        )
+        return [] if audit.requires_recovery else audit.sources
 
     # ------ backfill ------
 

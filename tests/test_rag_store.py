@@ -458,6 +458,21 @@ def test_query_terms_extracts_japanese_subjects_from_natural_questions():
     assert RagStore.query_terms("今日はこれについて教えてください") == []
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    (
+        ("通知は？", "通知"),
+        ("投票は？", "投票"),
+        ("会場は？", "会場"),
+        ("地図は？", "地図"),
+        ("権限は？", "権限"),
+        ("担当は？", "担当"),
+    ),
+)
+def test_query_terms_keep_high_information_two_kanji_subjects(question, expected):
+    assert expected in RagStore.query_terms(question)
+
+
 def test_query_terms_split_common_operational_compounds():
     terms = RagStore.query_terms("27thの整理券運用で問題になった点は何ですか？")
 

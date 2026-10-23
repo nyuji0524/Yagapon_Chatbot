@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+from collections import Counter
 from pathlib import Path
 
 import discord
@@ -179,6 +180,125 @@ def _bounded_complete_lines(lines: list[str], *, limit: int = 1024) -> str:
     return "\n".join(selected)
 
 
+def _backfill_progress(backfill: dict) -> dict:
+    """Aggregate worker outcomes separately from discovery/infrastructure errors."""
+    totals = {
+        "channels_total": 0,
+        "channels_attempted": 0,
+        "channels_succeeded": 0,
+        "channels_failed": 0,
+        "channels_unprocessed": 0,
+    }
+    channel_failures: list[dict] = []
+    infrastructure_failures: list[dict] = []
+    for guild_id, guild in (backfill.get("guilds") or {}).items():
+        if not isinstance(guild, dict):
+            continue
+        total = max(0, int(guild.get("channels_total") or 0))
+        attempted = max(0, int(guild.get("channels_completed") or 0))
+        failures = [
+            failure
+            for failure in (guild.get("failures") or ())
+            if isinstance(failure, dict)
+        ]
+        worker_failure_records = [
+            failure
+            for failure in failures
+            if failure.get("channel_id") not in {None, ""}
+            and not failure.get("stage")
+        ]
+        infrastructure_records = [
+            failure for failure in failures if failure not in worker_failure_records
+        ]
+
+        completed_ids = guild.get("completed_channel_ids")
+        if isinstance(completed_ids, (list, tuple, set, frozenset)):
+            succeeded = len(
+                {
+                    str(channel_id)
+                    for channel_id in completed_ids
+                    if channel_id not in {None, ""}
+                }
+            )
+            succeeded = min(attempted, succeeded)
+        else:
+            # Compatibility for checkpoints written before completed IDs were
+            # persisted. A channel worker records one unstaged failure.
+            succeeded = max(0, attempted - len(worker_failure_records))
+        failed = max(0, attempted - succeeded)
+
+        # A failed guild can stop before any channel worker starts (for
+        # example, unreadable configured channels). Preserve that reason as an
+        # infrastructure failure instead of reporting a misleading clean run.
+        if (
+            str(guild.get("status") or "") == "failed"
+            and not failures
+            and guild.get("reason")
+        ):
+            infrastructure_records.append(
+                {
+                    "guild_id": str(guild_id),
+                    "stage": "guild-preparation",
+                    "error_type": str(guild["reason"]),
+                }
+            )
+
+        totals["channels_total"] += total
+        totals["channels_attempted"] += attempted
+        totals["channels_succeeded"] += succeeded
+        totals["channels_failed"] += failed
+        totals["channels_unprocessed"] += max(0, total - attempted)
+        channel_failures.extend(worker_failure_records)
+        infrastructure_failures.extend(infrastructure_records)
+
+    if (
+        str(backfill.get("status") or "") == "failed"
+        and not channel_failures
+        and not infrastructure_failures
+        and backfill.get("error_type")
+    ):
+        infrastructure_failures.append(
+            {
+                "stage": "backfill",
+                "error_type": str(backfill["error_type"]),
+            }
+        )
+
+    # The attempt/success counters are authoritative for worker failures. Add
+    # placeholders only when an older checkpoint omitted its failure record.
+    missing_channel_failure_records = max(
+        0,
+        totals["channels_failed"] - len(channel_failures),
+    )
+    channel_failures.extend(
+        {"error_type": "UnknownError"}
+        for _ in range(missing_channel_failure_records)
+    )
+    return totals | {
+        "channel_failures": channel_failures,
+        "infrastructure_failures": infrastructure_failures,
+    }
+
+
+def _failure_types(failures: list[dict]) -> dict[str, int]:
+    return dict(
+        Counter(
+            str(item.get("error_type") or "UnknownError")
+            for item in failures
+        )
+    )
+
+
+def _failure_type_text(failures: list[dict]) -> str:
+    return " / ".join(
+        f"`{name}`: {count}件"
+        for name, count in Counter(
+            str(item.get("error_type") or "UnknownError")
+            for item in failures
+        ).most_common(6)
+    )
+
+
 def _knowledge_refresh_embed(result: dict) -> discord.Embed:
     status = _knowledge_refresh_status(result)
     presentations = {
@@ -198,6 +318,9 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
     backfill = result.get("backfill") or {}
     if backfill:
         guilds = list((backfill.get("guilds") or {}).values())
+        progress = _backfill_progress(backfill)
+        channel_failures = progress["channel_failures"]
+        infrastructure_failures = progress["infrastructure_failures"]
         backfill_label = "Discord全期間取得" if result.get("mode") == "historical" else "Discord差分取得"
         embed.add_field(
             name=backfill_label,
@@ -210,14 +333,37 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
                     else ""
                 )
                 +
-                f"チャンネル: {sum(int(item.get('channels_completed') or 0) for item in guilds)} / "
-                f"{sum(int(item.get('channels_total') or 0) for item in guilds)}\n"
+                f"チャンネル: 成功 {progress['channels_succeeded']} / "
+                f"失敗 {progress['channels_failed']} / "
+                f"未処理 {progress['channels_unprocessed']}"
+                f"（対象 {progress['channels_total']}）\n"
                 f"メッセージ: {sum(int(item.get('messages_indexed') or 0) for item in guilds)}\n"
                 f"文書: {sum(int(item.get('documents_uploaded') or 0) for item in guilds)}\n"
                 f"置換: {sum(int(item.get('documents_replaced') or 0) for item in guilds)}"
             ),
             inline=False,
         )
+        if channel_failures or infrastructure_failures:
+            failure_lines = []
+            if channel_failures:
+                failure_lines.append(
+                    f"チャンネル処理: {_failure_type_text(channel_failures)}"
+                )
+            if infrastructure_failures:
+                failure_lines.append(
+                    "探索・基盤: "
+                    + _failure_type_text(infrastructure_failures)
+                )
+            embed.add_field(
+                name="取得失敗の内訳",
+                value=(
+                    "\n".join(failure_lines)
+                    + "\n"
+                    "成功済みの履歴は保持されています。上流APIの一時障害なら、"
+                    "同じモードを再実行すると失敗分を安全に補完できます。"
+                ),
+                inline=False,
+            )
         annual: dict[str, dict[str, int]] = {}
         for guild in guilds:
             for festival, values in (guild.get("festivals") or {}).items():
@@ -569,6 +715,16 @@ def register(bot):
                 if operations is not None and hasattr(operations, "record_event"):
                     try:
                         curation = result.get("curation") or {}
+                        backfill = result.get("backfill") or {}
+                        backfill_progress = _backfill_progress(backfill)
+                        channel_failures = backfill_progress["channel_failures"]
+                        infrastructure_failures = backfill_progress[
+                            "infrastructure_failures"
+                        ]
+                        backfill_failures = [
+                            *channel_failures,
+                            *infrastructure_failures,
+                        ]
                         operations.record_event(
                             "knowledge",
                             "manual_refresh",
@@ -580,7 +736,35 @@ def register(bot):
                                 "history_promotion_guild_id": (
                                     str(guild_id) if mode == "historical" else None
                                 ),
-                                "backfill_status": (result.get("backfill") or {}).get("status"),
+                                "backfill_status": backfill.get("status"),
+                                "backfill_channel_total": backfill_progress[
+                                    "channels_total"
+                                ],
+                                "backfill_channel_attempted_count": backfill_progress[
+                                    "channels_attempted"
+                                ],
+                                "backfill_channel_success_count": backfill_progress[
+                                    "channels_succeeded"
+                                ],
+                                "backfill_channel_failure_count": backfill_progress[
+                                    "channels_failed"
+                                ],
+                                "backfill_channel_unprocessed_count": backfill_progress[
+                                    "channels_unprocessed"
+                                ],
+                                "backfill_infrastructure_failure_count": len(
+                                    infrastructure_failures
+                                ),
+                                "backfill_failure_count": len(backfill_failures),
+                                "backfill_failure_types": _failure_types(
+                                    backfill_failures
+                                ),
+                                "backfill_channel_failure_types": _failure_types(
+                                    channel_failures
+                                ),
+                                "backfill_infrastructure_failure_types": _failure_types(
+                                    infrastructure_failures
+                                ),
                                 "checkpoint_ready": curation.get("checkpoint_ready"),
                                 "eligible": int(curation.get("eligible") or 0),
                                 "policy_excluded": int(curation.get("policy_excluded") or 0),

@@ -215,6 +215,108 @@ def test_deferred_refresh_does_not_report_unknown_candidate_counts_as_zero():
     assert "ポリシー除外:" not in value
 
 
+def test_failed_backfill_reports_success_and_failure_counts_separately():
+    embed = _knowledge_refresh_embed(
+        {
+            "mode": "historical",
+            "backfill": {
+                "status": "failed",
+                "guilds": {
+                    "1": {
+                        "channels_completed": 128,
+                        "channels_total": 128,
+                        "messages_indexed": 100,
+                        "documents_uploaded": 20,
+                        "documents_replaced": 18,
+                        "failures": [
+                            {"channel_id": "10", "error_type": "ServerError"},
+                            {"channel_id": "11", "error_type": "ServerError"},
+                            {"channel_id": "12", "error_type": "TimeoutError"},
+                        ],
+                    }
+                },
+            },
+            "curation": {
+                "enabled": True,
+                "checkpoint_ready": False,
+                "checkpoint_reason": "manual-backfill-not-completed",
+            },
+        }
+    )
+
+    backfill_value = next(
+        field.value
+        for field in embed.fields
+        if field.name == "Discord全期間取得"
+    )
+    failure_value = next(
+        field.value
+        for field in embed.fields
+        if field.name == "取得失敗の内訳"
+    )
+
+    assert "チャンネル: 成功 125 / 失敗 3 / 未処理 0（対象 128）" in backfill_value
+    assert "チャンネル処理: `ServerError`: 2件" in failure_value
+    assert "`TimeoutError`: 1件" in failure_value
+    assert "探索・基盤:" not in failure_value
+    assert "再実行" in failure_value
+
+
+def test_backfill_reporting_does_not_count_discovery_errors_as_channel_failures():
+    embed = _knowledge_refresh_embed(
+        {
+            "mode": "historical",
+            "backfill": {
+                "status": "failed",
+                "guilds": {
+                    "1": {
+                        "status": "failed",
+                        "channels_completed": 3,
+                        "channels_total": 4,
+                        "completed_channel_ids": ["10", "11"],
+                        "messages_indexed": 100,
+                        "documents_uploaded": 20,
+                        "documents_replaced": 18,
+                        "failures": [
+                            {"channel_id": "12", "error_type": "ServerError"},
+                            {
+                                "channel_id": None,
+                                "stage": "active-thread-discovery",
+                                "error_type": "HTTPException",
+                            },
+                            {
+                                "channel_id": "20",
+                                "stage": "archived-public-thread-discovery",
+                                "error_type": "TimeoutError",
+                            },
+                        ],
+                    }
+                },
+            },
+            "curation": {
+                "enabled": True,
+                "checkpoint_ready": False,
+                "checkpoint_reason": "manual-backfill-not-completed",
+            },
+        }
+    )
+
+    backfill_value = next(
+        field.value
+        for field in embed.fields
+        if field.name == "Discord全期間取得"
+    )
+    failure_value = next(
+        field.value
+        for field in embed.fields
+        if field.name == "取得失敗の内訳"
+    )
+
+    assert "チャンネル: 成功 2 / 失敗 1 / 未処理 1（対象 4）" in backfill_value
+    assert "チャンネル処理: `ServerError`: 1件" in failure_value
+    assert "探索・基盤: `HTTPException`: 1件 / `TimeoutError`: 1件" in failure_value
+
+
 def test_registered_refresh_exposes_runtime_option_type_to_pycord():
     """Pycord invokes ``issubclass`` on option annotations at command runtime."""
 
@@ -273,7 +375,15 @@ async def test_registered_refresh_acknowledges_then_reports_to_channel(
         "backfill": {
             "status": "completed",
             "history_promotion_guild_id": "1",
-            "guilds": {},
+            "guilds": {
+                "1": {
+                    "status": "completed",
+                    "channels_total": 2,
+                    "channels_completed": 2,
+                    "completed_channel_ids": ["10", "11"],
+                    "failures": [],
+                }
+            },
         },
         "curation": {
             "enabled": True,
@@ -350,6 +460,36 @@ async def test_registered_refresh_acknowledges_then_reports_to_channel(
     assert bot.operations.record_event.call_args.kwargs["details"][
         "history_promotion_guild_id"
     ] == "1"
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_failure_count"
+    ] == 0
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_failure_types"
+    ] == {}
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_channel_total"
+    ] == 2
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_channel_attempted_count"
+    ] == 2
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_channel_success_count"
+    ] == 2
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_channel_failure_count"
+    ] == 0
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_channel_unprocessed_count"
+    ] == 0
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_infrastructure_failure_count"
+    ] == 0
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_channel_failure_types"
+    ] == {}
+    assert bot.operations.record_event.call_args.kwargs["details"][
+        "backfill_infrastructure_failure_types"
+    ] == {}
 
 
 @pytest.mark.asyncio

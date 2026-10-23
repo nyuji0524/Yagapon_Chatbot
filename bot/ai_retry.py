@@ -20,6 +20,8 @@ log = logging.getLogger("yagapon.ai_retry")
 
 T = TypeVar("T")
 
+TRANSIENT_API_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
 
 class RateLimitExceeded(RuntimeError):
     """Raised after the configured 429 retries have been exhausted."""
@@ -93,6 +95,23 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return code == 429 or "too many requests" in message or "resource_exhausted" in message
 
 
+def _status_code(exc: BaseException) -> int | None:
+    """Return an HTTP-like status code exposed by generated Google clients."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code is None:
+        response = getattr(exc, "response", None) or getattr(exc, "raw_response", None)
+        code = getattr(response, "status_code", None)
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_transient_api_error(exc: BaseException) -> bool:
+    """Return whether an API error is safe to retry as a transient failure."""
+    return _status_code(exc) in TRANSIENT_API_STATUS_CODES or is_rate_limit_error(exc)
+
+
 def _retry_after(exc: BaseException) -> float | None:
     response = getattr(exc, "response", None) or getattr(exc, "raw_response", None)
     headers = getattr(exc, "headers", None) or getattr(response, "headers", None)
@@ -103,7 +122,14 @@ def _retry_after(exc: BaseException) -> float | None:
         pass
 
     payload = _error_payload(exc)
-    details = payload.get("error", {}).get("details", []) if isinstance(payload, dict) else []
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        # google-genai accepts both the usual {"error": {...}} response and
+        # an already-unwrapped error object when constructing APIError.
+        error = payload
+    details = error.get("details", [])
+    if not isinstance(details, list):
+        details = []
     for detail in details:
         if not isinstance(detail, dict):
             continue
@@ -117,23 +143,30 @@ def _retry_after(exc: BaseException) -> float | None:
 
 
 def _error_payload(exc: BaseException) -> dict:
-    body = getattr(exc, "body", None)
-    if isinstance(body, dict):
-        return body
-    if isinstance(body, str):
-        try:
-            parsed = json.loads(body)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            pass
-    data = getattr(exc, "response_json", None)
-    return data if isinstance(data, dict) else {}
+    # Generated clients expose the same safe error payload under different
+    # attributes. In particular, google-genai APIError stores the original
+    # response JSON in ``details`` (despite that name also being used inside
+    # the payload for google.rpc detail records).
+    for attribute in ("body", "response_json", "details"):
+        data = getattr(exc, attribute, None)
+        if isinstance(data, dict) and data:
+            return data
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+    return {}
 
 
 def rate_limit_diagnostic(exc: BaseException) -> str:
     """Extract quota information without logging credentials or request bodies."""
     payload = _error_payload(exc)
-    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        error = payload
     parts: list[str] = []
     status = error.get("status")
     message = error.get("message")
@@ -141,7 +174,10 @@ def rate_limit_diagnostic(exc: BaseException) -> str:
         parts.append(f"status={status}")
     if message:
         parts.append(f"message={str(message)[:500]}")
-    for detail in error.get("details", []):
+    details = error.get("details", [])
+    if not isinstance(details, list):
+        details = []
+    for detail in details:
         if not isinstance(detail, dict):
             continue
         retry_delay = detail.get("retryDelay")
@@ -208,6 +244,59 @@ async def retry_rate_limit(
                 operation_name,
                 attempt,
                 attempts,
+                delay,
+            )
+            await sleep(delay)
+
+    raise AssertionError("unreachable")
+
+
+async def retry_transient_api(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    operation_name: str,
+    attempts: int = 5,
+    initial_delay: float = 2.0,
+    max_delay: float = 30.0,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+) -> T:
+    """Retry bounded transient HTTP failures without changing 429-only callers.
+
+    File Search maintenance jobs are long-running and should survive a short
+    408/5xx outage. Permanent 4xx responses are raised immediately. The final
+    transient exception is re-raised unchanged so existing callers retain
+    their error handling and diagnostics. Server-provided Retry-After values
+    are intentionally capped by ``max_delay`` so one API response cannot make
+    the maintenance worker sleep without an application-controlled bound.
+    """
+    attempts = max(1, attempts)
+    if sleep is None:
+        sleep = asyncio.sleep
+    for attempt in range(1, attempts + 1):
+        try:
+            return await operation()
+        except Exception as exc:
+            if not is_transient_api_error(exc):
+                raise
+            if attempt >= attempts:
+                log.error(
+                    "Transient API failure exhausted operation=%s attempts=%s status=%s",
+                    operation_name,
+                    attempts,
+                    _status_code(exc) or "unknown",
+                )
+                raise
+            delay = _retry_after(exc)
+            if delay is None:
+                delay = min(max_delay, initial_delay * (2 ** (attempt - 1)))
+            else:
+                delay = min(max_delay, delay)
+            log.warning(
+                "Transient API failure operation=%s attempt=%s/%s status=%s retry_after=%.1fs",
+                operation_name,
+                attempt,
+                attempts,
+                _status_code(exc) or "unknown",
                 delay,
             )
             await sleep(delay)

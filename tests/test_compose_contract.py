@@ -91,3 +91,6 @@ def test_bot_requires_file_search_grounding_supports_by_default():
     assert environment["YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS"] == (
         "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}"
     )
+    assert environment["YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD"] == (
+        "${YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD:-0.8}"
+    )
