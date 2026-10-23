@@ -36,6 +36,12 @@ YAGAPON_GCP_PROJECT_ID=PROJECT
 YAGAPON_GOOGLE_OAUTH_SECRET=yagapon-google-drive-oauth
 YAGAPON_GOOGLE_OAUTH_FILE=/data/google-drive-oauth.json
 YAGAPON_KNOWLEDGE_GCS_BUCKET=PROJECT-yagapon-knowledge-intake
+YAGAPON_KNOWLEDGE_INTAKE_DISPATCH_ENABLED=true
+YAGAPON_KNOWLEDGE_INTAKE_WORKFLOW=yagapon-intake.yml
+YAGAPON_KNOWLEDGE_GITHUB_APP_ID=234567
+YAGAPON_KNOWLEDGE_GITHUB_APP_INSTALLATION_ID=89012345
+YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_SECRET=yagapon-knowledge-github-app-private-key
+YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=/etc/yagapon/secrets/knowledge-github-app-private-key.pem
 YAGAPON_SOURCE_GITHUB_APP_ID=123456
 YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID=78901234
 YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_SECRET=yagapon-github-app-private-key
@@ -146,8 +152,15 @@ Git treeからallowlistに一致する小さいblobだけを取得する。
 
 ## Knowledge登録キュー
 
-BotはGitHub tokenを持たず、専用GCS bucketへ機密検査済み候補をcreate-onlyで登録する。
-KnowledgeリポジトリのGitHub Actionsだけが候補を読み、専用branchとDraft PRを作成する。
+BotはGitHub Contents/Pull requests権限を持たず、専用GCS bucketへ機密検査済み候補を
+create-onlyで登録する。整理直後の起動要求だけは、Knowledgeリポジトリ1件・`Actions: Write`
+だけの別GitHub Appから短命tokenを発行して`yagapon-intake.yml`へ送る。204応答は要求受付であり、
+PR作成済みとは扱わない。KnowledgeリポジトリのGitHub Actionsだけが候補を読み、専用branchと
+Draft PRを作成する。
 mainへマージされた承認済み文書は、read-only GitHub App経由で`source-index-watch`が差分同期する。
-VMサービスアカウントへはintake bucketのObject CreatorとGitHub App private-key SecretのAccessorだけを
-付与する。GitHub Appは読み取り専用であり、KnowledgeのDraft PR作成・更新には使わない。
+VMサービスアカウントへはintake bucketのObject Creatorと、用途別2つのGitHub App private-key
+SecretへのAccessorだけを付与する。Knowledge AppのPEMはSecret Managerから
+`/etc/yagapon/secrets/knowledge-github-app-private-key.pem`へatomicに更新し、`yagapon`と
+`knowledge-curation-watch`だけへread-only mountする。source AppとはApp ID、installation ID、
+Secret、host pathを共有できず、他サービスではKnowledge Appのdirect/file環境変数を明示的に空にする。
+どちらの鍵も更新前の0600 backupを保持し、デプロイ失敗時はatomicに復元する。

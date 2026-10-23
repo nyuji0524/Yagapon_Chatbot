@@ -67,7 +67,7 @@ BotのGoogle資格情報に対象ファイルの閲覧権限が必要である�
 | 状態 | 意味 | 対応 |
 |---|---|---|
 | `pending` | outbox保存済み、配信先未設定 | 配信先を設定して再送 |
-| `queued` | 非公開intakeへ送信済み、Draft PR作成待ち | 通常は待機。滞留時はActionsとGCSを確認 |
+| `queued` | 非公開intakeへ送信済み、Draft PR作成待ち | 即時Actions起動結果を確認。失敗・未設定でもGCSに保持され、定期Actionsが再試行 |
 | `published` | Draft PR作成済み | PRを人が確認 |
 | `failed` | GitHub API等で送信失敗 | 原因修正後に再送 |
 | `blocked-sensitive-content` | 認証情報らしき内容を検出 | outbox上で管理者が確認・除去。コマンドからの再送は禁止 |
@@ -181,6 +181,13 @@ GitHub ActionsはOIDC/WIFで同bucketを読み、リポジトリ自身の`GITHUB
 YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_BRANCH=main
 YAGAPON_KNOWLEDGE_GCS_BUCKET=yagamiatlas-yagapon-knowledge-intake
+YAGAPON_KNOWLEDGE_INTAKE_DISPATCH_ENABLED=true
+YAGAPON_KNOWLEDGE_GITHUB_APP_ID=<Actions起動専用GitHub App ID>
+YAGAPON_KNOWLEDGE_GITHUB_APP_INSTALLATION_ID=<installation ID>
+YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_SECRET=<Secret Manager secret名; deploy.envのみ>
+YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=/etc/yagapon/secrets/knowledge-github-app-private-key.pem
+YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/knowledge-github-app-private-key.pem
+YAGAPON_KNOWLEDGE_INTAKE_WORKFLOW=yagapon-intake.yml
 YAGAPON_KNOWLEDGE_SNAPSHOT_BUCKET=yagamiatlas-yagapon-knowledge-approved
 YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
 YAGAPON_KNOWLEDGE_GUILD_ID=<IT Division Guild ID>
@@ -207,6 +214,20 @@ YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
 YAGAPON_SCHEDULED_BACKFILL_RETRY_SECONDS=900
 YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
 ```
+
+整理で1件以上のbundleをGCSへcreate-only保存した直後、同じ整理実行内で
+`yagapon-intake.yml`の`workflow_dispatch`を1回だけ起動する。GitHub Appは
+Knowledgeリポジトリ1件だけへインストールし、Repository permissionsは`Actions: Write`と
+自動付与される`Metadata: Read-only`だけにする。発行するinstallation tokenも対象repositoryと
+`actions:write`へ縮小し、BotへContents/Pull requestsの書込権限やPATを渡さない。
+このAppは`Contents: Read-only`のsource readerとは別App・別installation・別Secretであり、鍵を
+共有したりsource用資格情報へfallbackしたりしない。デプロイ時に専用PEMをSecret Managerから
+`/etc/yagapon/secrets/knowledge-github-app-private-key.pem`へatomicに展開し、`yagapon`と
+`knowledge-curation-watch`だけへread-only mountする。失敗時は直前の鍵をatomicに復元する。
+即時起動に失敗してもbundleはoutboxとGCS `pending/`に残り、5分cronまたは次回dispatchで再試行する。
+同一bundleはGCS create-only、固定branch、Actions concurrencyで重複PRを防ぐ。資格情報が未設定の場合は
+定期Actions待ちとしてDiscordへ明示する。`workflow_dispatch`のHTTP 204は「PR作成要求済み」であり、
+PR URLを取得するまでは「PR作成済み」「Knowledge更新完了」と表示しない。
 
 schedulerを使わない単独curatorだけは`YAGAPON_KNOWLEDGE_BACKFILL_STATE`未設定で独立実行できる。
 scheduler有効時と権限者による全期間取得時は同設定が必須であり、解決後のパスがproducer側の

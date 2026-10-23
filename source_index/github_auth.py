@@ -1,4 +1,8 @@
-"""Short-lived, read-only GitHub App authentication for source indexing."""
+"""Short-lived, repository-scoped GitHub App authentication.
+
+Source indexing keeps the default ``contents:read`` contract. Other callers
+must opt in to their exact permission set; unexpected permissions are rejected.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,12 @@ GITHUB_API_URL = "https://api.github.com"
 GITHUB_API_VERSION = "2022-11-28"
 MAX_TOKEN_RESPONSE_BYTES = 2_000_000
 TOKEN_REFRESH_SKEW_SECONDS = 300
+ALLOWED_PERMISSION_PROFILES = frozenset(
+    {
+        frozenset({("contents", "read")}),
+        frozenset({("actions", "write")}),
+    }
+)
 
 
 class GitHubAppTokenProvider:
@@ -34,6 +44,7 @@ class GitHubAppTokenProvider:
         installation_id: str | int,
         private_key: str,
         repositories: tuple[str, ...],
+        permissions: dict[str, str] | None = None,
         api_url: str = GITHUB_API_URL,
         clock: Callable[[], float] | None = None,
         opener: Callable[..., object] | None = None,
@@ -58,11 +69,29 @@ class GitHubAppTokenProvider:
             for name in normalized_repositories
         ):
             raise RuntimeError("GitHub App repository restriction is empty or invalid")
+        permission_profile = (
+            {"contents": "read"} if permissions is None else permissions
+        )
+        if not isinstance(permission_profile, dict):
+            raise RuntimeError(
+                "GitHub App permissions must use exactly one approved profile: "
+                "contents:read or actions:write"
+            )
+        normalized_permissions = {
+            str(name): str(level)
+            for name, level in permission_profile.items()
+        }
+        if frozenset(normalized_permissions.items()) not in ALLOWED_PERMISSION_PROFILES:
+            raise RuntimeError(
+                "GitHub App permissions must use exactly one approved profile: "
+                "contents:read or actions:write"
+            )
 
         self.app_id = normalized_app_id
         self.installation_id = normalized_installation_id
         self.private_key = normalized_key
         self.repositories = normalized_repositories
+        self.permissions = normalized_permissions
         self.api_url = api_url.rstrip("/")
         self._clock = clock or time.time
         self._opener = opener or urllib.request.urlopen
@@ -97,7 +126,7 @@ class GitHubAppTokenProvider:
         body = json.dumps(
             {
                 "repositories": list(self.repositories),
-                "permissions": {"contents": "read"},
+                "permissions": self.permissions,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -144,18 +173,39 @@ class GitHubAppTokenProvider:
             raise RuntimeError("GitHub App installation token response is invalid") from exc
         if not token or expires_at <= now + TOKEN_REFRESH_SKEW_SECONDS:
             raise RuntimeError("GitHub App installation token has an invalid expiry")
-        if not isinstance(permissions, dict) or permissions.get("contents") != "read":
-            raise RuntimeError("GitHub App installation token lacks contents:read")
+        if not isinstance(permissions, dict) or any(
+            permissions.get(name) != level
+            for name, level in self.permissions.items()
+        ):
+            expected = ", ".join(
+                f"{name}:{level}" for name, level in sorted(self.permissions.items())
+            )
+            raise RuntimeError(
+                "GitHub App installation token lacks requested permissions: "
+                + expected
+            )
         unexpected = {
             str(name): str(value)
             for name, value in permissions.items()
-            if str(name) not in {"contents", "metadata"}
-            or str(value).lower() != "read"
+            if (
+                str(name) not in self.permissions
+                and not (str(name) == "metadata" and str(value).lower() == "read")
+            )
+            or (
+                str(name) in self.permissions
+                and str(value).lower() != self.permissions[str(name)]
+            )
         }
         if unexpected:
+            if self.permissions == {"contents": "read"}:
+                boundary = "contents:read and metadata:read; refuse to index"
+            else:
+                expected = ", ".join(
+                    f"{name}:{level}" for name, level in sorted(self.permissions.items())
+                )
+                boundary = f"the requested {expected} and metadata:read boundary"
             raise RuntimeError(
-                "GitHub App installation has permissions beyond contents:read "
-                "and metadata:read; refuse to index"
+                "GitHub App installation has permissions beyond " + boundary
             )
         requested_repositories = {name.casefold() for name in self.repositories}
         missing = requested_repositories - returned_repositories

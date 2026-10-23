@@ -176,6 +176,7 @@ class RagStore:
                     source_url TEXT,
                     start_at TEXT,
                     end_at TEXT,
+                    upload_payload_sha256 TEXT,
                     body TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -222,6 +223,23 @@ class RagStore:
                 );
                 CREATE INDEX IF NOT EXISTS pending_deletions_document
                     ON pending_document_deletions(document_key);
+                CREATE TABLE IF NOT EXISTS pending_upload_operations (
+                    document_key TEXT PRIMARY KEY,
+                    store_name TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    superseded_remote_names_json TEXT NOT NULL,
+                    operation_name TEXT,
+                    remote_name TEXT,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS pending_upload_operations_state
+                    ON pending_upload_operations(state, updated_at);
                 """
             )
             columns = {
@@ -237,6 +255,7 @@ class RagStore:
                 "access_scope": "TEXT",
                 "auto_promote": "INTEGER NOT NULL DEFAULT 0",
                 "schema": "TEXT",
+                "upload_payload_sha256": "TEXT",
             }
             for column, sql_type in migrations.items():
                 if column not in columns:
@@ -272,6 +291,8 @@ class RagStore:
         metadata: list[dict] | None,
         *,
         superseded_remote_names: list[str] | tuple[str, ...] = (),
+        completed_upload_content_sha256: str | None = None,
+        upload_payload_sha256: str | None = None,
     ):
         """Persist a remote document and its replacement cleanup intent atomically.
 
@@ -294,14 +315,52 @@ class RagStore:
         )
 
         def upsert(connection):
+            pending_upload_exists = False
+            if completed_upload_content_sha256 is not None:
+                upload = connection.execute(
+                    """
+                    SELECT content_sha256, payload_sha256
+                    FROM pending_upload_operations WHERE document_key = ?
+                    """,
+                    (document_key,),
+                ).fetchone()
+                if upload is None:
+                    existing = connection.execute(
+                        """
+                        SELECT remote_name, body, upload_payload_sha256
+                        FROM documents WHERE document_key = ?
+                        """,
+                        (document_key,),
+                    ).fetchone()
+                    if not (
+                        existing is not None
+                        and existing["remote_name"] == remote_name
+                        and existing["body"] == text
+                        and existing["upload_payload_sha256"]
+                        == upload_payload_sha256
+                    ):
+                        raise RuntimeError(
+                            "Completed File Search upload intent is missing"
+                        )
+                elif (
+                    upload["content_sha256"] != completed_upload_content_sha256
+                    or upload["payload_sha256"] != upload_payload_sha256
+                ):
+                    raise RuntimeError(
+                        "Completed File Search upload intent has changed"
+                    )
+                else:
+                    pending_upload_exists = True
+
             connection.execute(
                 """
                 INSERT INTO documents (
                     document_key, remote_name, guild_id, channel_id, channel_name,
                     parent_id, parent_name, category_id, category_name, category,
                     festival, source_type, status, authority, source_url,
-                    access_scope, auto_promote, schema, start_at, end_at, body, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    access_scope, auto_promote, schema, start_at, end_at,
+                    upload_payload_sha256, body, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_key) DO UPDATE SET
                     remote_name=excluded.remote_name,
                     guild_id=excluded.guild_id,
@@ -322,6 +381,7 @@ class RagStore:
                     source_url=excluded.source_url,
                     start_at=excluded.start_at,
                     end_at=excluded.end_at,
+                    upload_payload_sha256=excluded.upload_payload_sha256,
                     body=excluded.body,
                     updated_at=excluded.updated_at
                 """,
@@ -346,6 +406,7 @@ class RagStore:
                     str(values.get("schema") or ""),
                     str(values.get("start_at") or ""),
                     str(values.get("end_at") or ""),
+                    upload_payload_sha256,
                     text,
                     now,
                 ),
@@ -358,8 +419,208 @@ class RagStore:
                 """,
                 ((name, document_key, now) for name in pending),
             )
+            if pending_upload_exists:
+                resolved = connection.execute(
+                    """
+                    DELETE FROM pending_upload_operations
+                    WHERE document_key = ? AND content_sha256 = ?
+                      AND payload_sha256 = ?
+                    """,
+                    (
+                        document_key,
+                        completed_upload_content_sha256,
+                        upload_payload_sha256,
+                    ),
+                )
+                if resolved.rowcount != 1:
+                    raise RuntimeError(
+                        "Completed File Search upload intent disappeared"
+                    )
 
         self._write(upsert)
+
+    @staticmethod
+    def upload_payload_sha256(
+        store_name: str,
+        display_name: str,
+        text: str,
+        metadata: list[dict] | None,
+    ) -> str:
+        """Return the stable identity of one non-idempotent upload request."""
+        serialized = json.dumps(
+            {
+                "store_name": store_name,
+                "display_name": display_name,
+                "body": text,
+                "metadata": list(metadata or ()),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def claim_upload_operation(
+        self,
+        *,
+        document_key: str,
+        store_name: str,
+        display_name: str,
+        text: str,
+        metadata: list[dict] | None,
+        superseded_remote_names: list[str] | tuple[str, ...] = (),
+    ) -> tuple[dict, bool]:
+        """Durably claim an upload identity before its non-idempotent request.
+
+        The returned boolean is true only for the process that inserted the
+        claim. Other processes must resume/reconcile the returned record and
+        must not start another upload.
+        """
+        if not document_key:
+            raise ValueError("document_key is required for a durable upload claim")
+        metadata_json = json.dumps(
+            list(metadata or ()),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        content_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        payload_sha256 = self.upload_payload_sha256(
+            store_name,
+            display_name,
+            text,
+            metadata,
+        )
+        requested_superseded = tuple(
+            dict.fromkeys(str(name) for name in superseded_remote_names if name)
+        )
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        def claim(connection):
+            inserted = connection.execute(
+                """
+                INSERT OR IGNORE INTO pending_upload_operations (
+                    document_key, store_name, display_name, content_sha256,
+                    payload_sha256, body, metadata_json,
+                    superseded_remote_names_json, operation_name, remote_name,
+                    state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'initiating', ?, ?)
+                """,
+                (
+                    document_key,
+                    store_name,
+                    display_name,
+                    content_sha256,
+                    payload_sha256,
+                    text,
+                    metadata_json,
+                    json.dumps(requested_superseded),
+                    now,
+                    now,
+                ),
+            ).rowcount == 1
+            row = connection.execute(
+                "SELECT * FROM pending_upload_operations WHERE document_key = ?",
+                (document_key,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Failed to persist File Search upload intent")
+            result = dict(row)
+            if result["payload_sha256"] == payload_sha256:
+                existing_superseded = json.loads(
+                    result["superseded_remote_names_json"] or "[]"
+                )
+                merged = tuple(
+                    dict.fromkeys([*existing_superseded, *requested_superseded])
+                )
+                if list(merged) != existing_superseded:
+                    encoded = json.dumps(merged)
+                    connection.execute(
+                        """
+                        UPDATE pending_upload_operations
+                        SET superseded_remote_names_json = ?, updated_at = ?
+                        WHERE document_key = ? AND payload_sha256 = ?
+                        """,
+                        (encoded, now, document_key, payload_sha256),
+                    )
+                    result["superseded_remote_names_json"] = encoded
+            return result, inserted
+
+        return self._write(claim)
+
+    def get_upload_operation(self, document_key: str) -> dict | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM pending_upload_operations WHERE document_key = ?",
+                (document_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_upload_operation(
+        self,
+        document_key: str,
+        payload_sha256: str,
+        operation_name: str,
+    ) -> None:
+        if not operation_name:
+            raise ValueError("operation_name is required")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        def record(connection):
+            updated = connection.execute(
+                """
+                UPDATE pending_upload_operations
+                SET operation_name = ?, state = 'accepted', updated_at = ?
+                WHERE document_key = ? AND payload_sha256 = ?
+                """,
+                (operation_name, now, document_key, payload_sha256),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("File Search upload intent is missing or changed")
+
+        self._write(record)
+
+    def record_upload_result(
+        self,
+        document_key: str,
+        payload_sha256: str,
+        remote_name: str,
+    ) -> None:
+        if not remote_name:
+            raise ValueError("remote_name is required")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        def record(connection):
+            updated = connection.execute(
+                """
+                UPDATE pending_upload_operations
+                SET remote_name = ?, state = 'completed', updated_at = ?
+                WHERE document_key = ? AND payload_sha256 = ?
+                """,
+                (remote_name, now, document_key, payload_sha256),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("File Search upload intent is missing or changed")
+
+        self._write(record)
+
+    def resolve_upload_operation(
+        self,
+        document_key: str,
+        payload_sha256: str,
+    ) -> bool:
+        """Remove a rejected/failed intent only when its identity still matches."""
+        def resolve(connection):
+            deleted = connection.execute(
+                """
+                DELETE FROM pending_upload_operations
+                WHERE document_key = ? AND payload_sha256 = ?
+                """,
+                (document_key, payload_sha256),
+            )
+            return deleted.rowcount == 1
+
+        return bool(self._write(resolve))
 
     def delete_remote_documents(self, remote_names: list[str]):
         if not remote_names:
@@ -482,6 +743,7 @@ class RagStore:
             "source_url",
             "start_at",
             "end_at",
+            "upload_payload_sha256",
             "body",
             "updated_at",
         )

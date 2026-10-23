@@ -84,9 +84,10 @@ def test_remote_deploy_allows_absent_or_empty_direct_source_credentials(
     (
         "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY",
         "YAGAPON_SOURCE_GITHUB_TOKEN",
+        "YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY",
     ),
 )
-def test_remote_deploy_rejects_direct_source_credentials_without_printing_values(
+def test_remote_deploy_rejects_direct_github_credentials_without_printing_values(
     tmp_path,
     name,
 ):
@@ -104,3 +105,42 @@ def test_remote_deploy_rejects_direct_source_credentials_without_printing_values
     assert result.returncode != 0
     assert secret not in result.stdout
     assert secret not in result.stderr
+
+
+def test_remote_deploy_atomically_installs_and_rolls_back_dedicated_knowledge_key():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    assert (
+        "knowledge_github_app_key_path=/etc/yagapon/secrets/"
+        "knowledge-github-app-private-key.pem"
+    ) in deploy
+    assert (
+        "YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_SECRET=//p"
+    ) in deploy
+    assert (
+        'mv -f -- "$knowledge_github_app_key_tmp" '
+        '"$knowledge_github_app_key_host_file"'
+    ) in deploy
+    assert (
+        'mv -f -- "$knowledge_rollback_tmp" '
+        '"$knowledge_github_app_key_path"'
+    ) in deploy
+    assert "Knowledge GitHub App secret must contain a valid RSA private key" in deploy
+    assert (
+        "Knowledge dispatch and source indexing must use separate GitHub Apps, "
+        "installations, secrets, and key files"
+    ) in deploy
+
+
+def test_deploy_example_wires_both_dedicated_github_apps():
+    documentation = (ROOT / "deploy/README.md").read_text(encoding="utf-8")
+
+    assert (
+        "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE="
+        "/etc/yagapon/secrets/github-app-private-key.pem"
+    ) in documentation
+    assert (
+        "YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_HOST_FILE="
+        "/etc/yagapon/secrets/knowledge-github-app-private-key.pem"
+    ) in documentation
+    assert "source AppとはApp ID、installation ID、" in documentation

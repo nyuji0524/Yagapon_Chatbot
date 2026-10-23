@@ -81,7 +81,12 @@ DOCUMENT_MIN_MESSAGES = 8
 DOCUMENT_SESSION_GAP = timedelta(hours=6)
 DOCUMENT_MAX_MERGE_GAP = timedelta(hours=24)
 UPLOAD_POLL_SECONDS = 2
-UPLOAD_TIMEOUT_SECONDS = 180
+FILE_SEARCH_UPLOAD_START_TIMEOUT_DEFAULT_SECONDS = 3 * 60
+FILE_SEARCH_UPLOAD_START_TIMEOUT_MIN_SECONDS = 30
+FILE_SEARCH_UPLOAD_START_TIMEOUT_MAX_SECONDS = 15 * 60
+FILE_SEARCH_INDEX_TIMEOUT_DEFAULT_SECONDS = 30 * 60
+FILE_SEARCH_INDEX_TIMEOUT_MIN_SECONDS = 5 * 60
+FILE_SEARCH_INDEX_TIMEOUT_MAX_SECONDS = 2 * 60 * 60
 FILE_SEARCH_CUSTOM_METADATA_LIMIT = 20
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -176,6 +181,33 @@ def _bounded_float_env(name: str, default: float, minimum: float, maximum: float
         log.warning("Non-finite %s; using %s", name, default)
         value = default
     return max(minimum, min(value, maximum))
+
+
+def file_search_index_timeout_seconds() -> int:
+    """Return the bounded wait for one accepted File Search upload.
+
+    Upload creation is not idempotent, so timing out and starting it again can
+    leave an untracked duplicate if the original operation eventually
+    completes.  Keep the default comfortably above normal indexing latency,
+    while retaining a finite upper bound so a permanently stuck operation does
+    not occupy an upload worker forever.
+    """
+    return _bounded_int_env(
+        "YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS",
+        FILE_SEARCH_INDEX_TIMEOUT_DEFAULT_SECONDS,
+        FILE_SEARCH_INDEX_TIMEOUT_MIN_SECONDS,
+        FILE_SEARCH_INDEX_TIMEOUT_MAX_SECONDS,
+    )
+
+
+def file_search_upload_start_timeout_seconds() -> int:
+    """Return the bounded total wait for creating one upload operation."""
+    return _bounded_int_env(
+        "YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS",
+        FILE_SEARCH_UPLOAD_START_TIMEOUT_DEFAULT_SECONDS,
+        FILE_SEARCH_UPLOAD_START_TIMEOUT_MIN_SECONDS,
+        FILE_SEARCH_UPLOAD_START_TIMEOUT_MAX_SECONDS,
+    )
 
 
 RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env(
@@ -1284,6 +1316,10 @@ class CorpusManager:
         self._seed_trusted_knowledge()
         self._buffers: dict[tuple[int, int], MessageBuffer] = {}
         self._upload_semaphore = asyncio.Semaphore(5)
+        self._file_search_upload_start_timeout_seconds = (
+            file_search_upload_start_timeout_seconds()
+        )
+        self._file_search_index_timeout_seconds = file_search_index_timeout_seconds()
         self._flush_task: asyncio.Task | None = None
         self._inflight_flushes: set[asyncio.Task] = set()
         self._scheduled_flush_keys: set[tuple[int, int]] = set()
@@ -1474,15 +1510,23 @@ class CorpusManager:
             list_documents,
             operation_name="file_search_list_documents",
         )
-        return [
-            {
-                "name": str(getattr(document, "name", "") or ""),
-                "display_name": str(getattr(document, "display_name", "") or ""),
-                "metadata": self._metadata_map(document),
-            }
-            for document in documents
-            if getattr(document, "name", None)
-        ]
+        result = []
+        for document in documents:
+            if not getattr(document, "name", None):
+                continue
+            state = getattr(document, "state", None)
+            state_value = getattr(state, "value", state)
+            result.append(
+                {
+                    "name": str(getattr(document, "name", "") or ""),
+                    "display_name": str(
+                        getattr(document, "display_name", "") or ""
+                    ),
+                    "metadata": self._metadata_map(document),
+                    "state": str(state_value or ""),
+                }
+            )
+        return result
 
     async def audit_remote_mirror(self, store_name: str, guild_id: int) -> dict:
         """Compare File Search identities with SQLite without mutating either."""
@@ -1749,6 +1793,349 @@ class CorpusManager:
 
     # ------ upload ------
 
+    @staticmethod
+    def _upload_metadata_with_identity(
+        text: str,
+        metadata: list[dict] | None,
+    ) -> tuple[list[dict], str]:
+        """Ensure every upload has a remotely reconcilable stable identity."""
+        original = metadata if metadata is not None else []
+        values = {}
+        for item in original:
+            value = item.get("string_value")
+            if value is None:
+                value = item.get("numeric_value")
+            values[str(item.get("key") or "")] = value
+        document_key = str(
+            values.get("document_key")
+            or hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+        )
+        additions = []
+        if not values.get("document_key"):
+            additions.append({"key": "document_key", "string_value": document_key})
+        if not values.get("content_sha256"):
+            additions.append(
+                {
+                    "key": "content_sha256",
+                    "string_value": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                }
+            )
+        return ([*original, *additions] if additions else original), document_key
+
+    @staticmethod
+    def _pending_upload_metadata(pending: dict) -> list[dict]:
+        metadata = json.loads(str(pending.get("metadata_json") or "[]"))
+        if not isinstance(metadata, list) or any(
+            not isinstance(item, dict) for item in metadata
+        ):
+            raise RuntimeError("Persisted File Search upload metadata is invalid")
+        return metadata
+
+    @staticmethod
+    def _pending_superseded_names(pending: dict) -> list[str]:
+        names = json.loads(
+            str(pending.get("superseded_remote_names_json") or "[]")
+        )
+        if not isinstance(names, list):
+            raise RuntimeError("Persisted File Search cleanup intent is invalid")
+        return list(dict.fromkeys(str(name) for name in names if name))
+
+    @staticmethod
+    def _metadata_items_map(metadata: list[dict] | None) -> dict[str, object]:
+        """Normalize upload metadata without losing string/numeric values."""
+        result: dict[str, object] = {}
+        for item in metadata or ():
+            value = item.get("string_value")
+            if value is None:
+                value = item.get("numeric_value")
+            result[str(item.get("key") or "")] = value
+        return result
+
+    @staticmethod
+    def _remote_document_is_active(document: object) -> bool:
+        state = (
+            document.get("state")
+            if isinstance(document, dict)
+            else getattr(document, "state", None)
+        )
+        state_value = getattr(state, "value", state)
+        return str(state_value or "") == types.DocumentState.STATE_ACTIVE.value
+
+    @staticmethod
+    def _upload_start_was_definitively_rejected(exc: BaseException) -> bool:
+        """Return true only when no accepted upload can exist remotely."""
+        if isinstance(exc, RateLimitExceeded):
+            return True
+        code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            return False
+        return 400 <= status < 500 and status not in {408, 429}
+
+    async def _remote_document_matches_pending(
+        self,
+        pending: dict,
+    ) -> tuple[str | None, list[str]]:
+        """Reconcile an initiation only against its exact remote payload.
+
+        The content identity alone is insufficient: the same text can move
+        from public to restricted scope. Reusing a document with stale ACL or
+        authority metadata would leave searchable data exposed to the wrong
+        audience.
+        """
+        metadata = self._pending_upload_metadata(pending)
+        expected_metadata = self._metadata_items_map(
+            _file_search_metadata(metadata)
+        )
+        expected_display_name = str(pending["display_name"])
+        matches = []
+        for document in await self.list_remote_documents(str(pending["store_name"])):
+            if not self._remote_document_is_active(document):
+                continue
+            if str(document.get("display_name") or "") != expected_display_name:
+                continue
+            if (document.get("metadata") or {}) != expected_metadata:
+                continue
+            matches.append(str(document["name"]))
+        matches = sorted(dict.fromkeys(matches))
+        return (matches[0] if matches else None, matches[1:])
+
+    async def _remote_document_matches_payload(
+        self,
+        remote_name: str,
+        display_name: str,
+        metadata: list[dict] | None,
+    ) -> bool:
+        """Verify the complete remotely searchable identity of a document."""
+        loop = asyncio.get_running_loop()
+
+        async def get_document():
+            return await loop.run_in_executor(
+                None,
+                lambda: self._client.file_search_stores.documents.get(
+                    name=remote_name
+                ),
+            )
+
+        try:
+            document = await retry_transient_api(
+                get_document,
+                operation_name="file_search_get_document",
+            )
+        except Exception as exc:
+            if self._remote_document_absent(exc):
+                return False
+            raise
+        if not self._remote_document_is_active(document):
+            return False
+        actual_name = str(getattr(document, "name", "") or "")
+        if actual_name and actual_name != remote_name:
+            return False
+        if str(getattr(document, "display_name", "") or "") != display_name:
+            return False
+        expected_metadata = self._metadata_items_map(
+            _file_search_metadata(metadata)
+        )
+        return self._metadata_map(document) == expected_metadata
+
+    async def _finalize_pending_upload(
+        self,
+        pending: dict,
+        remote_name: str,
+        *,
+        extra_superseded_names: list[str] | tuple[str, ...] = (),
+    ) -> str:
+        metadata = self._pending_upload_metadata(pending)
+        superseded = self._pending_superseded_names(pending)
+        superseded.extend(extra_superseded_names)
+        try:
+            await asyncio.to_thread(
+                self.rag_store.upsert_document,
+                remote_name,
+                str(pending["body"]),
+                metadata,
+                superseded_remote_names=tuple(dict.fromkeys(superseded)),
+                completed_upload_content_sha256=str(pending["content_sha256"]),
+                upload_payload_sha256=str(pending["payload_sha256"]),
+            )
+        except Exception:
+            # The accepted operation remains durable and can be finalized on
+            # the next run. Deleting the remote here would make a completed
+            # persisted operation point at a document that no longer exists.
+            log.exception(
+                "Local mirror commit failed for accepted File Search upload %s",
+                pending["document_key"],
+            )
+            raise
+        log.info(
+            "Uploaded: %s -> %s",
+            pending["display_name"],
+            pending["store_name"],
+        )
+        return remote_name
+
+    async def _resume_pending_upload(
+        self,
+        pending: dict,
+        operation=None,
+    ) -> str:
+        """Resume a durable operation or reconcile its remotely active result."""
+        document_key = str(pending["document_key"])
+        payload_sha256 = str(pending["payload_sha256"])
+        remote_name = str(pending.get("remote_name") or "")
+        if remote_name:
+            return await self._finalize_pending_upload(pending, remote_name)
+
+        operation_name = str(pending.get("operation_name") or "")
+        if operation is None and operation_name:
+            operation = types.UploadToFileSearchStoreOperation(name=operation_name)
+        if operation is None:
+            remote_name, duplicates = await self._remote_document_matches_pending(
+                pending
+            )
+            if remote_name:
+                await asyncio.to_thread(
+                    self.rag_store.record_upload_result,
+                    document_key,
+                    payload_sha256,
+                    remote_name,
+                )
+                pending = await asyncio.to_thread(
+                    self.rag_store.get_upload_operation,
+                    document_key,
+                )
+                if pending is None:
+                    raise RuntimeError("File Search upload intent disappeared")
+                return await self._finalize_pending_upload(
+                    pending,
+                    remote_name,
+                    extra_superseded_names=duplicates,
+                )
+            # The initiating worker may have completed between our initial DB
+            # read and remote listing. Re-read once before failing closed.
+            refreshed = await asyncio.to_thread(
+                self.rag_store.get_upload_operation,
+                document_key,
+            )
+            if refreshed and (
+                refreshed.get("operation_name") or refreshed.get("remote_name")
+            ):
+                return await self._resume_pending_upload(refreshed)
+            raise TimeoutError(
+                "File Search upload initiation outcome is still unknown; "
+                f"refusing to resend document_key={document_key}"
+            )
+
+        index_timeout_seconds = self._file_search_index_timeout_seconds
+        deadline = time.monotonic() + index_timeout_seconds
+        loop = asyncio.get_running_loop()
+        while getattr(operation, "done", True) is not True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Indexing timed out after {index_timeout_seconds}s"
+                )
+            await asyncio.sleep(min(UPLOAD_POLL_SECONDS, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Indexing timed out after {index_timeout_seconds}s"
+                )
+
+            async def poll_operation():
+                return await loop.run_in_executor(
+                    None,
+                    lambda op=operation: self._client.operations.get(op),
+                )
+
+            try:
+                operation = await asyncio.wait_for(
+                    retry_transient_api(
+                        poll_operation,
+                        operation_name="file_search_upload_poll",
+                        attempts=5,
+                        initial_delay=2,
+                        max_delay=30,
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                if deadline - time.monotonic() <= 0:
+                    raise TimeoutError(
+                        f"Indexing timed out after {index_timeout_seconds}s"
+                    ) from None
+                raise
+            except Exception as exc:
+                if not self._remote_document_absent(exc):
+                    raise
+                # Long-running operation records may expire before a crashed
+                # worker resumes. Only an ACTIVE document with the complete
+                # original payload identity is safe to finalize.
+                remote_name, duplicates = (
+                    await self._remote_document_matches_pending(pending)
+                )
+                if not remote_name:
+                    raise TimeoutError(
+                        "File Search upload operation is no longer available "
+                        "and no ACTIVE exact-payload document is visible; "
+                        f"refusing to resend document_key={document_key}"
+                    ) from exc
+                await asyncio.to_thread(
+                    self.rag_store.record_upload_result,
+                    document_key,
+                    payload_sha256,
+                    remote_name,
+                )
+                pending = await asyncio.to_thread(
+                    self.rag_store.get_upload_operation,
+                    document_key,
+                )
+                if pending is None:
+                    raise RuntimeError("File Search upload intent disappeared")
+                return await self._finalize_pending_upload(
+                    pending,
+                    remote_name,
+                    extra_superseded_names=duplicates,
+                )
+
+        if getattr(operation, "error", None):
+            await asyncio.to_thread(
+                self.rag_store.resolve_upload_operation,
+                document_key,
+                payload_sha256,
+            )
+            raise RuntimeError(f"Indexing failed: {operation.error}")
+        response = getattr(operation, "response", None)
+        remote_name = str(getattr(response, "document_name", None) or "")
+        if not remote_name:
+            remote_name, duplicates = await self._remote_document_matches_pending(
+                pending
+            )
+            if not remote_name:
+                raise RuntimeError(
+                    "Indexing completed without a reconcilable document name"
+                )
+        else:
+            duplicates = []
+        await asyncio.to_thread(
+            self.rag_store.record_upload_result,
+            document_key,
+            payload_sha256,
+            remote_name,
+        )
+        pending = await asyncio.to_thread(
+            self.rag_store.get_upload_operation,
+            document_key,
+        )
+        if pending is None:
+            raise RuntimeError("File Search upload intent disappeared")
+        return await self._finalize_pending_upload(
+            pending,
+            remote_name,
+            extra_superseded_names=duplicates,
+        )
+
     async def _upload_document(
         self,
         store_name: str,
@@ -1763,18 +2150,104 @@ class CorpusManager:
             try:
                 loop = asyncio.get_running_loop()
                 file_bytes = text.encode("utf-8")
+                metadata, document_key = self._upload_metadata_with_identity(
+                    text,
+                    metadata,
+                )
+                payload_sha256 = self.rag_store.upload_payload_sha256(
+                    store_name,
+                    display_name,
+                    text,
+                    metadata,
+                )
                 remote_metadata = _file_search_metadata(metadata)
+                durable = await asyncio.to_thread(
+                    self.rag_store.get_upload_operation,
+                    document_key,
+                )
+                if durable is not None:
+                    pending, _claimed = await asyncio.to_thread(
+                        self.rag_store.claim_upload_operation,
+                        document_key=document_key,
+                        store_name=store_name,
+                        display_name=display_name,
+                        text=text,
+                        metadata=metadata,
+                        superseded_remote_names=superseded_remote_names,
+                    )
+                    recovered = await self._resume_pending_upload(pending)
+                    if str(pending["payload_sha256"]) != payload_sha256:
+                        raise RuntimeError(
+                            "A previous upload for this document key was recovered; "
+                            "retry once to publish the newer payload"
+                        )
+                    return recovered
+                existing = await asyncio.to_thread(
+                    self.rag_store.get_document,
+                    document_key,
+                )
+                if (
+                    existing
+                    and existing.get("remote_name")
+                    and existing.get("body") == text
+                    and existing.get("upload_payload_sha256")
+                    in {None, "", payload_sha256}
+                    and await self._remote_document_matches_payload(
+                        str(existing["remote_name"]),
+                        display_name,
+                        metadata,
+                    )
+                ):
+                    # Older mirrors predate payload digests. Exact local body,
+                    # display name, and complete remote metadata (including
+                    # access scope) prove that no upload is needed; atomically
+                    # backfill the digest and cleanup intent instead.
+                    await asyncio.to_thread(
+                        self.rag_store.upsert_document,
+                        str(existing["remote_name"]),
+                        text,
+                        metadata,
+                        superseded_remote_names=superseded_remote_names,
+                        upload_payload_sha256=payload_sha256,
+                    )
+                    return str(existing["remote_name"])
+
+                pending, claimed = await asyncio.to_thread(
+                    self.rag_store.claim_upload_operation,
+                    document_key=document_key,
+                    store_name=store_name,
+                    display_name=display_name,
+                    text=text,
+                    metadata=metadata,
+                    superseded_remote_names=superseded_remote_names,
+                )
+                requested_matches_pending = (
+                    str(pending["payload_sha256"]) == payload_sha256
+                )
+                if not claimed:
+                    recovered = await self._resume_pending_upload(pending)
+                    if not requested_matches_pending:
+                        raise RuntimeError(
+                            "A previous upload for this document key was recovered; "
+                            "retry once to publish the newer payload"
+                        )
+                    return recovered
+
+                start_timeout_seconds = self._file_search_upload_start_timeout_seconds
 
                 async def start_upload():
-                    return await loop.run_in_executor(
-                        None,
-                        lambda: self._client.file_search_stores.upload_to_file_search_store(
+                    def blocking_start():
+                        operation = self._client.file_search_stores.upload_to_file_search_store(
                             file=io.BytesIO(file_bytes),
                             file_search_store_name=store_name,
                             config={
                                 "display_name": display_name,
                                 "mime_type": "text/plain",
                                 "custom_metadata": remote_metadata,
+                                "http_options": {
+                                    "timeout": start_timeout_seconds * 1000,
+                                    "retry_options": {"attempts": 1},
+                                },
                                 "chunking_config": {
                                     "white_space_config": {
                                         "max_tokens_per_chunk": 500,
@@ -1782,8 +2255,34 @@ class CorpusManager:
                                     }
                                 },
                             },
-                        ),
-                    )
+                        )
+                        operation_name = str(
+                            getattr(operation, "name", None) or ""
+                        )
+                        response = getattr(operation, "response", None)
+                        remote_name = str(
+                            getattr(response, "document_name", None) or ""
+                        )
+                        if operation_name:
+                            self.rag_store.record_upload_operation(
+                                document_key,
+                                str(pending["payload_sha256"]),
+                                operation_name,
+                            )
+                        elif getattr(operation, "done", True) is not True:
+                            raise RuntimeError(
+                                "File Search accepted an unnamed operation; "
+                                "refusing an unresumable upload"
+                            )
+                        if remote_name:
+                            self.rag_store.record_upload_result(
+                                document_key,
+                                str(pending["payload_sha256"]),
+                                remote_name,
+                            )
+                        return operation
+
+                    return await loop.run_in_executor(None, blocking_start)
 
                 # Starting an upload is not idempotent and the API exposes no
                 # request token. Retry only an explicit 429 rejection here;
@@ -1791,92 +2290,40 @@ class CorpusManager:
                 # cannot create an untracked duplicate. Polling the returned
                 # operation below is read-only and may safely retry all
                 # transient statuses.
-                operation = await retry_rate_limit(
-                    start_upload,
-                    operation_name="file_search_upload",
-                    attempts=5,
-                    initial_delay=2,
-                    max_delay=30,
-                )
-
-                deadline = time.monotonic() + UPLOAD_TIMEOUT_SECONDS
-                while getattr(operation, "done", True) is not True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(f"Indexing timed out after {UPLOAD_TIMEOUT_SECONDS}s")
-                    await asyncio.sleep(min(UPLOAD_POLL_SECONDS, remaining))
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(f"Indexing timed out after {UPLOAD_TIMEOUT_SECONDS}s")
-
-                    async def poll_operation():
-                        return await loop.run_in_executor(
-                            None,
-                            lambda op=operation: self._client.operations.get(op),
-                        )
-
-                    operation = await asyncio.wait_for(
-                        retry_transient_api(
-                            poll_operation,
-                            operation_name="file_search_upload_poll",
+                try:
+                    async with asyncio.timeout(start_timeout_seconds):
+                        operation = await retry_rate_limit(
+                            start_upload,
+                            operation_name="file_search_upload",
                             attempts=5,
                             initial_delay=2,
                             max_delay=30,
-                        ),
-                        timeout=remaining,
-                    )
-
-                if getattr(operation, "error", None):
-                    raise RuntimeError(f"Indexing failed: {operation.error}")
-                response = getattr(operation, "response", None)
-                document_name = getattr(response, "document_name", None)
-                if not document_name:
-                    raise RuntimeError("Indexing completed without a document name")
-                try:
-                    # SQLite lock waits/retries are intentionally synchronous in
-                    # RagStore, so keep them off Discord's event loop.
-                    await asyncio.to_thread(
-                        self.rag_store.upsert_document,
-                        document_name,
-                        text,
-                        metadata,
-                        superseded_remote_names=superseded_remote_names,
-                    )
-                except Exception as exc:
-                    # A remote-only document cannot participate in exact-match
-                    # authority checks or later replacement. Do not acknowledge
-                    # the upload until the local mirror commits; remove the new
-                    # remote document so the caller can safely retry the input.
-                    log.error(
-                        "Local exact-match mirror update failed for %s; rolling back remote document %s: %s",
-                        display_name,
-                        document_name,
-                        exc,
-                    )
-                    try:
-                        async def rollback_document():
-                            return await loop.run_in_executor(
-                                None,
-                                lambda: self._client.file_search_stores.documents.delete(
-                                    name=document_name,
-                                    config={"force": True},
-                                ),
-                            )
-
-                        await retry_transient_api(
-                            rollback_document,
-                            operation_name="file_search_upload_rollback",
                         )
-                    except Exception as rollback_exc:
-                        if not self._remote_document_absent(rollback_exc):
-                            log.critical(
-                                "Remote rollback failed for %s after local mirror failure: %s",
-                                document_name,
-                                rollback_exc,
-                            )
-                    return None
-                log.info(f"Uploaded: {display_name} -> {store_name}")
-                return document_name
+                except Exception as exc:
+                    if self._upload_start_was_definitively_rejected(exc):
+                        await asyncio.to_thread(
+                            self.rag_store.resolve_upload_operation,
+                            document_key,
+                            str(pending["payload_sha256"]),
+                        )
+                    if isinstance(exc, TimeoutError):
+                        raise TimeoutError(
+                            "File Search upload initiation exceeded "
+                            f"{start_timeout_seconds}s; its durable intent will "
+                            "be resumed or reconciled without resending"
+                        ) from None
+                    raise
+
+                pending = await asyncio.to_thread(
+                    self.rag_store.get_upload_operation,
+                    document_key,
+                )
+                if pending is None:
+                    raise RuntimeError("File Search upload intent disappeared")
+                return await self._resume_pending_upload(
+                    pending,
+                    operation=operation,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -3968,6 +4415,8 @@ class CorpusManager:
             result.documents_replaced = len(existing) if replace_existing else 0
             return result
         uploaded_names: list[str] = []
+        reused_names: set[str] = set()
+        existing_names = set(existing)
         for document in documents:
             uploaded = await self._upload_document(
                 corpus_store_name,
@@ -3980,19 +4429,24 @@ class CorpusManager:
                     await self._delete_documents(uploaded_names)
                 raise RuntimeError(f"Failed to index {document.display_name}")
             if isinstance(uploaded, str):
-                uploaded_names.append(uploaded)
+                if uploaded in existing_names:
+                    reused_names.add(uploaded)
+                else:
+                    uploaded_names.append(uploaded)
             result.documents_uploaded += 1
 
         # 新文書が全てACTIVEになった後だけ旧文書を削除する。
-        if replace_existing and existing:
-            deleted = await self._delete_documents(existing)
+        replaceable = [name for name in existing if name not in reused_names]
+        if replace_existing and replaceable:
+            deleted = await self._delete_documents(replaceable)
             result.documents_replaced = deleted
-            if deleted != len(existing):
+            if deleted != len(replaceable):
                 # Keep successfully uploaded replacements and do not advance
                 # the cursor. The next idempotent run can remove the remaining
                 # old documents without losing the already-replaced range.
                 raise RuntimeError(
-                    f"Could not replace all existing channel documents ({deleted}/{len(existing)} deleted)"
+                    "Could not replace all existing channel documents "
+                    f"({deleted}/{len(replaceable)} deleted)"
                 )
         if session is not None and not session.dry_run and complete_session_channel:
             session.completed_channel_ids.add(int(channel.id))

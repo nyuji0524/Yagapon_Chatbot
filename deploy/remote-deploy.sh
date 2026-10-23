@@ -21,6 +21,11 @@ github_app_key_existed=false
 github_app_key_installed=false
 github_app_key_backup=
 github_app_key_tmp=
+knowledge_github_app_key_path=/etc/yagapon/secrets/knowledge-github-app-private-key.pem
+knowledge_github_app_key_existed=false
+knowledge_github_app_key_installed=false
+knowledge_github_app_key_backup=
+knowledge_github_app_key_tmp=
 oauth_tmp=
 
 if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]; then
@@ -46,10 +51,11 @@ if [[ ! -f "$runtime_env" ]]; then
   exit 2
 fi
 
-# Production uses a Secret Manager PEM mounted only into source-index-watch.
-# Reject legacy direct values before changing any deployment state: env_file
-# would otherwise inject them into every service and direct values take
-# precedence over *_FILE readers. The scanner deliberately emits no values.
+# Production uses separate Secret Manager PEMs mounted only into their exact
+# source-reader or Knowledge-dispatch services. Reject legacy direct values
+# before changing deployment state: env_file would otherwise inject them into
+# every service and direct values take precedence over *_FILE readers. The
+# scanner deliberately emits no values.
 if ! python3 - "$runtime_env" <<'PY'
 import re
 import sys
@@ -58,6 +64,7 @@ from pathlib import Path
 forbidden = {
     "YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY",
     "YAGAPON_SOURCE_GITHUB_TOKEN",
+    "YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY",
 }
 
 
@@ -86,8 +93,8 @@ lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 raise SystemExit(1 if any(has_forbidden_value(line) for line in lines) else 0)
 PY
 then
-  echo "Direct GitHub source credentials are forbidden in $runtime_env" >&2
-  echo "Remove the direct private-key/token entries; configure the GitHub App IDs and Secret Manager PEM mount in deploy.env" >&2
+  echo "Direct GitHub App credentials are forbidden in $runtime_env" >&2
+  echo "Remove direct private-key/token entries; configure the dedicated GitHub App IDs and Secret Manager PEM mounts in deploy.env" >&2
   exit 2
 fi
 
@@ -115,10 +122,22 @@ rollback() {
     && install -o root -g root -m 0644 "$backup_dir/rag-eval-cases.yaml" "$rag_eval_cases_target"
   if [[ -n "$github_app_key_backup" && -f "$github_app_key_backup" ]]; then
     install -d -o root -g root -m 0700 "$(dirname "$github_app_key_path")"
+    source_rollback_tmp=$(mktemp /etc/yagapon/secrets/github-app-private-key.pem.rollback-install.XXXXXX)
     install -o 10001 -g 10001 -m 0600 \
-      "$github_app_key_backup" "$github_app_key_path"
+      "$github_app_key_backup" "$source_rollback_tmp"
+    mv -f -- "$source_rollback_tmp" "$github_app_key_path"
   elif [[ "$github_app_key_installed" == true && "$github_app_key_existed" == false ]]; then
     rm -f -- "$github_app_key_path"
+  fi
+  if [[ -n "$knowledge_github_app_key_backup" && -f "$knowledge_github_app_key_backup" ]]; then
+    install -d -o root -g root -m 0700 "$(dirname "$knowledge_github_app_key_path")"
+    knowledge_rollback_tmp=$(mktemp /etc/yagapon/secrets/knowledge-github-app-private-key.pem.rollback-install.XXXXXX)
+    install -o 10001 -g 10001 -m 0600 \
+      "$knowledge_github_app_key_backup" "$knowledge_rollback_tmp"
+    mv -f -- "$knowledge_rollback_tmp" "$knowledge_github_app_key_path"
+  elif [[ "$knowledge_github_app_key_installed" == true \
+    && "$knowledge_github_app_key_existed" == false ]]; then
+    rm -f -- "$knowledge_github_app_key_path"
   fi
   systemctl daemon-reload
   systemctl restart yagapon || true
@@ -134,6 +153,8 @@ cleanup_secret_temps() {
   [[ -z "$oauth_tmp" ]] || rm -f -- "$oauth_tmp"
   [[ -z "$github_app_key_tmp" ]] || rm -f -- "$github_app_key_tmp"
   [[ -z "$github_app_key_backup" ]] || rm -f -- "$github_app_key_backup"
+  [[ -z "$knowledge_github_app_key_tmp" ]] || rm -f -- "$knowledge_github_app_key_tmp"
+  [[ -z "$knowledge_github_app_key_backup" ]] || rm -f -- "$knowledge_github_app_key_backup"
 }
 handle_error() {
   status=$?
@@ -238,11 +259,58 @@ if [[ -n "$github_app_key_secret$github_app_id$github_app_installation_id$github
     echo "GitHub App secret must contain a valid RSA private key" >&2
     false
   fi
-  install -o 10001 -g 10001 -m 0600 \
-    "$github_app_key_tmp" "$github_app_key_host_file"
+  chown 10001:10001 "$github_app_key_tmp"
+  chmod 0600 "$github_app_key_tmp"
+  mv -f -- "$github_app_key_tmp" "$github_app_key_host_file"
   github_app_key_installed=true
-  rm -f "$github_app_key_tmp"
   github_app_key_tmp=
+fi
+
+# A second GitHub App is deliberately isolated from the source reader.  It can
+# only dispatch the Knowledge repository workflow (actions:write); its key is
+# mounted into the two curation entrypoints and nowhere else.
+knowledge_github_app_key_secret=$(sed -n 's/^YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_SECRET=//p' "$deploy_env" | tail -1)
+knowledge_github_app_id=$(sed -n 's/^YAGAPON_KNOWLEDGE_GITHUB_APP_ID=//p' "$deploy_env" | tail -1)
+knowledge_github_app_installation_id=$(sed -n 's/^YAGAPON_KNOWLEDGE_GITHUB_APP_INSTALLATION_ID=//p' "$deploy_env" | tail -1)
+knowledge_github_app_key_host_file=$(sed -n 's/^YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_HOST_FILE=//p' "$deploy_env" | tail -1)
+if [[ -n "$knowledge_github_app_key_secret$knowledge_github_app_id$knowledge_github_app_installation_id$knowledge_github_app_key_host_file" ]]; then
+  if [[ -z "$oauth_project" \
+    || ! "$knowledge_github_app_key_secret" =~ ^[a-zA-Z0-9_-]+$ \
+    || ! "$knowledge_github_app_id" =~ ^[a-zA-Z0-9]+$ \
+    || ! "$knowledge_github_app_installation_id" =~ ^[0-9]+$ \
+    || "$knowledge_github_app_installation_id" == 0 \
+    || "$knowledge_github_app_key_host_file" != "$knowledge_github_app_key_path" ]]; then
+    echo "Invalid Knowledge GitHub App Secret Manager configuration" >&2
+    false
+  fi
+  if [[ -n "$github_app_key_secret" \
+    && ( "$knowledge_github_app_key_secret" == "$github_app_key_secret" \
+      || "$knowledge_github_app_id" == "$github_app_id" \
+      || "$knowledge_github_app_installation_id" == "$github_app_installation_id" \
+      || "$knowledge_github_app_key_host_file" == "$github_app_key_host_file" ) ]]; then
+    echo "Knowledge dispatch and source indexing must use separate GitHub Apps, installations, secrets, and key files" >&2
+    false
+  fi
+  install -d -o root -g root -m 0700 /etc/yagapon/secrets
+  if [[ -f "$knowledge_github_app_key_path" ]]; then
+    knowledge_github_app_key_backup=$(mktemp /etc/yagapon/secrets/knowledge-github-app-private-key.pem.rollback.XXXXXX)
+    install -o root -g root -m 0600 \
+      "$knowledge_github_app_key_path" "$knowledge_github_app_key_backup"
+    knowledge_github_app_key_existed=true
+  fi
+  knowledge_github_app_key_tmp=$(mktemp /etc/yagapon/secrets/knowledge-github-app-private-key.pem.XXXXXX)
+  gcloud secrets versions access latest \
+    --project "$oauth_project" \
+    --secret "$knowledge_github_app_key_secret" > "$knowledge_github_app_key_tmp"
+  if ! openssl rsa -in "$knowledge_github_app_key_tmp" -check -noout >/dev/null 2>&1; then
+    echo "Knowledge GitHub App secret must contain a valid RSA private key" >&2
+    false
+  fi
+  chown 10001:10001 "$knowledge_github_app_key_tmp"
+  chmod 0600 "$knowledge_github_app_key_tmp"
+  mv -f -- "$knowledge_github_app_key_tmp" "$knowledge_github_app_key_host_file"
+  knowledge_github_app_key_installed=true
+  knowledge_github_app_key_tmp=
 fi
 
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" config --quiet

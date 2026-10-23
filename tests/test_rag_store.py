@@ -102,6 +102,119 @@ def test_legacy_database_migrates_category_to_explicit_lineage(tmp_path):
     assert document["parent_name"] is None
     assert document["category_id"] is None
     assert document["auto_promote"] == 0
+    assert document["upload_payload_sha256"] is None
+
+    with sqlite3.connect(path) as connection:
+        pending_upload_table = connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'pending_upload_operations'
+            """
+        ).fetchone()
+    assert pending_upload_table is not None
+
+
+def test_upload_operation_survives_restart_and_completes_atomically(tmp_path):
+    path = tmp_path / "rag.sqlite3"
+    store = RagStore(path)
+    upload_metadata = metadata(28)
+    pending, claimed = store.claim_upload_operation(
+        document_key="doc-28",
+        store_name="fileSearchStores/test",
+        display_name="document",
+        text="new body",
+        metadata=upload_metadata,
+        superseded_remote_names=("documents/old",),
+    )
+    assert claimed is True
+    store.record_upload_operation(
+        "doc-28",
+        pending["payload_sha256"],
+        "fileSearchStores/test/operations/upload-1",
+    )
+
+    reopened = RagStore(path)
+    durable = reopened.get_upload_operation("doc-28")
+    assert durable is not None
+    assert durable["state"] == "accepted"
+    assert durable["operation_name"] == (
+        "fileSearchStores/test/operations/upload-1"
+    )
+
+    reopened.record_upload_result(
+        "doc-28",
+        durable["payload_sha256"],
+        "documents/new",
+    )
+    reopened.upsert_document(
+        "documents/new",
+        "new body",
+        upload_metadata,
+        superseded_remote_names=("documents/old",),
+        completed_upload_content_sha256=durable["content_sha256"],
+        upload_payload_sha256=durable["payload_sha256"],
+    )
+
+    assert reopened.get_upload_operation("doc-28") is None
+    completed = reopened.get_document("doc-28")
+    assert completed["remote_name"] == "documents/new"
+    assert completed["upload_payload_sha256"] == durable["payload_sha256"]
+    assert reopened.pending_document_deletions("doc-28") == ["documents/old"]
+
+
+@pytest.mark.parametrize("transition", ["operation", "result"])
+def test_late_upload_worker_cannot_overwrite_new_same_body_payload(
+    tmp_path,
+    transition,
+):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    old, claimed = store.claim_upload_operation(
+        document_key="same-body",
+        store_name="fileSearchStores/test",
+        display_name="document",
+        text="same body",
+        metadata=[
+            {"key": "document_key", "string_value": "same-body"},
+            {"key": "access_scope", "string_value": "public"},
+        ],
+    )
+    assert claimed is True
+    assert store.resolve_upload_operation(
+        "same-body",
+        old["payload_sha256"],
+    ) is True
+    new, claimed = store.claim_upload_operation(
+        document_key="same-body",
+        store_name="fileSearchStores/test",
+        display_name="document",
+        text="same body",
+        metadata=[
+            {"key": "document_key", "string_value": "same-body"},
+            {"key": "access_scope", "string_value": "restricted"},
+        ],
+    )
+    assert claimed is True
+    assert new["payload_sha256"] != old["payload_sha256"]
+
+    with pytest.raises(RuntimeError, match="missing or changed"):
+        if transition == "operation":
+            store.record_upload_operation(
+                "same-body",
+                old["payload_sha256"],
+                "operations/stale",
+            )
+        else:
+            store.record_upload_result(
+                "same-body",
+                old["payload_sha256"],
+                "documents/stale",
+            )
+
+    durable = store.get_upload_operation("same-body")
+    assert durable is not None
+    assert durable["payload_sha256"] == new["payload_sha256"]
+    assert durable["operation_name"] is None
+    assert durable["remote_name"] is None
 
 
 def test_connection_sets_busy_timeout(tmp_path):

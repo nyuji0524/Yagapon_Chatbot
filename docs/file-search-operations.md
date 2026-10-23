@@ -27,6 +27,8 @@ File Searchのcustom metadataには次を保存する。
 - チャンネルを指定しない場合、閲覧可能かつ除外設定されていない全テキストチャンネルが対象。
 - チャンネルは既定で最大3件を並列処理する。`YAGAPON_BACKFILL_CONCURRENCY`で1〜8件に変更できる。
 - File Searchへのアップロードはチャンネル並列度とは別に最大5件へ制限し、API負荷の急増を防ぐ。
+- 非冪等なアップロード開始は既定180秒（`YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS`、30〜900秒）で打ち切る。開始前にSQLiteへdocument identityを記録し、operation名を受信した時点で永続化する。応答が不明な場合は再送せず、次回実行で同じoperationを再開するか、表示名とcustom metadata（`access_scope`などの権限情報を含む）が完全一致するACTIVE文書だけを照合する。
+- File Searchが受理した各文書は索引完了まで既定30分待つ。`YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS`で300〜7,200秒に変更できる。受理済みアップロードの重複を避けるため、完了待ちのタイムアウト時にアップロード開始を自動再試行しない。
 
 アップロード後は長時間オペレーションが完了するまで待つ。新文書がすべて索引された後にだけ同範囲の旧文書を削除する。
 途中で失敗した場合は、その実行で追加済みの新文書だけを削除し、旧文書とカーソルを維持する。

@@ -143,6 +143,18 @@ def _knowledge_refresh_status(result: dict) -> str:
         or int(curation.get("retry_failed") or 0) > 0
     ):
         return "partial"
+    delivery = curation.get("delivery") or {}
+    immediate_pr = delivery.get("immediate_pr") or {}
+    if int(delivery.get("queued_bundles") or 0) > 0:
+        if immediate_pr.get("status") == "failed":
+            return "partial"
+        if immediate_pr.get("status") == "pr-requested":
+            # workflow_dispatch=204 acknowledges only the request.  Until an
+            # intake result supplies a PR URL, do not report completion.
+            return "pr-requested"
+        # Missing, disabled, or unknown dispatch state still means a durable
+        # bundle is waiting for the intake workflow. Never call that complete.
+        return "pr-waiting"
     if (
         int(curation.get("retry_blocked") or 0) > 0
         or int(curation.get("blocked_access") or 0) > 0
@@ -309,6 +321,14 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
             discord.Color.orange(),
         ),
         "deferred": ("⏳ Knowledge更新を保留したぽん", discord.Color.orange()),
+        "pr-waiting": (
+            "📥 Knowledge整理完了・PR作成待ちだぽん",
+            discord.Color.orange(),
+        ),
+        "pr-requested": (
+            "📨 Knowledge整理完了・PR作成要求済みだぽん",
+            discord.Color.blurple(),
+        ),
         "disabled": ("⏸️ Knowledge整理は無効だぽん", discord.Color.light_grey()),
         "busy": ("⏳ 別のKnowledge更新が実行中だぽん", discord.Color.orange()),
         "failed": ("❌ Knowledge更新に失敗したぽん", discord.Color.red()),
@@ -421,7 +441,62 @@ def _knowledge_refresh_embed(result: dict) -> discord.Embed:
         ),
         inline=False,
     )
-    embed.set_footer(text="自動更新は6時間ごと。生成物はDraft PRで人の確認が必要です。")
+    delivery = curation.get("delivery") or {}
+    if delivery:
+        immediate_pr = delivery.get("immediate_pr") or {}
+        immediate_status = str(immediate_pr.get("status") or "unknown")
+        waiting_text = (
+            "⏳ 即時Actions起動は設定で無効です。bundleは保持され、"
+            "定期Actionsで再試行します。"
+            if immediate_pr.get("reason") == "dispatch-disabled"
+            else (
+                "⏳ 即時起動用GitHub Appが未設定です。bundleは保持され、"
+                "定期Actionsで再試行します。"
+            )
+        )
+        presentations = {
+            "pr-requested": (
+                "📨 PR作成要求を受け付けました。PR URLはまだ確認できていません。"
+            ),
+            "waiting": waiting_text,
+            "failed": (
+                "⚠️ 即時Actions起動に失敗しました。bundleは保持され、"
+                "次の定期Actionsで再試行します。"
+            ),
+            "not-needed": "ℹ️ 今回は新しいqueue対象がないため、Actionsは起動していません。",
+        }
+        lines = [
+            f"queue保存: {int(delivery.get('queued_bundles') or 0)} / "
+            f"直接PR作成: {int(delivery.get('published_bundles') or 0)}",
+            presentations.get(
+                immediate_status,
+                "⚠️ Draft PR起動状態を確認できませんでした。",
+            ),
+        ]
+        error_type = immediate_pr.get("error_type")
+        if error_type:
+            lines.append(f"失敗種別: `{str(error_type)[:120]}`")
+        pull_request_urls = [
+            str(url)
+            for url in (delivery.get("pull_request_urls") or [])
+            if str(url).startswith("https://github.com/")
+        ]
+        if pull_request_urls:
+            lines.extend(
+                f"[Draft PR {index}]({url})"
+                for index, url in enumerate(pull_request_urls[:5], start=1)
+            )
+        embed.add_field(
+            name="Draft PR作成",
+            value="\n".join(lines)[:1024],
+            inline=False,
+        )
+    embed.set_footer(
+        text=(
+            "自動更新は6時間ごと。整理後は即時ActionsへPR作成を要求し、"
+            "PR URLを確認できた時点で作成済みとして扱います。"
+        )
+    )
     return embed
 
 
@@ -772,6 +847,16 @@ def register(bot):
                                 "processed": int(curation.get("processed") or 0),
                                 "queued": int(curation.get("queued") or 0),
                                 "failed": int(curation.get("failed") or 0),
+                                "immediate_pr_status": str(
+                                    ((curation.get("delivery") or {}).get("immediate_pr") or {}).get(
+                                        "status"
+                                    )
+                                    or "not-reported"
+                                ),
+                                "queued_bundle_count": int(
+                                    (curation.get("delivery") or {}).get("queued_bundles")
+                                    or 0
+                                ),
                             },
                         )
                     except Exception:
