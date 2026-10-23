@@ -11,10 +11,12 @@ import os
 import re
 import time
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -1189,6 +1191,44 @@ class MessageBuffer:
     auto_promote: bool = False
 
 
+@dataclass(frozen=True)
+class ChannelKnowledgeSnapshot:
+    """Primitive channel data safe to use outside Discord's event loop."""
+
+    guild_id: int
+    channel_id: int
+    channel_name: str
+    parent_id: int | None
+    parent_name: str
+    category_id: int | None
+    category_name: str
+    topic: str
+    automatic_promotion_allowed: bool
+
+
+@dataclass(frozen=True)
+class RemoteInventoryDocument:
+    """Immutable subset of one remote File Search document."""
+
+    position: int
+    name: str
+    display_name: str
+    metadata: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class RemoteInventoryIndex:
+    """One-pass lookup index shared by every channel/year in a backfill."""
+
+    documents_by_channel: Mapping[
+        tuple[int, int], tuple[RemoteInventoryDocument, ...]
+    ]
+    legacy_documents_by_name: Mapping[
+        str, tuple[RemoteInventoryDocument, ...]
+    ]
+    channel_names_by_id: Mapping[tuple[int, int], frozenset[str]]
+
+
 @dataclass
 class BackfillSession:
     """One immutable Discord-history snapshot boundary for a guild.
@@ -1208,6 +1248,7 @@ class BackfillSession:
     deferred_buffers: dict[tuple[int, int], MessageBuffer] = field(default_factory=dict)
     completed_channel_ids: set[int] = field(default_factory=set)
     remote_inventory: tuple[dict[str, object], ...] | None = None
+    remote_inventory_index: RemoteInventoryIndex | None = None
     pipeline_lock: object | None = field(default=None, repr=False, compare=False)
     prepared: bool = False
     finished: bool = False
@@ -3993,14 +4034,10 @@ class CorpusManager:
                 groups.pop()
         return groups
 
-    @classmethod
-    def _build_knowledge_documents(
-        cls,
-        channel,
-        messages: list[KnowledgeMessage],
-        *,
-        allow_automatic_promotion: bool = True,
-    ) -> list[KnowledgeDocument]:
+    @staticmethod
+    def _channel_knowledge_snapshot(channel) -> ChannelKnowledgeSnapshot:
+        """Read Discord state once before CPU work moves to a worker thread."""
+
         guild_id = int(channel.guild.id)
         channel_id = int(channel.id)
         channel_name = str(channel.name)
@@ -4014,12 +4051,43 @@ class CorpusManager:
             or getattr(parent, "category_id", None)
         )
         category_name = str(getattr(category, "name", "") or "")
-        auto_promote = allow_automatic_promotion and automatic_knowledge_promotion_allowed(
-            channel,
-            parent=parent,
-            category=category,
+        return ChannelKnowledgeSnapshot(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            parent_id=int(parent_id) if parent_id is not None else None,
+            parent_name=parent_name,
+            category_id=int(category_id) if category_id is not None else None,
+            category_name=category_name,
+            topic=(getattr(channel, "topic", None) or "").strip(),
+            automatic_promotion_allowed=automatic_knowledge_promotion_allowed(
+                channel,
+                parent=parent,
+                category=category,
+            ),
         )
-        topic = (getattr(channel, "topic", None) or "").strip()
+
+    @classmethod
+    def _build_knowledge_documents_from_snapshot(
+        cls,
+        channel: ChannelKnowledgeSnapshot,
+        messages: list[KnowledgeMessage],
+        *,
+        allow_automatic_promotion: bool = True,
+    ) -> list[KnowledgeDocument]:
+        """Build deterministic documents using only immutable primitive data."""
+
+        guild_id = channel.guild_id
+        channel_id = channel.channel_id
+        channel_name = channel.channel_name
+        parent_id = channel.parent_id
+        parent_name = channel.parent_name
+        category_id = channel.category_id
+        category_name = channel.category_name
+        topic = channel.topic
+        auto_promote = (
+            allow_automatic_promotion and channel.automatic_promotion_allowed
+        )
         documents = []
         for group in cls._split_knowledge_messages(messages):
             start_at = group[0].timestamp.astimezone(JST)
@@ -4097,6 +4165,27 @@ class CorpusManager:
             )
         return documents
 
+    @classmethod
+    def _build_knowledge_documents(
+        cls,
+        channel,
+        messages: list[KnowledgeMessage],
+        *,
+        allow_automatic_promotion: bool = True,
+    ) -> list[KnowledgeDocument]:
+        """Compatibility wrapper for synchronous callers and focused tests."""
+
+        snapshot = (
+            channel
+            if isinstance(channel, ChannelKnowledgeSnapshot)
+            else cls._channel_knowledge_snapshot(channel)
+        )
+        return cls._build_knowledge_documents_from_snapshot(
+            snapshot,
+            messages,
+            allow_automatic_promotion=allow_automatic_promotion,
+        )
+
     @staticmethod
     def _metadata_map(document) -> dict[str, object]:
         result = {}
@@ -4139,72 +4228,181 @@ class CorpusManager:
             and str(metadata.get("schema") or "").strip().startswith("discord-")
         )
 
-    async def _existing_channel_documents(
-        self,
-        store_name: str,
-        channel,
+    @staticmethod
+    def _legacy_channel_names(display_name: str) -> tuple[str, ...]:
+        """Return every name prefix accepted by the legacy startswith rule.
+
+        Forum and thread names may themselves contain ``" | "``. Before
+        immutable channel metadata existed, matching used
+        ``display_name.startswith(f"#{channel_name} | ")``; indexing every
+        delimiter prefix preserves that behavior without rescanning the whole
+        inventory for each channel.
+        """
+
+        if not display_name.startswith("#"):
+            return ()
+        value = display_name[1:]
+        names = []
+        offset = 0
+        while True:
+            delimiter = value.find(" | ", offset)
+            if delimiter < 0:
+                break
+            if delimiter > 0:
+                names.append(value[:delimiter])
+            offset = delimiter + 3
+        return tuple(names)
+
+    @classmethod
+    def _index_remote_inventory(
+        cls,
+        documents: tuple[dict[str, object], ...],
+    ) -> RemoteInventoryIndex:
+        """Scan a remote inventory once and create immutable lookup tables."""
+
+        documents_by_channel: dict[
+            tuple[int, int], list[RemoteInventoryDocument]
+        ] = {}
+        legacy_documents_by_name: dict[str, list[RemoteInventoryDocument]] = {}
+        channel_names_by_id: dict[tuple[int, int], set[str]] = {}
+        for position, document in enumerate(documents):
+            raw_metadata = document.get("metadata") or {}
+            if not isinstance(raw_metadata, Mapping):
+                # A truthy malformed metadata value used to abort matching.
+                # Never downgrade it to metadata-less legacy lineage, which
+                # could make an unrelated document eligible for deletion.
+                continue
+            metadata = dict(raw_metadata)
+            display_name = str(document.get("display_name") or "")
+            if not metadata:
+                channel_names = cls._legacy_channel_names(display_name)
+                if not channel_names:
+                    continue
+                snapshot = RemoteInventoryDocument(
+                    position=position,
+                    name=str(document["name"]),
+                    display_name=display_name,
+                    metadata=MappingProxyType(metadata),
+                )
+                for channel_name in channel_names:
+                    legacy_documents_by_name.setdefault(channel_name, []).append(
+                        snapshot
+                    )
+                continue
+
+            raw_guild_id = str(metadata.get("guild_id") or "")
+            raw_channel_id = str(metadata.get("channel_id") or "")
+            try:
+                guild_id = int(raw_guild_id)
+                channel_id = int(raw_channel_id)
+            except ValueError:
+                continue
+            if raw_guild_id != str(guild_id) or raw_channel_id != str(channel_id):
+                # Preserve the old exact string comparison. Values such as
+                # "001" or "02" are not proof of Discord document ownership.
+                continue
+            if not cls._is_discord_conversation_metadata(
+                metadata,
+                guild_id=guild_id,
+                channel_id=channel_id,
+            ):
+                continue
+            key = (guild_id, channel_id)
+            channel_name = str(metadata.get("channel_name") or "").strip()
+            if not channel_name:
+                match = re.match(
+                    r"^#(.+?) \| \d{4}-\d{2}-\d{2} \d{2}:\d{2}",
+                    display_name,
+                )
+                if match:
+                    channel_name = match.group(1)
+            if channel_name:
+                channel_names_by_id.setdefault(key, set()).add(channel_name)
+            snapshot = RemoteInventoryDocument(
+                position=position,
+                name=str(document["name"]),
+                display_name=display_name,
+                metadata=MappingProxyType(metadata),
+            )
+            documents_by_channel.setdefault(key, []).append(snapshot)
+
+        return RemoteInventoryIndex(
+            documents_by_channel=MappingProxyType(
+                {key: tuple(value) for key, value in documents_by_channel.items()}
+            ),
+            legacy_documents_by_name=MappingProxyType(
+                {key: tuple(value) for key, value in legacy_documents_by_name.items()}
+            ),
+            channel_names_by_id=MappingProxyType(
+                {
+                    key: frozenset(value)
+                    for key, value in channel_names_by_id.items()
+                }
+            ),
+        )
+
+    @staticmethod
+    def _metadata_timestamp(
+        metadata: Mapping[str, object],
+        epoch_key: str,
+        iso_key: str,
+    ) -> float | None:
+        epoch_value = metadata.get(epoch_key)
+        if epoch_value is not None:
+            try:
+                return float(epoch_value)
+            except (TypeError, ValueError):
+                pass
+        iso_value = metadata.get(iso_key)
+        if iso_value:
+            try:
+                parsed = datetime.fromisoformat(
+                    str(iso_value).replace("Z", "+00:00")
+                )
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=JST)
+            return parsed.timestamp()
+        return None
+
+    @classmethod
+    def _filter_existing_channel_documents(
+        cls,
+        inventory: RemoteInventoryIndex,
+        channel: ChannelKnowledgeSnapshot,
         after=None,
         before=None,
         *,
-        remote_inventory: tuple[dict[str, object], ...] | None = None,
         allow_legacy_name_match: bool = True,
     ) -> list[str]:
-        """置換対象を事前取得する。metadataなしの旧形式も表示名で対象化する。
+        """Pure CPU range filtering over one channel's indexed candidates."""
 
-        A prepared multi-channel backfill owns one immutable remote inventory.
-        Reusing it keeps File Search pagination O(pages) for the whole cycle,
-        rather than O(channels * pages). A standalone channel backfill retains
-        the previous behavior and reads one fresh inventory for itself.
-        """
-        documents = remote_inventory
-        if documents is None:
-            documents = tuple(await self.list_remote_documents(store_name))
-        prefix = f"#{channel.name} | "
+        candidates = list(
+            inventory.documents_by_channel.get(
+                (channel.guild_id, channel.channel_id),
+                (),
+            )
+        )
+        if allow_legacy_name_match:
+            candidates.extend(
+                inventory.legacy_documents_by_name.get(channel.channel_name, ())
+            )
+        candidates.sort(key=lambda document: document.position)
         after_timestamp = after.timestamp() if after else None
         before_timestamp = before.timestamp() if before else None
         matches = []
-        for document in documents:
-            metadata = document.get("metadata") or {}
-            display_name = str(document.get("display_name") or "")
-            channel_matches = self._is_discord_conversation_metadata(
-                metadata,
-                guild_id=int(channel.guild.id),
-                channel_id=int(channel.id),
+        for document in candidates:
+            metadata = document.metadata
+            document_start = cls._metadata_timestamp(
+                metadata, "start_epoch", "start_at"
             )
-            legacy_matches = (
-                allow_legacy_name_match
-                and not metadata
-                and display_name.startswith(prefix)
-            )
-            if not (channel_matches or legacy_matches):
-                continue
-            def metadata_timestamp(epoch_key: str, iso_key: str) -> float | None:
-                epoch_value = metadata.get(epoch_key)
-                if epoch_value is not None:
-                    try:
-                        return float(epoch_value)
-                    except (TypeError, ValueError):
-                        pass
-                iso_value = metadata.get(iso_key)
-                if iso_value:
-                    try:
-                        parsed = datetime.fromisoformat(
-                            str(iso_value).replace("Z", "+00:00")
-                        )
-                    except ValueError:
-                        return None
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=JST)
-                    return parsed.timestamp()
-                return None
-
-            document_start = metadata_timestamp("start_epoch", "start_at")
-            document_end = metadata_timestamp("end_epoch", "end_at")
+            document_end = cls._metadata_timestamp(metadata, "end_epoch", "end_at")
             if document_start is None or document_end is None:
                 match = re.search(
                     r"\|\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*-\s*"
                     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})",
-                    display_name,
+                    document.display_name,
                 )
                 if match:
                     try:
@@ -4255,13 +4453,49 @@ class CorpusManager:
                 # ``before`` is exclusive as well. Equality and unknown ends
                 # are retained for the same lossless-replacement guarantee.
                 continue
-            matches.append(str(document["name"]))
+            matches.append(document.name)
         return matches
+
+    async def _existing_channel_documents(
+        self,
+        store_name: str,
+        channel,
+        after=None,
+        before=None,
+        *,
+        remote_inventory: tuple[dict[str, object], ...] | None = None,
+        remote_inventory_index: RemoteInventoryIndex | None = None,
+        allow_legacy_name_match: bool = True,
+    ) -> list[str]:
+        """Find replaceable documents without doing CPU scans on the bot loop."""
+
+        channel_snapshot = (
+            channel
+            if isinstance(channel, ChannelKnowledgeSnapshot)
+            else self._channel_knowledge_snapshot(channel)
+        )
+        inventory = remote_inventory_index
+        if inventory is None:
+            documents = remote_inventory
+            if documents is None:
+                documents = tuple(await self.list_remote_documents(store_name))
+            inventory = await asyncio.to_thread(
+                self._index_remote_inventory,
+                documents,
+            )
+        return await asyncio.to_thread(
+            self._filter_existing_channel_documents,
+            inventory,
+            channel_snapshot,
+            after,
+            before,
+            allow_legacy_name_match=allow_legacy_name_match,
+        )
 
     @staticmethod
     def _session_legacy_name_match_allowed(
         session: BackfillSession,
-        channel,
+        channel: ChannelKnowledgeSnapshot,
     ) -> bool:
         """Only migrate a legacy name when it has one provable target owner.
 
@@ -4274,46 +4508,25 @@ class CorpusManager:
         """
         if len(session.target_channel_ids) <= 1:
             return True
-        if session.remote_inventory is None:
+        inventory = session.remote_inventory_index
+        if inventory is None:
             return False
 
-        names_by_channel_id: dict[int, set[str]] = {
-            channel_id: set() for channel_id in session.target_channel_ids
+        names_by_channel_id = {
+            channel_id: inventory.channel_names_by_id.get(
+                (session.guild_id, channel_id),
+                frozenset(),
+            )
+            for channel_id in session.target_channel_ids
         }
-        for document in session.remote_inventory:
-            metadata = document.get("metadata") or {}
-            if not CorpusManager._is_discord_conversation_metadata(
-                metadata,
-                guild_id=session.guild_id,
-            ):
-                continue
-            try:
-                channel_id = int(metadata.get("channel_id") or 0)
-            except (TypeError, ValueError):
-                continue
-            if channel_id not in names_by_channel_id:
-                continue
-            channel_name = str(metadata.get("channel_name") or "").strip()
-            if not channel_name:
-                display_name = str(document.get("display_name") or "")
-                match = re.match(
-                    r"^#(.+?) \| \d{4}-\d{2}-\d{2} \d{2}:\d{2}",
-                    display_name,
-                )
-                if match:
-                    channel_name = match.group(1)
-            if channel_name:
-                names_by_channel_id[channel_id].add(channel_name)
-
         if any(not names for names in names_by_channel_id.values()):
             return False
-        current_name = str(getattr(channel, "name", "") or "")
         owners = {
             channel_id
             for channel_id, names in names_by_channel_id.items()
-            if current_name in names
+            if channel.channel_name in names
         }
-        return owners == {int(channel.id)}
+        return owners == {channel.channel_id}
 
     async def backfill_channel(
         self,
@@ -4350,25 +4563,33 @@ class CorpusManager:
                     raise ValueError("Backfill before boundary must be timezone-aware")
                 if before > session.cutoff:
                     raise ValueError("Backfill before boundary exceeds session cutoff")
+        replacement_snapshot = self._channel_knowledge_snapshot(channel)
         result = BackfillResult()
         existing = []
         if replace_existing:
             remote_inventory = None
+            remote_inventory_index = None
             allow_legacy_name_match = True
             if session is not None:
-                if session.remote_inventory is None:
+                if (
+                    session.remote_inventory is None
+                    or session.remote_inventory_index is None
+                ):
                     raise RuntimeError("Prepared backfill remote inventory is unavailable")
                 remote_inventory = session.remote_inventory
-                allow_legacy_name_match = self._session_legacy_name_match_allowed(
+                remote_inventory_index = session.remote_inventory_index
+                allow_legacy_name_match = await asyncio.to_thread(
+                    self._session_legacy_name_match_allowed,
                     session,
-                    channel,
+                    replacement_snapshot,
                 )
             existing = await self._existing_channel_documents(
                 corpus_store_name,
-                channel,
+                replacement_snapshot,
                 after,
                 before,
                 remote_inventory=remote_inventory,
+                remote_inventory_index=remote_inventory_index,
                 allow_legacy_name_match=allow_legacy_name_match,
             )
 
@@ -4388,6 +4609,11 @@ class CorpusManager:
             result.messages_indexed += 1
             result.latest_message_id = knowledge_message.message_id
             result.latest_message_at = knowledge_message.timestamp
+            # Real Discord history fetches normally yield between pages, but
+            # cached iterators and test doubles may not. Keep long local
+            # normalization runs cooperative with gateway and health tasks.
+            if result.messages_seen % 250 == 0:
+                await asyncio.sleep(0)
             if progress_callback and result.messages_seen % 500 == 0:
                 try:
                     await progress_callback(result.messages_seen)
@@ -4402,8 +4628,13 @@ class CorpusManager:
         # ineligible by default. The administrator-only full-history command
         # may explicitly re-evaluate the current audience, while the shared
         # policy still rejects role-private and protected channels.
-        documents = self._build_knowledge_documents(
-            channel,
+        # Re-snapshot after a potentially long history fetch so an ACL that
+        # became more restrictive during the run fails closed, matching the
+        # pre-offload behavior that evaluated permissions at build time.
+        document_snapshot = self._channel_knowledge_snapshot(channel)
+        documents = await asyncio.to_thread(
+            self._build_knowledge_documents_from_snapshot,
+            document_snapshot,
             messages,
             allow_automatic_promotion=authorize_history_promotion,
         )
@@ -4518,6 +4749,10 @@ class CorpusManager:
                 # but deliberately leave live buffers untouched.
                 session.remote_inventory = tuple(
                     await self.list_remote_documents(corpus_store_name)
+                )
+                session.remote_inventory_index = await asyncio.to_thread(
+                    self._index_remote_inventory,
+                    session.remote_inventory,
                 )
                 session.prepared = True
         except BaseException:
