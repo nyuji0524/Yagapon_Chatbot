@@ -48,7 +48,11 @@ class ApiError(RuntimeError):
 
 
 @pytest.fixture
-def corpus_manager():
+def corpus_manager(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "YAGAPON_RAG_DB_PATH",
+        str(tmp_path / "fixture-rag.sqlite3"),
+    )
     with patch("bot.corpus.genai.Client"):
         yield CorpusManager()
 
@@ -575,6 +579,29 @@ async def test_backfill_replaces_old_documents_only_after_all_uploads(corpus_man
     assert result.messages_indexed == 2
     assert result.documents_uploaded == 1
     corpus_manager._delete_documents.assert_awaited_once_with(["documents/old"])
+
+
+@pytest.mark.asyncio
+async def test_backfill_preserves_idempotently_reused_existing_document(
+    corpus_manager,
+):
+    channel = FakeChannel([fake_message(1), fake_message(2, 1)])
+    corpus_manager._existing_channel_documents = AsyncMock(
+        return_value=["documents/reused"]
+    )
+    corpus_manager._upload_document = AsyncMock(
+        return_value="documents/reused"
+    )
+    corpus_manager._delete_documents = AsyncMock()
+
+    result = await corpus_manager.backfill_channel(
+        channel,
+        "fileSearchStores/test",
+    )
+
+    assert result.documents_uploaded == 1
+    assert result.documents_replaced == 0
+    corpus_manager._delete_documents.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4640,7 +4667,12 @@ def test_restore_buffer_fails_closed_for_automatic_promotion(corpus_manager):
 
 @pytest.mark.asyncio
 async def test_upload_waits_for_indexing_completion(corpus_manager):
-    pending = SimpleNamespace(done=False, error=None, response=None)
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/pending",
+        done=False,
+        error=None,
+        response=None,
+    )
     complete = SimpleNamespace(
         done=True,
         error=None,
@@ -4705,10 +4737,146 @@ async def test_upload_does_not_blindly_retry_ambiguous_file_search_503(corpus_ma
     assert raised.value is failure
     assert upload.call_count == 1
 
+    corpus_manager._client.file_search_stores.documents.list.return_value = []
+    with pytest.raises(TimeoutError, match="refusing to resend"):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "本文",
+            [{"key": "source", "string_value": "discord"}],
+        )
+
+    assert upload.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_reconciles_ambiguous_start_from_remote_identity(corpus_manager):
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.side_effect = ApiError(503)
+    metadata = [
+        {"key": "document_key", "string_value": "ambiguous-start"},
+        {"key": "content_sha256", "string_value": "content-v1"},
+    ]
+
+    with pytest.raises(ApiError):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "本文",
+            metadata,
+        )
+
+    corpus_manager._client.file_search_stores.documents.list.return_value = [
+        SimpleNamespace(
+            name="documents/accepted-despite-503",
+            display_name="document",
+            state=corpus_module.types.DocumentState.STATE_ACTIVE,
+            custom_metadata=metadata,
+        )
+    ]
+    result = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        metadata,
+    )
+
+    assert result == "documents/accepted-despite-503"
+    assert upload.call_count == 1
+    assert corpus_manager.rag_store.get_upload_operation("ambiguous-start") is None
+
+
+@pytest.mark.asyncio
+async def test_upload_does_not_reconcile_same_content_with_different_acl(
+    corpus_manager,
+):
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.side_effect = ApiError(503)
+    public_metadata = [
+        {"key": "document_key", "string_value": "acl-transition"},
+        {"key": "content_sha256", "string_value": "same-content"},
+        {"key": "access_scope", "string_value": "public"},
+    ]
+
+    with pytest.raises(ApiError):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "same body",
+            public_metadata,
+        )
+
+    corpus_manager._client.file_search_stores.documents.list.return_value = [
+        SimpleNamespace(
+            name="documents/restricted",
+            display_name="document",
+            state=corpus_module.types.DocumentState.STATE_ACTIVE,
+            custom_metadata=[
+                {"key": "document_key", "string_value": "acl-transition"},
+                {"key": "content_sha256", "string_value": "same-content"},
+                {"key": "access_scope", "string_value": "restricted"},
+            ],
+        )
+    ]
+
+    with pytest.raises(TimeoutError, match="refusing to resend"):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "same body",
+            public_metadata,
+        )
+
+    assert upload.call_count == 1
+    assert corpus_manager.rag_store.get_upload_operation("acl-transition") is not None
+
+
+@pytest.mark.asyncio
+async def test_upload_does_not_finalize_pending_remote_document(corpus_manager):
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.side_effect = ApiError(503)
+    metadata = [
+        {"key": "document_key", "string_value": "still-indexing"},
+        {"key": "content_sha256", "string_value": "same-content"},
+        {"key": "access_scope", "string_value": "restricted"},
+    ]
+
+    with pytest.raises(ApiError):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "same body",
+            metadata,
+        )
+
+    corpus_manager._client.file_search_stores.documents.list.return_value = [
+        SimpleNamespace(
+            name="documents/still-indexing",
+            display_name="document",
+            state=corpus_module.types.DocumentState.STATE_PENDING,
+            custom_metadata=metadata,
+        )
+    ]
+    with pytest.raises(TimeoutError, match="refusing to resend"):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "same body",
+            metadata,
+        )
+
+    assert upload.call_count == 1
+    assert corpus_manager.rag_store.get_document("still-indexing") is None
+
 
 @pytest.mark.asyncio
 async def test_upload_poll_retries_transient_file_search_503(corpus_manager):
-    pending = SimpleNamespace(done=False, error=None, response=None)
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/retry",
+        done=False,
+        error=None,
+        response=None,
+    )
     complete = SimpleNamespace(
         done=True,
         error=None,
@@ -4731,7 +4899,12 @@ async def test_upload_poll_retries_transient_file_search_503(corpus_manager):
 
 @pytest.mark.asyncio
 async def test_upload_poll_timeout_uses_wall_clock_deadline(corpus_manager, monkeypatch):
-    pending = SimpleNamespace(done=False, error=None, response=None)
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/deadline",
+        done=False,
+        error=None,
+        response=None,
+    )
     corpus_manager._client.file_search_stores.upload_to_file_search_store.return_value = pending
     corpus_manager._client.operations.get.return_value = pending
     now = [100.0]
@@ -4739,7 +4912,7 @@ async def test_upload_poll_timeout_uses_wall_clock_deadline(corpus_manager, monk
     async def advance_clock(delay):
         now[0] += delay
 
-    monkeypatch.setattr("bot.corpus.UPLOAD_TIMEOUT_SECONDS", 3)
+    corpus_manager._file_search_index_timeout_seconds = 3
     monkeypatch.setattr("bot.corpus.UPLOAD_POLL_SECONDS", 2)
     monkeypatch.setattr("bot.corpus.time.monotonic", lambda: now[0])
     monkeypatch.setattr("bot.corpus.asyncio.sleep", advance_clock)
@@ -4755,6 +4928,104 @@ async def test_upload_poll_timeout_uses_wall_clock_deadline(corpus_manager, monk
     # The deadline expires during the second bounded sleep, before another
     # network poll can extend the worker indefinitely.
     assert corpus_manager._client.operations.get.call_count == 1
+
+
+def test_file_search_index_timeout_environment_is_safely_bounded(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS", "900")
+    assert corpus_module.file_search_index_timeout_seconds() == 900
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS", "60")
+    assert corpus_module.file_search_index_timeout_seconds() == 300
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS", "99999")
+    assert corpus_module.file_search_index_timeout_seconds() == 7200
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS", "invalid")
+    assert corpus_module.file_search_index_timeout_seconds() == 1800
+
+
+def test_file_search_upload_start_timeout_environment_is_safely_bounded(
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS", "120")
+    assert corpus_module.file_search_upload_start_timeout_seconds() == 120
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS", "10")
+    assert corpus_module.file_search_upload_start_timeout_seconds() == 30
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS", "99999")
+    assert corpus_module.file_search_upload_start_timeout_seconds() == 900
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS", "invalid")
+    assert corpus_module.file_search_upload_start_timeout_seconds() == 180
+
+
+@pytest.mark.asyncio
+async def test_upload_poll_wait_for_timeout_has_actionable_message(
+    corpus_manager, monkeypatch
+):
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/wait-for",
+        done=False,
+        error=None,
+        response=None,
+    )
+    corpus_manager._client.file_search_stores.upload_to_file_search_store.return_value = pending
+    corpus_manager._client.operations.get.return_value = pending
+
+    corpus_manager._file_search_index_timeout_seconds = 300
+    monkeypatch.setattr("bot.corpus.UPLOAD_POLL_SECONDS", 0)
+    now = [100.0]
+    monkeypatch.setattr("bot.corpus.time.monotonic", lambda: now[0])
+
+    async def timeout(_awaitable, *, timeout):
+        _awaitable.close()
+        now[0] += timeout
+        raise TimeoutError
+
+    monkeypatch.setattr("bot.corpus.asyncio.wait_for", timeout)
+
+    with pytest.raises(TimeoutError, match="Indexing timed out after 300s"):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "本文",
+            [{"key": "source", "string_value": "discord"}],
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_poll_preserves_early_transport_timeout(corpus_manager, monkeypatch):
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/transport",
+        done=False,
+        error=None,
+        response=None,
+    )
+    corpus_manager._client.file_search_stores.upload_to_file_search_store.return_value = pending
+    corpus_manager._client.operations.get.return_value = pending
+
+    corpus_manager._file_search_index_timeout_seconds = 300
+    monkeypatch.setattr("bot.corpus.UPLOAD_POLL_SECONDS", 0)
+
+    transport_timeout = TimeoutError("transport timed out")
+
+    async def timeout(_awaitable, *, timeout):
+        del timeout
+        _awaitable.close()
+        raise transport_timeout
+
+    monkeypatch.setattr("bot.corpus.asyncio.wait_for", timeout)
+
+    with pytest.raises(TimeoutError) as raised:
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "document",
+            "本文",
+            [{"key": "source", "string_value": "discord"}],
+        )
+
+    assert raised.value is transport_timeout
 
 
 @pytest.mark.asyncio
@@ -4783,6 +5054,10 @@ async def test_upload_caps_remote_metadata_without_truncating_local_mirror(corpu
     config = corpus_manager._client.file_search_stores.upload_to_file_search_store.call_args.kwargs[
         "config"
     ]
+    assert config["http_options"] == {
+        "timeout": 180_000,
+        "retry_options": {"attempts": 1},
+    }
     remote_metadata = config["custom_metadata"]
     remote_keys = {item["key"] for item in remote_metadata}
     assert len(metadata) > corpus_module.FILE_SEARCH_CUSTOM_METADATA_LIMIT
@@ -4809,11 +5084,148 @@ async def test_upload_caps_remote_metadata_without_truncating_local_mirror(corpu
         channel_id=2,
     )
     corpus_manager.rag_store.upsert_document.assert_called_once()
-    assert corpus_manager.rag_store.upsert_document.call_args.args[2] is metadata
+    assert corpus_manager.rag_store.upsert_document.call_args.args[2] == metadata
 
 
 @pytest.mark.asyncio
-async def test_upload_rolls_back_remote_when_local_mirror_write_fails(corpus_manager):
+async def test_completed_upload_is_idempotent_on_whole_channel_rerun(corpus_manager):
+    metadata = [
+        {"key": "document_key", "string_value": "rerun-document"},
+        {"key": "content_sha256", "string_value": "content-v1"},
+    ]
+    complete = SimpleNamespace(
+        name="fileSearchStores/test/operations/rerun",
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/rerun"),
+    )
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.return_value = complete
+
+    first = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        metadata,
+    )
+    corpus_manager._client.file_search_stores.documents.get.return_value = SimpleNamespace(
+        name="documents/rerun",
+        display_name="document",
+        state=corpus_module.types.DocumentState.STATE_ACTIVE,
+        custom_metadata=metadata,
+    )
+    second = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        metadata,
+    )
+
+    assert first == second == "documents/rerun"
+    assert upload.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_mirror_exact_remote_payload_backfills_digest_without_upload(
+    corpus_manager,
+):
+    metadata = [
+        {"key": "document_key", "string_value": "legacy-document"},
+        {"key": "content_sha256", "string_value": "legacy-content"},
+        {"key": "access_scope", "string_value": "restricted"},
+        {"key": "authority", "string_value": "reviewed_record"},
+    ]
+    corpus_manager.rag_store.upsert_document(
+        "documents/legacy",
+        "legacy body",
+        metadata,
+    )
+    corpus_manager._client.file_search_stores.documents.get.return_value = (
+        SimpleNamespace(
+            name="documents/legacy",
+            display_name="legacy display",
+            state=corpus_module.types.DocumentState.STATE_ACTIVE,
+            custom_metadata=metadata,
+        )
+    )
+
+    result = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "legacy display",
+        "legacy body",
+        metadata,
+        superseded_remote_names=("documents/old",),
+    )
+
+    assert result == "documents/legacy"
+    corpus_manager._client.file_search_stores.upload_to_file_search_store.assert_not_called()
+    expected_digest = corpus_manager.rag_store.upload_payload_sha256(
+        "fileSearchStores/test",
+        "legacy display",
+        "legacy body",
+        metadata,
+    )
+    stored = corpus_manager.rag_store.get_document("legacy-document")
+    assert stored["upload_payload_sha256"] == expected_digest
+    assert corpus_manager.rag_store.pending_document_deletions(
+        "legacy-document"
+    ) == ["documents/old"]
+
+
+@pytest.mark.asyncio
+async def test_completed_upload_is_not_reused_when_remote_acl_changed(
+    corpus_manager,
+):
+    metadata = [
+        {"key": "document_key", "string_value": "changed-acl"},
+        {"key": "content_sha256", "string_value": "same-content"},
+        {"key": "access_scope", "string_value": "public"},
+    ]
+    first = SimpleNamespace(
+        name="operations/public",
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/public"),
+    )
+    replacement = SimpleNamespace(
+        name="operations/replacement",
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/replacement"),
+    )
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.side_effect = [first, replacement]
+
+    assert await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "same body",
+        metadata,
+    ) == "documents/public"
+    corpus_manager._client.file_search_stores.documents.get.return_value = (
+        SimpleNamespace(
+            name="documents/public",
+            display_name="document",
+            state=corpus_module.types.DocumentState.STATE_ACTIVE,
+            custom_metadata=[
+                {"key": "document_key", "string_value": "changed-acl"},
+                {"key": "content_sha256", "string_value": "same-content"},
+                {"key": "access_scope", "string_value": "restricted"},
+            ],
+        )
+    )
+
+    assert await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "same body",
+        metadata,
+    ) == "documents/replacement"
+    assert upload.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_keeps_durable_result_when_local_mirror_write_fails(corpus_manager):
     complete = SimpleNamespace(
         done=True,
         error=None,
@@ -4830,34 +5242,233 @@ async def test_upload_rolls_back_remote_when_local_mirror_write_fails(corpus_man
     )
 
     assert result is None
-    corpus_manager._client.file_search_stores.documents.delete.assert_called_once_with(
-        name="documents/remote-only",
-        config={"force": True},
-    )
+    corpus_manager._client.file_search_stores.documents.delete.assert_not_called()
+    pending = corpus_manager.rag_store.get_upload_operation("document-key")
+    assert pending is not None
+    assert pending["state"] == "completed"
+    assert pending["remote_name"] == "documents/remote-only"
 
 
 @pytest.mark.asyncio
-async def test_upload_rollback_retries_transient_file_search_503(corpus_manager):
+async def test_upload_rerun_commits_durable_result_without_resending(corpus_manager):
     complete = SimpleNamespace(
         done=True,
         error=None,
         response=SimpleNamespace(document_name="documents/remote-only"),
     )
     corpus_manager._client.file_search_stores.upload_to_file_search_store.return_value = complete
-    corpus_manager.rag_store.upsert_document = Mock(side_effect=sqlite3.OperationalError("locked"))
-    delete = corpus_manager._client.file_search_stores.documents.delete
-    delete.side_effect = [ApiError(503), None]
+    real_upsert = corpus_manager.rag_store.upsert_document
+    corpus_manager.rag_store.upsert_document = Mock(
+        side_effect=sqlite3.OperationalError("locked")
+    )
+    metadata = [{"key": "document_key", "string_value": "document-key"}]
 
-    with patch("bot.ai_retry.asyncio.sleep", new=AsyncMock()):
+    first = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        metadata,
+    )
+    corpus_manager.rag_store.upsert_document = real_upsert
+    second = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        metadata,
+    )
+
+    assert first is None
+    assert second == "documents/remote-only"
+    assert (
+        corpus_manager._client.file_search_stores.upload_to_file_search_store.call_count
+        == 1
+    )
+    assert corpus_manager.rag_store.get_upload_operation("document-key") is None
+    assert corpus_manager.rag_store.get_document("document-key")["remote_name"] == (
+        "documents/remote-only"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_poll_timeout_resumes_after_restart_and_deletes_superseded(
+    corpus_manager,
+):
+    from bot.meeting_index import _finish_pending_deletions
+
+    metadata = [
+        {"key": "document_key", "string_value": "restart-document"},
+        {"key": "content_sha256", "string_value": "version-2"},
+        {"key": "guild_id", "string_value": "1"},
+    ]
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/restart",
+        done=False,
+        error=None,
+        response=None,
+    )
+    complete = SimpleNamespace(
+        name=pending.name,
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/restarted"),
+    )
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.return_value = pending
+    corpus_manager._file_search_index_timeout_seconds = 0
+
+    with pytest.raises(TimeoutError, match="Indexing timed out"):
+        await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "restartable",
+            "本文 version 2",
+            metadata,
+            superseded_remote_names=("documents/old",),
+        )
+
+    durable = corpus_manager.rag_store.get_upload_operation("restart-document")
+    assert durable is not None
+    assert durable["state"] == "accepted"
+
+    restarted = CorpusManager()
+    restarted._client = corpus_manager._client
+    restarted._client.operations.get.return_value = complete
+    with patch("bot.corpus.asyncio.sleep", new=AsyncMock()):
+        result = await restarted._upload_document(
+            "fileSearchStores/test",
+            "restartable",
+            "本文 version 2",
+            metadata,
+            superseded_remote_names=("documents/old",),
+        )
+
+    assert result == "documents/restarted"
+    assert upload.call_count == 1
+    resumed_operation = restarted._client.operations.get.call_args.args[0]
+    assert isinstance(resumed_operation, corpus_module.types.UploadToFileSearchStoreOperation)
+    assert resumed_operation.name == pending.name
+    assert restarted.rag_store.get_upload_operation("restart-document") is None
+    assert restarted.rag_store.get_document("restart-document")["remote_name"] == (
+        "documents/restarted"
+    )
+    assert restarted.rag_store.pending_document_deletions("restart-document") == [
+        "documents/old"
+    ]
+
+    await _finish_pending_deletions(restarted, "restart-document")
+
+    restarted._client.file_search_stores.documents.delete.assert_called_once_with(
+        name="documents/old",
+        config={"force": True},
+    )
+    assert restarted.rag_store.pending_document_deletions("restart-document") == []
+
+
+@pytest.mark.asyncio
+async def test_expired_operation_reconciles_only_active_exact_payload(
+    corpus_manager,
+):
+    metadata = [
+        {"key": "document_key", "string_value": "expired-operation"},
+        {"key": "content_sha256", "string_value": "content-v1"},
+        {"key": "access_scope", "string_value": "restricted"},
+    ]
+    pending, claimed = corpus_manager.rag_store.claim_upload_operation(
+        document_key="expired-operation",
+        store_name="fileSearchStores/test",
+        display_name="document",
+        text="body",
+        metadata=metadata,
+    )
+    assert claimed is True
+    corpus_manager.rag_store.record_upload_operation(
+        "expired-operation",
+        pending["payload_sha256"],
+        "operations/expired",
+    )
+    corpus_manager._client.operations.get.side_effect = ApiError(404)
+    corpus_manager._client.file_search_stores.documents.list.return_value = [
+        SimpleNamespace(
+            name="documents/recovered",
+            display_name="document",
+            state=corpus_module.types.DocumentState.STATE_ACTIVE,
+            custom_metadata=metadata,
+        )
+    ]
+
+    with patch("bot.corpus.asyncio.sleep", new=AsyncMock()):
         result = await corpus_manager._upload_document(
             "fileSearchStores/test",
             "document",
-            "本文",
-            [{"key": "document_key", "string_value": "document-key"}],
+            "body",
+            metadata,
         )
 
-    assert result is None
-    assert delete.call_count == 2
+    assert result == "documents/recovered"
+    corpus_manager._client.file_search_stores.upload_to_file_search_store.assert_not_called()
+    assert corpus_manager.rag_store.get_upload_operation("expired-operation") is None
+
+
+@pytest.mark.asyncio
+async def test_upload_initiation_timeout_persists_late_operation_without_resending(
+    corpus_manager,
+):
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    pending = SimpleNamespace(
+        name="fileSearchStores/test/operations/late-start",
+        done=False,
+        error=None,
+        response=None,
+    )
+    complete = SimpleNamespace(
+        name=pending.name,
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/late-start"),
+    )
+
+    def delayed_start(**_kwargs):
+        started.set()
+        assert release.wait(timeout=2)
+        return pending
+
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.side_effect = delayed_start
+    corpus_manager._file_search_upload_start_timeout_seconds = 0.01
+    first = asyncio.create_task(
+        corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "late-start",
+            "本文",
+            [{"key": "document_key", "string_value": "late-start"}],
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    with pytest.raises(TimeoutError, match="durable intent"):
+        await first
+
+    release.set()
+    for _ in range(100):
+        durable = corpus_manager.rag_store.get_upload_operation("late-start")
+        if durable and durable.get("operation_name"):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("late upload operation was not persisted")
+
+    corpus_manager._client.operations.get.return_value = complete
+    with patch("bot.corpus.asyncio.sleep", new=AsyncMock()):
+        result = await corpus_manager._upload_document(
+            "fileSearchStores/test",
+            "late-start",
+            "本文",
+            [{"key": "document_key", "string_value": "late-start"}],
+        )
+
+    assert result == "documents/late-start"
+    assert upload.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -4903,6 +5514,7 @@ async def test_list_remote_documents_normalizes_metadata(corpus_manager):
     document = SimpleNamespace(
         name="documents/source",
         display_name="source.py",
+        state=corpus_module.types.DocumentState.STATE_ACTIVE,
         custom_metadata=[
             {"key": "document_key", "string_value": "source-key"},
             {"key": "festival", "numeric_value": 28},
@@ -4915,6 +5527,7 @@ async def test_list_remote_documents_normalizes_metadata(corpus_manager):
             "name": "documents/source",
             "display_name": "source.py",
             "metadata": {"document_key": "source-key", "festival": 28},
+            "state": "STATE_ACTIVE",
         }
     ]
 
@@ -4937,6 +5550,7 @@ async def test_list_remote_documents_retries_transient_503(corpus_manager):
             "name": "documents/source",
             "display_name": "source.py",
             "metadata": {},
+            "state": "",
         }
     ]
     assert list_documents.call_count == 2

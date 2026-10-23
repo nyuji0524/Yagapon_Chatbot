@@ -2989,6 +2989,20 @@ def stale_managed_document_keys(
     }
 
 
+def _uploaded_remote_was_created(
+    remote_name: str,
+    previous: dict | None,
+    old_snapshot: dict | None,
+) -> bool:
+    """Distinguish a new upload from CorpusManager's idempotent reuse path."""
+    known_names = {
+        str(candidate.get("remote_name") or "")
+        for candidate in (previous, old_snapshot)
+        if candidate
+    }
+    return remote_name not in known_names
+
+
 async def preflight_once(args) -> dict:
     """Verify every read dependency without changing File Search or local state."""
     if os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() != "true":
@@ -3351,7 +3365,11 @@ async def sync_once(args) -> dict:
             """Remove this attempt and atomically restore its prior mirror rows."""
             assert corpus is not None
             new_names = list(
-                dict.fromkeys(result[4] for result in successful_uploads if result[4])
+                dict.fromkeys(
+                    result[4]
+                    for result in successful_uploads
+                    if result[4] and result[5]
+                )
             )
             if new_names:
                 try:
@@ -3397,7 +3415,19 @@ async def sync_once(args) -> dict:
                     raise RuntimeError(
                         f"Failed to index {repository.name}:{chunk.path}:{chunk.start_line}"
                     )
-                return chunk, digest, previous, old_snapshot, remote_name
+                created = _uploaded_remote_was_created(
+                    remote_name,
+                    previous,
+                    old_snapshot,
+                )
+                return (
+                    chunk,
+                    digest,
+                    previous,
+                    old_snapshot,
+                    remote_name,
+                    created,
+                )
 
             results = await asyncio.gather(*(upload(item) for item in pending), return_exceptions=True)
             failures = [result for result in results if isinstance(result, BaseException)]
@@ -3412,9 +3442,20 @@ async def sync_once(args) -> dict:
             previous_names = list(dict.fromkeys(
                 result[2]["remote_name"]
                 for result in successful_uploads
-                if result[2] and result[2].get("remote_name")
+                if (
+                    result[2]
+                    and result[2].get("remote_name")
+                    and result[2]["remote_name"] != result[4]
+                )
             ))
-            for chunk, digest, _previous, _old_snapshot, remote_name in successful_uploads:
+            for (
+                chunk,
+                digest,
+                _previous,
+                _old_snapshot,
+                remote_name,
+                _created,
+            ) in successful_uploads:
                 state["documents"][chunk.key] = {
                     "document_key": chunk.key,
                     "sha256": digest,

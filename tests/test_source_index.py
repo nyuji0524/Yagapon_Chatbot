@@ -79,6 +79,27 @@ def test_source_path_allowlist_respects_file_and_directory_boundaries():
     assert not safe_source_path("main.py.backup", ("main.py",), 100)
 
 
+def test_source_upload_provenance_does_not_mark_reused_remote_as_created():
+    previous = {"remote_name": "documents/from-state"}
+    snapshot = {"remote_name": "documents/from-mirror"}
+
+    assert not source_index_module._uploaded_remote_was_created(
+        "documents/from-state",
+        previous,
+        snapshot,
+    )
+    assert not source_index_module._uploaded_remote_was_created(
+        "documents/from-mirror",
+        previous,
+        snapshot,
+    )
+    assert source_index_module._uploaded_remote_was_created(
+        "documents/new",
+        previous,
+        snapshot,
+    )
+
+
 def test_source_secret_scanner_allows_environment_lookup_but_blocks_literal():
     assert not contains_secret('token = os.environ.get("GITHUB_TOKEN", "")')
     assert contains_secret('api_key = "1234567890abcdefghijklmnop"')

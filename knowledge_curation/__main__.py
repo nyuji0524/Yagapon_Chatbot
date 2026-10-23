@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from bot.ai_completion import require_complete_model_output
 from bot.ai_models import generation_config, log_usage, response_model
 from bot.ai_retry import new_genai_client, retry_rate_limit
+from bot.knowledge_dispatch import dispatch_queued_knowledge_bundles
 from bot.knowledge_pipeline import knowledge_pipeline_lock
 from bot.knowledge_policy import knowledge_guild_allowed
 from bot.knowledge_publish import JST, publish_knowledge_bundle, retry_knowledge_delivery
@@ -1563,6 +1564,46 @@ def _bundle_source_versions(
     return binding[1] if binding is not None else None
 
 
+async def _finalize_curation_delivery(
+    result: dict,
+    *,
+    queued_for_intake: int,
+    published_pull_request_urls: list[str],
+) -> dict:
+    """Trigger one intake run after all durable bundles have been queued."""
+    delivery = {
+        "queued_bundles": queued_for_intake,
+        "published_bundles": len(published_pull_request_urls),
+        "pull_request_urls": published_pull_request_urls[:10],
+    }
+    if queued_for_intake <= 0:
+        delivery["immediate_pr"] = {
+            "status": "not-needed",
+            "reason": (
+                "direct-draft-pr-created"
+                if published_pull_request_urls
+                else "no-new-bundle"
+            ),
+            "error_type": None,
+        }
+    else:
+        try:
+            # Coalesce every bundle from this cycle into one Actions run. GCS
+            # is already authoritative, so trigger failure cannot lose output.
+            delivery["immediate_pr"] = await dispatch_queued_knowledge_bundles()
+        except Exception as exc:
+            log.exception(
+                "Knowledge intake workflow dispatch crashed after durable queueing"
+            )
+            delivery["immediate_pr"] = {
+                "status": "failed",
+                "reason": "workflow-dispatch-crashed",
+                "error_type": type(exc).__name__,
+            }
+    result["delivery"] = delivery
+    return result
+
+
 async def curate_once(*, state_path: Path, limit: int) -> dict:
     if os.environ.get("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "false").lower() != "true":
         return {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}
@@ -1644,6 +1685,8 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
         }
 
     ledger = TopicStateStore(state_path)
+    queued_for_intake = 0
+    published_pull_request_urls: list[str] = []
     reconciled = 0
     for open_topic in ledger.open_topics():
         if store.find_approved_topic(open_topic.topic_id, festival=open_topic.festival):
@@ -1689,6 +1732,10 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             if updated.delivery_status in {"queued", "published"}:
                 ledger.mark_bundle_sources(topic.bundle_id or "", "delivered")
                 retry_succeeded += 1
+                if result.status == "queued":
+                    queued_for_intake += 1
+                elif getattr(result, "pull_request_url", None):
+                    published_pull_request_urls.append(result.pull_request_url)
             else:
                 retry_failed += 1
         except Exception as exc:
@@ -1711,7 +1758,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
     max_open_bundles = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_MAX_OPEN_BUNDLES", 5, maximum=100)
     open_bundles = ledger.count_open_bundles()
     if not pending:
-        return {
+        return await _finalize_curation_delivery({
             "enabled": True,
             "checkpoint_ready": True,
             "checkpoint_reason": checkpoint_reason,
@@ -1729,9 +1776,9 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             "open_bundles": open_bundles,
             "max_open_bundles": max_open_bundles,
             **_retry_schedule_result(ledger),
-        }
+        }, queued_for_intake=queued_for_intake, published_pull_request_urls=published_pull_request_urls)
     if open_bundles >= max_open_bundles:
-        return {
+        return await _finalize_curation_delivery({
             "enabled": True,
             "checkpoint_ready": True,
             "checkpoint_reason": checkpoint_reason,
@@ -1752,7 +1799,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             "open_bundles": open_bundles,
             "max_open_bundles": max_open_bundles,
             **_retry_schedule_result(ledger),
-        }
+        }, queued_for_intake=queued_for_intake, published_pull_request_urls=published_pull_request_urls)
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     processed = queued = skipped = failed = backpressured = blocked_access = model_calls = 0
     model_budget = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_MODEL_CALLS_PER_RUN", 6, maximum=50)
@@ -1993,6 +2040,10 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
             if result.status in {"queued", "published"}:
                 ledger.mark_bundle_sources(result.session_id, "delivered")
                 queued += int(result.status == "queued")
+                if result.status == "queued":
+                    queued_for_intake += 1
+                elif getattr(result, "pull_request_url", None):
+                    published_pull_request_urls.append(result.pull_request_url)
             elif result.status == "blocked-sensitive-content":
                 ledger.record_source(
                     key,
@@ -2018,7 +2069,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
         except Exception as exc:
             failed += 1
             log.exception("Knowledge curation failed document_key=%s error=%s", key, type(exc).__name__)
-    return {
+    return await _finalize_curation_delivery({
         "enabled": True,
         "checkpoint_ready": True,
         "checkpoint_reason": checkpoint_reason,
@@ -2039,7 +2090,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
         "open_bundles": ledger.count_open_bundles(),
         "max_open_bundles": max_open_bundles,
         **_retry_schedule_result(ledger),
-    }
+    }, queued_for_intake=queued_for_intake, published_pull_request_urls=published_pull_request_urls)
 
 
 def main() -> None:

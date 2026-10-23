@@ -175,6 +175,8 @@ YAGAPON_TRANSCRIBE_FALLBACK_MODEL=gemini-3.8-flash
 YAGAPON_AUDIO_MODEL=gemini-3.8-flash
 YAGAPON_DAILY_QUERY_LIMIT=400
 YAGAPON_BACKFILL_CONCURRENCY=3
+YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS=180
+YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS=1800
 YAGAPON_RAG_DB_PATH=/data/rag.sqlite3
 YAGAPON_KEY_DB_PATH=/data/key-management.sqlite3
 YAGAPON_KEY_REMINDER_HOURS=8
@@ -203,6 +205,9 @@ YAGAPON_KNOWLEDGE_OUTBOX=/data/knowledge-outbox
 YAGAPON_KNOWLEDGE_REPOSITORY=YagamiFes-IT/YagamiFes-IT-Knowledge
 YAGAPON_KNOWLEDGE_BASE_BRANCH=main
 YAGAPON_KNOWLEDGE_GCS_BUCKET=yagamiatlas-yagapon-knowledge-intake
+YAGAPON_KNOWLEDGE_INTAKE_DISPATCH_ENABLED=true
+YAGAPON_KNOWLEDGE_INTAKE_WORKFLOW=yagapon-intake.yml
+# 本番のApp ID / installation ID / 専用PEM mountはdeploy.envで設定する
 YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true
 YAGAPON_KNOWLEDGE_CURATION_ENABLED=false
 YAGAPON_KNOWLEDGE_CURATION_BATCH=3
@@ -316,7 +321,10 @@ docker compose up --build
 
 VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。本番では
 `YAGAPON_KNOWLEDGE_GCS_BUCKET`へcreate-onlyで候補を送り、Knowledgeリポジトリ自身の
-GitHub Actionsが専用ブランチとDraft PRを作る。BotへGitHub tokenは渡さない。
+GitHub Actionsが専用ブランチとDraft PRを作る。BotにはContents/Pull requests権限を渡さず、
+整理直後の`workflow_dispatch`だけをKnowledge専用`actions:write` GitHub Appの短命tokenで要求する。
+204応答は要求受付であり、PR URLを確認するまではPR作成済み・更新完了とは表示しない。
+source reader用`contents:read` Appとは鍵・installation・mountを共有しない。
 詳細なAI議事録は`YAGAPON_KNOWLEDGE_INCLUDE_MINUTES=true`の場合だけ含める。
 キュー送信に失敗してもoutboxを削除しない。
 
