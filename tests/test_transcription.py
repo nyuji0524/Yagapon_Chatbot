@@ -2,7 +2,7 @@ import asyncio
 import io
 import wave
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -48,8 +48,13 @@ async def test_transcription_uses_dedicated_model_and_deletes_upload(monkeypatch
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     create = AsyncMock(return_value=SimpleNamespace(output_text="spk_1: テスト"))
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
-        aio=SimpleNamespace(interactions=SimpleNamespace(create=create)),
+        aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
+            interactions=SimpleNamespace(create=create),
+        ),
     )
 
     result = await transcribe_audio(
@@ -66,7 +71,7 @@ async def test_transcription_uses_dedicated_model_and_deletes_upload(monkeypatch
         "type": "verbatim",
         "diarization_mode": "speaker",
     }
-    client.files.delete.assert_called_once_with(name="files/test")
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
@@ -79,8 +84,11 @@ async def test_dedicated_transcription_falls_back_on_incomplete_interaction_stat
         )
     )
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=create),
             models=SimpleNamespace(
                 generate_content=AsyncMock(return_value=SimpleNamespace(text="Speaker 1: 復旧結果"))
@@ -97,15 +105,18 @@ async def test_dedicated_transcription_falls_back_on_incomplete_interaction_stat
 
     assert result == "Speaker 1: 復旧結果"
     client.aio.models.generate_content.assert_awaited_once()
-    client.files.delete.assert_called_once_with(name="files/test")
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
 async def test_dedicated_transcription_falls_back_on_empty_stop_for_non_silent_audio():
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(
                 create=AsyncMock(return_value=SimpleNamespace(output_text="", status="completed"))
             ),
@@ -124,7 +135,7 @@ async def test_dedicated_transcription_falls_back_on_empty_stop_for_non_silent_a
 
     assert result == "Speaker 1: 復旧しました"
     client.aio.models.generate_content.assert_awaited_once()
-    client.files.delete.assert_called_once_with(name="files/test")
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
@@ -132,8 +143,11 @@ async def test_dedicated_empty_silent_audio_still_gets_one_fallback_attempt():
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     fallback = AsyncMock(return_value=SimpleNamespace(text=""))
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(
                 create=AsyncMock(return_value=SimpleNamespace(output_text="", status="completed"))
             ),
@@ -156,8 +170,11 @@ async def test_dedicated_empty_silent_audio_still_gets_one_fallback_attempt():
 async def test_transcription_deletes_upload_when_generation_fails():
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=AsyncMock(side_effect=RuntimeError("failed")))
         ),
     )
@@ -170,7 +187,7 @@ async def test_transcription_deletes_upload_when_generation_fails():
             display_name="meeting.wav",
         )
 
-    client.files.delete.assert_called_once_with(name="files/test")
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
@@ -181,8 +198,11 @@ async def test_transcription_falls_back_on_429_without_reuploading(monkeypatch):
         return_value=SimpleNamespace(text="Speaker 1: 復旧しました")
     )
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=create),
             models=SimpleNamespace(generate_content=fallback),
         ),
@@ -200,8 +220,8 @@ async def test_transcription_falls_back_on_429_without_reuploading(monkeypatch):
     fallback.assert_awaited_once()
     assert fallback.await_args.kwargs["model"] == "gemini-3.8-flash"
     assert transcription._dedicated_transcription_rate_limiter.remaining() > 0
-    client.files.upload.assert_called_once()
-    client.files.delete.assert_called_once_with(name="files/test")
+    client.aio.files.upload.assert_awaited_once()
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
@@ -211,8 +231,11 @@ async def test_transcription_skips_dedicated_during_shared_cooldown():
     create = AsyncMock()
     fallback = AsyncMock(return_value=SimpleNamespace(text="フォールバック"))
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=create),
             models=SimpleNamespace(generate_content=fallback),
         ),
@@ -236,8 +259,11 @@ async def test_transcription_can_reserve_dedicated_quota_for_listen_mode():
     create = AsyncMock()
     fallback = AsyncMock(return_value=SimpleNamespace(text="短時間モード"))
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=create),
             models=SimpleNamespace(generate_content=fallback),
         ),
@@ -268,8 +294,11 @@ async def test_fallback_transcription_rejects_max_tokens_and_deletes_upload():
         )
     )
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(return_value=uploaded), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=AsyncMock()),
             models=SimpleNamespace(generate_content=fallback),
         ),
@@ -284,7 +313,7 @@ async def test_fallback_transcription_rejects_max_tokens_and_deletes_upload():
             prefer_dedicated=False,
         )
 
-    client.files.delete.assert_called_once_with(name="files/test")
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
 
 
 @pytest.mark.asyncio
@@ -293,14 +322,14 @@ async def test_transcription_uses_enrolled_voiceprints_for_speaker_names(tmp_pat
     sample.write_bytes(b"RIFF" + b"voice" * 300)
     meeting = SimpleNamespace(name="files/meeting", uri="gs://test/meeting.wav")
     reference = SimpleNamespace(name="files/reference", uri="gs://test/reference.wav")
-    upload = Mock(side_effect=[meeting, reference])
+    upload = AsyncMock(side_effect=[meeting, reference])
     create = AsyncMock()
     fallback = AsyncMock(
         return_value=SimpleNamespace(text="Registered 1： 提案します\nSpeaker 1: 賛成です")
     )
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=upload, delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(upload=upload, delete=AsyncMock()),
             interactions=SimpleNamespace(create=create),
             models=SimpleNamespace(generate_content=fallback),
         ),
@@ -321,7 +350,7 @@ async def test_transcription_uses_enrolled_voiceprints_for_speaker_names(tmp_pat
     assert "登録声紋" in contents[0]
     assert "Registered 1" in contents[1]
     assert upload.call_count == 2
-    assert client.files.delete.call_count == 2
+    assert client.aio.files.delete.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -341,8 +370,11 @@ async def test_successful_voiceprint_upload_is_deleted_when_sibling_upload_fails
         raise ValueError("upload failed")
 
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(side_effect=upload), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(side_effect=upload),
+                delete=AsyncMock(),
+            ),
             interactions=SimpleNamespace(create=AsyncMock()),
             models=SimpleNamespace(generate_content=AsyncMock()),
         ),
@@ -358,7 +390,7 @@ async def test_successful_voiceprint_upload_is_deleted_when_sibling_upload_fails
             voiceprint_paths={"一人目": str(first), "二人目": str(second)},
         )
 
-    deleted = {call.kwargs["name"] for call in client.files.delete.call_args_list}
+    deleted = {call.kwargs["name"] for call in client.aio.files.delete.call_args_list}
     assert deleted == {"files/meeting", "files/reference"}
 
 
@@ -387,8 +419,8 @@ async def test_late_voiceprint_upload_is_deleted_after_sibling_fails(tmp_path, m
 
     monkeypatch.setattr("bot.transcription.retry_rate_limit", retry)
     client = SimpleNamespace(
-        files=SimpleNamespace(upload=Mock(), delete=Mock()),
         aio=SimpleNamespace(
+            files=SimpleNamespace(upload=AsyncMock(), delete=AsyncMock()),
             interactions=SimpleNamespace(create=AsyncMock()),
             models=SimpleNamespace(generate_content=AsyncMock()),
         ),
@@ -404,5 +436,5 @@ async def test_late_voiceprint_upload_is_deleted_after_sibling_fails(tmp_path, m
             voiceprint_paths={"一人目": str(first), "二人目": str(second)},
         )
 
-    deleted = {call.kwargs["name"] for call in client.files.delete.call_args_list}
+    deleted = {call.kwargs["name"] for call in client.aio.files.delete.call_args_list}
     assert deleted == {"files/meeting", "files/late-reference"}

@@ -1,7 +1,6 @@
 """コーパス管理 - バッチ学習バッファ、flush、RAGクエリ、コーパスCRUD"""
 
 import asyncio
-import contextlib
 import hashlib
 import io
 import json
@@ -1594,17 +1593,87 @@ class CorpusManager:
         if self._flush_task is None:
             self._flush_task = asyncio.create_task(self._flush_loop())
 
-    async def shutdown(self):
+    async def shutdown(self, *, timeout_seconds: float | None = None):
+        """Flush buffered knowledge without exceeding the process stop grace.
+
+        Provider uploads can remain pending indefinitely.  Shutdown therefore
+        owns one monotonic deadline and cancels work that cannot finish within
+        it; cancelled buffer uploads restore their in-memory buffer before the
+        process exits.
+        """
+        if timeout_seconds is None:
+            try:
+                timeout_seconds = float(
+                    os.environ.get("YAGAPON_CORPUS_SHUTDOWN_TIMEOUT_SECONDS", "20")
+                )
+            except ValueError:
+                timeout_seconds = 20.0
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+
+        def consume_task_result(task: asyncio.Task) -> None:
+            try:
+                task.exception()
+            except asyncio.CancelledError:
+                pass
+
+        async def wait_tasks(tasks: set[asyncio.Task], label: str) -> bool:
+            if not tasks:
+                return True
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                for task in tasks:
+                    task.cancel()
+                    task.add_done_callback(consume_task_result)
+                log.error("Skipping %s: corpus shutdown deadline exhausted", label)
+                return False
+            done, pending = await asyncio.wait(tasks, timeout=remaining)
+            for task in done:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    log.exception("%s failed during corpus shutdown", label)
+            if pending:
+                log.error(
+                    "%s timed out during corpus shutdown after %.1fs",
+                    label,
+                    remaining,
+                )
+                for task in pending:
+                    task.cancel()
+                    task.add_done_callback(consume_task_result)
+                # Deliver cancellation once so `_flush_buffer_locked` can put
+                # a popped buffer back before shutdown returns. Never await a
+                # provider task unboundedly after this cooperative turn.
+                await asyncio.sleep(0)
+                return False
+            return True
+
+        async def run_bounded(coro, label: str) -> bool:
+            task = asyncio.create_task(coro)
+            return await wait_tasks({task}, label)
+
         if self._flush_task:
             self._flush_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._flush_task
+            await wait_tasks({self._flush_task}, "Corpus periodic flush loop")
             self._flush_task = None
         if self._inflight_flushes:
-            await asyncio.gather(*tuple(self._inflight_flushes), return_exceptions=True)
+            await wait_tasks(set(self._inflight_flushes), "In-flight corpus uploads")
         for session in tuple(self._active_backfills.values()):
-            await self.finish_backfill(session)
-        await self.flush_all()
+            completed = await run_bounded(
+                self.finish_backfill(session),
+                f"Backfill finalization guild={session.guild_id}",
+            )
+            if not completed:
+                break
+        if time.monotonic() < deadline:
+            await run_bounded(self.flush_all(), "Buffered corpus flush")
+        elif self._buffers:
+            log.error(
+                "Corpus shutdown deadline exhausted with %s buffered channel(s)",
+                len(self._buffers),
+            )
 
     async def _flush_loop(self):
         while True:

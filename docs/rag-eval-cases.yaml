@@ -20,8 +20,8 @@
 - id: recording-retention
   category: trusted-operation
   question: "正常に処理が終わった録音PCMは残りますか"
-  expected_all: ["削除"]
-  reference_facts: ["正常処理後の生録音PCMは削除する", "生文字起こしは永続保存する"]
+  expected_all: ["保持", "明示"]
+  reference_facts: ["正常処理後も生録音PCMとtimelineを保持する", "明示削除まで自動削除しない", "生文字起こしは永続保存する"]
   expected_source_any: ["おしゃべりやがぽん運用仕様"]
   must_cite: true
   min_sources: 1

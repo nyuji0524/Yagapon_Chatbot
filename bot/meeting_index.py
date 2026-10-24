@@ -311,6 +311,141 @@ async def index_bot_meeting(bot, **kwargs) -> MeetingIndexResult:
     corpus = getattr(bot, "corpus", None)
     config = getattr(bot, "config", None)
     parent_channel_id = kwargs.pop("parent_channel_id", None)
+    category_id = kwargs.pop("category_id", None)
+
+    # File Search is an external sink. The source Discord channel and every
+    # declared parent/category edge must still resolve in the originating guild
+    # before content may cross that boundary. IDs and cached names alone cannot
+    # prove the current audience (or a protected parent/category), so unresolved
+    # lineage fails closed rather than being represented by a synthetic object.
+    guild = None
+    get_guild = getattr(bot, "get_guild", None)
+    if callable(get_guild):
+        guild = get_guild(guild_id)
+    if guild is None or int(getattr(guild, "id", 0) or 0) != guild_id:
+        log.warning(
+            "Meeting indexing skipped: source guild is unresolved guild=%s",
+            guild_id,
+        )
+        return MeetingIndexResult()
+    resolve_channel = None
+    resolve_channel = getattr(guild, "get_channel_or_thread", None)
+    if not callable(resolve_channel):
+        resolve_channel = getattr(guild, "get_channel", None)
+    if not callable(resolve_channel):
+        log.warning(
+            "Meeting indexing skipped: source channel resolver is unavailable guild=%s",
+            guild_id,
+        )
+        return MeetingIndexResult()
+
+    def resolve(channel_id):
+        if channel_id is None or not callable(resolve_channel):
+            return None
+        try:
+            return resolve_channel(int(channel_id))
+        except (TypeError, ValueError):
+            return None
+
+    requested_channel_id = kwargs.get("channel_id")
+    source_channel = resolve(requested_channel_id)
+    if (
+        source_channel is None
+        or int(getattr(source_channel, "id", 0) or 0)
+        != int(requested_channel_id or 0)
+    ):
+        log.warning(
+            "Meeting indexing skipped: source channel is unresolved guild=%s channel=%s",
+            guild_id,
+            requested_channel_id,
+        )
+        return MeetingIndexResult()
+
+    actual_parent_id = getattr(source_channel, "parent_id", None)
+    if (
+        parent_channel_id is not None
+        and actual_parent_id is not None
+        and int(parent_channel_id) != int(actual_parent_id)
+    ):
+        log.warning(
+            "Meeting indexing skipped: source parent lineage changed guild=%s channel=%s",
+            guild_id,
+            requested_channel_id,
+        )
+        return MeetingIndexResult()
+    expected_parent_id = actual_parent_id or parent_channel_id
+    source_parent = getattr(source_channel, "parent", None) or resolve(
+        expected_parent_id
+    )
+    if expected_parent_id is not None and (
+        source_parent is None
+        or int(getattr(source_parent, "id", 0) or 0) != int(expected_parent_id)
+    ):
+        log.warning(
+            "Meeting indexing skipped: source parent is unresolved guild=%s channel=%s parent=%s",
+            guild_id,
+            requested_channel_id,
+            expected_parent_id,
+        )
+        return MeetingIndexResult()
+
+    actual_category_id = (
+        getattr(source_channel, "category_id", None)
+        or getattr(source_parent, "category_id", None)
+    )
+    if (
+        category_id is not None
+        and actual_category_id is not None
+        and int(category_id) != int(actual_category_id)
+    ):
+        log.warning(
+            "Meeting indexing skipped: source category lineage changed guild=%s channel=%s",
+            guild_id,
+            requested_channel_id,
+        )
+        return MeetingIndexResult()
+    expected_category_id = actual_category_id or category_id
+    source_category = (
+        getattr(source_channel, "category", None)
+    ) or getattr(source_parent, "category", None) or resolve(expected_category_id)
+    if expected_category_id is not None and (
+        source_category is None
+        or int(getattr(source_category, "id", 0) or 0)
+        != int(expected_category_id)
+    ):
+        log.warning(
+            "Meeting indexing skipped: source category is unresolved guild=%s channel=%s category=%s",
+            guild_id,
+            requested_channel_id,
+            expected_category_id,
+        )
+        return MeetingIndexResult()
+    if source_category is None and str(kwargs.get("category_name") or "").strip():
+        log.warning(
+            "Meeting indexing skipped: named source category is unresolved guild=%s channel=%s",
+            guild_id,
+            requested_channel_id,
+        )
+        return MeetingIndexResult()
+    if source_category is not None:
+        kwargs["category_name"] = str(
+            getattr(source_category, "name", "") or kwargs.get("category_name") or ""
+        )
+
+    from bot.knowledge_policy import protected_channel
+
+    if protected_channel(
+        source_channel,
+        parent=source_parent,
+        category=source_category,
+    ):
+        log.warning(
+            "Meeting indexing skipped for protected source: guild=%s channel=%s",
+            guild_id,
+            kwargs.get("channel_id"),
+        )
+        return MeetingIndexResult()
+
     is_ignored = getattr(config, "is_ignored", None)
     if callable(is_ignored):
         channel_ids = {

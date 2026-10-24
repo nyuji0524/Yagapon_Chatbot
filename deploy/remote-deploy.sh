@@ -27,6 +27,10 @@ knowledge_github_app_key_installed=false
 knowledge_github_app_key_backup=
 knowledge_github_app_key_tmp=
 oauth_tmp=
+data_path=
+recording_snapshot_marker=
+recording_snapshot_root=
+recording_snapshot_dir=
 
 if [[ ! "$image" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[a-z0-9._/-]+:[0-9a-f]{40}$ ]]; then
   echo "Refusing invalid Artifact Registry image reference" >&2
@@ -98,6 +102,56 @@ then
   exit 2
 fi
 
+# This first retention rollout must still be able to run the preceding image
+# after rollback.  That image interprets zero as an immediate recording cap,
+# while the new image interprets it as unlimited.  Keep the shared env-file at
+# its old >=4 GiB value (or omit the key for the old 4 GiB default); the new
+# Compose service-level literal below overrides it only for the new generation.
+if ! python3 - "$runtime_env" <<'RECORDING_CAP_PY'
+import re
+import shlex
+import sys
+from pathlib import Path
+
+key = "YAGAPON_MAX_RECORDING_BYTES"
+minimum_rollback_cap = 4 * 1024 * 1024 * 1024
+found = False
+effective = ""
+
+for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw_line.lstrip("\ufeff").strip()
+    if not line or line.startswith("#"):
+        continue
+    export_prefix = re.match(r"export[ \t]+", line)
+    if export_prefix:
+        line = line[export_prefix.end():]
+    name, separator, raw_value = line.partition("=")
+    if name.strip() != key:
+        continue
+    found = True
+    if not separator:
+        effective = ""
+        continue
+    try:
+        values = shlex.split(raw_value, comments=True, posix=True)
+    except ValueError:
+        raise SystemExit(1)
+    effective = values[0] if len(values) == 1 else ""
+
+if not found:
+    raise SystemExit(0)
+try:
+    cap = int(effective)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if cap >= minimum_rollback_cap else 1)
+RECORDING_CAP_PY
+then
+  echo "Unsafe YAGAPON_MAX_RECORDING_BYTES in $runtime_env for first-retention rollback" >&2
+  echo "Keep it unset or at least 4294967296; the new Compose generation overrides it to 0" >&2
+  exit 2
+fi
+
 install -d -m 0750 "$app_dir" /etc/yagapon "$backup_dir"
 exec 9>/run/lock/yagapon-deploy.lock
 flock -n 9 || { echo "Another deployment is running" >&2; exit 3; }
@@ -113,6 +167,31 @@ rollback() {
   set +e
   systemctl stop yagapon
   docker compose --project-directory "$app_dir" --env-file "$deploy_env" down
+  # The failed generation may have accepted a recording after the pre-restart
+  # retention snapshot.  Freeze that generation first, then preserve its final
+  # bind-mounted state before an old generation that still unlinks terminal PCM
+  # is allowed to start.  A second hard-link tree costs directory entries, not
+  # another copy of the audio bytes.
+  if [[ -n "$recording_snapshot_dir" \
+    && -n "$recording_snapshot_marker" \
+    && ! -f "$recording_snapshot_marker" ]]; then
+    recording_failed_generation_snapshot_dir="${recording_snapshot_dir}-failed-generation"
+    if ! install -d -o root -g root -m 0700 \
+      "$recording_failed_generation_snapshot_dir"; then
+      echo "CRITICAL: could not create failed-generation recording snapshot; old generation remains stopped" >&2
+      return 1
+    fi
+    if [[ -d "$data_path/recordings" ]] \
+      && ! cp -al -- "$data_path/recordings/." \
+        "$recording_failed_generation_snapshot_dir/"; then
+      echo "CRITICAL: could not hard-link failed-generation recordings; old generation remains stopped" >&2
+      return 1
+    fi
+    if ! sync -f "$recording_failed_generation_snapshot_dir"; then
+      echo "CRITICAL: could not fsync failed-generation recording snapshot; old generation remains stopped" >&2
+      return 1
+    fi
+  fi
   [[ -f "$backup_dir/compose.yaml" ]] && cp -a "$backup_dir/compose.yaml" "$compose_target"
   [[ -f "$backup_dir/deploy.env" ]] && cp -a "$backup_dir/deploy.env" "$deploy_env"
   [[ -f "$backup_dir/yagapon.service" ]] && cp -a "$backup_dir/yagapon.service" "$unit_target"
@@ -318,15 +397,37 @@ docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yaga
 data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
 data_path=${data_path:-/var/lib/yagapon}
 install -d -o 10001 -g 10001 -m 0750 "$data_path/releases"
+recording_snapshot_marker="$data_path/releases/recording-retention-v1.json"
 timeout --signal=TERM --kill-after=30s 420s docker run --rm \
   --env-file /etc/yagapon/yagapon.env \
   --volume "$data_path:/data" \
+  --tmpfs /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+  --tmpfs /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+  --tmpfs /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+  --tmpfs /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096 \
   "$image" python -m bot.preflight
 timeout --signal=TERM --kill-after=30s 420s docker compose \
   --project-directory "$app_dir" \
   --env-file "$deploy_env" \
   run --rm --no-deps source-index-watch \
   python -m source_index --preflight
+
+# The image deployed before permanent retention removed terminal PCM during
+# cleanup. A failed first migration can therefore roll back to code that would
+# unlink the same bind-mounted recording files. Preserve a root-only hard-link
+# snapshot outside /data/recordings before any restart. Hard links need almost
+# no extra audio capacity and keep the bytes recoverable if the old path is
+# unlinked; the marker is written only after the new generation is healthy.
+if [[ ! -f "$recording_snapshot_marker" ]]; then
+  recording_snapshot_root="$data_path/recording-snapshots"
+  install -d -o root -g root -m 0700 "$recording_snapshot_root"
+  recording_snapshot_dir="$recording_snapshot_root/retention-v1-$(date -u +%Y%m%dT%H%M%SZ)"
+  install -d -o root -g root -m 0700 "$recording_snapshot_dir"
+  if [[ -d "$data_path/recordings" ]]; then
+    cp -al -- "$data_path/recordings/." "$recording_snapshot_dir/"
+  fi
+  sync -f "$recording_snapshot_dir"
+fi
 systemctl restart yagapon
 
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
@@ -351,13 +452,21 @@ for _ in $(seq 1 48); do
     && [[ -n "$source_index_id" ]] \
     && systemctl is-active --quiet yagapon \
     && curl --fail --silent --show-error --max-time 5 \
-      "http://127.0.0.1:${host_port}/health" >/dev/null; then
+      "http://127.0.0.1:${host_port}/ready" >/dev/null; then
     trap - ERR
     printf '{"image":"%s","deployed_at":"%s","container":"%s"}\n' \
       "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$container_id" \
       > "$data_path/releases/current.json"
     chown 10001:10001 "$data_path/releases/current.json"
     chmod 0640 "$data_path/releases/current.json"
+    if [[ -n "$recording_snapshot_dir" ]]; then
+      printf '{"migration":"permanent-recording-retention-v1","snapshot":"%s","completed_at":"%s"}\n' \
+        "$recording_snapshot_dir" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "$recording_snapshot_marker"
+      chown root:root "$recording_snapshot_marker"
+      chmod 0600 "$recording_snapshot_marker"
+      sync -f "$data_path/releases"
+    fi
     find /var/backups/yagapon -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf -- {} +
     # Release images are content-addressed by commit SHA, so unused images and
     # build objects accumulate on the small VM disk. Prune only after the new

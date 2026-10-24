@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import re
+import time
 
 import discord
 
@@ -15,9 +16,9 @@ from bot.knowledge_policy import (
     protected_channel,
 )
 from bot.operations import OperationalStore
-from bot.recording import cleanup_old_recordings
 from bot.recording_replay import RecordingReplayManager
 from bot.scheduled_backfill import ScheduledBackfillManager
+from bot.shutdown import remaining_shutdown_seconds, shutdown_deadline_seconds
 from bot.support_directory import SupportDirectory
 from knowledge_catalog.store import CatalogStore, normalize_label
 
@@ -25,6 +26,7 @@ log = logging.getLogger("yagapon.client")
 
 RAG_FEEDBACK_PROMPT = "回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
 RAG_FEEDBACK_RATINGS = {"✅": "positive", "⚠️": "partial", "❌": "negative"}
+VOICE_SHUTDOWN_BUDGET_SECONDS = 40.0
 
 
 def _clean_rag_query(
@@ -310,9 +312,6 @@ class YagaPon(discord.Bot):
         self.corpus.start_flush_loop()
         self.key_management.start()
         self.scheduled_backfill.start()
-        removed = await asyncio.to_thread(cleanup_old_recordings)
-        if removed:
-            log.info("Removed %s expired delivered recording(s)", removed)
         if self._recording_recovery_task is None or self._recording_recovery_task.done():
             from bot.voice import recording_recovery_loop
 
@@ -407,7 +406,12 @@ class YagaPon(discord.Bot):
             return
 
         # botがそのVCにいるか確認
-        from bot.voice import VoiceMode, get_session, leave_voice
+        from bot.voice import (
+            FinalReprocessDeferred,
+            VoiceMode,
+            get_session,
+            leave_voice,
+        )
 
         session = get_session(member.guild.id)
         if not session or not session.voice_client:
@@ -417,16 +421,29 @@ class YagaPon(discord.Bot):
         if session.channel.id != before.channel.id:
             return
 
+        capture_notice_task = None
         if bot_departed_source:
             if getattr(session, "_intentional_stop", False):
                 return
-            session._capture_interrupted = True
-            session._transcription_failed = True
+            interruption_reason = (
+                "bot-moved" if after.channel is not None else "bot-disconnected"
+            )
             session.is_active = False
-            if session.recording_sink:
-                session.recording_sink.mark(
-                    "capture_interrupted",
-                    reason="bot-moved" if after.channel is not None else "bot-disconnected",
+            # Metadata failure must not skip stop/fsync. The session helper
+            # latches the integrity failure in memory and absorbs mark errors.
+            mark_interrupted = getattr(session, "_mark_capture_interrupted", None)
+            if callable(mark_interrupted):
+                mark_interrupted(interruption_reason)
+            else:  # Compatibility for lightweight session adapters/tests.
+                session._capture_interrupted = True
+                session._transcription_failed = True
+            activate_alert = getattr(session, "_activate_capture_alert", None)
+            if callable(activate_alert):
+                capture_notice_task = asyncio.create_task(
+                    activate_alert(
+                        interruption_reason,
+                        fail_closed=True,
+                    )
                 )
 
         # VCに残っているのがbotだけか確認
@@ -434,24 +451,46 @@ class YagaPon(discord.Bot):
         if len(humans) == 0:
             log.info(f"VC {before.channel.name} に誰もいなくなったので自動退出")
 
-            if not session.claim_delivery():
+            if not await session.claim_delivery():
+                if capture_notice_task is not None:
+                    await asyncio.gather(capture_notice_task, return_exceptions=True)
                 return
             try:
-                minutes = await leave_voice(member.guild.id)
+                try:
+                    minutes = await leave_voice(member.guild.id)
+                finally:
+                    if capture_notice_task is not None:
+                        await asyncio.gather(
+                            capture_notice_task,
+                            return_exceptions=True,
+                        )
             except Exception as exc:
                 if session.recording_sink:
                     from bot.recording import RecordingLimitExceeded
 
-                    session.recording_sink.mark(
+                    capture_status = (
                         "capture_interrupted"
                         if getattr(session, "_capture_interrupted", False)
                         else (
-                            "recording_truncated"
-                            if isinstance(exc, RecordingLimitExceeded)
-                            else "automatic_leave_failed"
-                        ),
-                        error=type(exc).__name__,
+                            "capture_suspicious"
+                            if getattr(session, "_capture_suspicious", False)
+                            else (
+                                "recording_truncated"
+                                if isinstance(exc, RecordingLimitExceeded)
+                                else (
+                                    "final_reprocess_deferred"
+                                    if isinstance(exc, FinalReprocessDeferred)
+                                    else "automatic_leave_failed"
+                                )
+                            )
+                        )
                     )
+                    mark_sink = getattr(session, "_mark_recording_sink", None)
+                    if callable(mark_sink):
+                        await mark_sink(
+                            capture_status,
+                            error=type(exc).__name__,
+                        )
                 log.exception("Automatic voice leave failed for guild %s", member.guild.id)
                 return
 
@@ -463,7 +502,7 @@ class YagaPon(discord.Bot):
                 from bot.meeting_index import index_bot_meeting
 
                 export_decision = session.external_export_decision()
-                session.checkpoint_delivery_progress(
+                await session.checkpoint_delivery_progress(
                     external_export_expected=export_decision.allowed,
                     external_export_reason=export_decision.reason,
                 )
@@ -474,6 +513,7 @@ class YagaPon(discord.Bot):
                         session.channel.id,
                         export_decision.reason,
                     )
+                protected_source = export_decision.reason == "protected-channel"
                 transcript_url = (
                     await upload_transcript(
                         self.config,
@@ -486,7 +526,7 @@ class YagaPon(discord.Bot):
                     if export_decision.allowed
                     else None
                 )
-                session.checkpoint_delivery_progress(
+                await session.checkpoint_delivery_progress(
                     transcript_url=transcript_url or "",
                     transcript_path=str(getattr(session, "transcript_path", "") or ""),
                 )
@@ -495,20 +535,31 @@ class YagaPon(discord.Bot):
                     raise RuntimeError("minutes generation returned no content")
 
                 if not minutes:
-                    await session.publish_knowledge()
-                    await index_bot_meeting(
-                        self,
-                        guild_id=member.guild.id,
-                        channel_id=session.channel.id,
-                        parent_channel_id=getattr(session.channel, "parent_id", None),
-                        session_id=session.session_id,
-                        channel_name=session.channel.name,
-                        category_name=getattr(getattr(session.channel, "category", None), "name", ""),
-                        started_at=session.started_at,
-                        transcript=session.transcript_text,
-                        transcript_url=transcript_url,
-                    )
-                    session.mark_delivered(transcript_url=transcript_url)
+                    if not protected_source:
+                        await session.publish_knowledge()
+                        await index_bot_meeting(
+                            self,
+                            guild_id=member.guild.id,
+                            channel_id=session.channel.id,
+                            parent_channel_id=getattr(session.channel, "parent_id", None),
+                            category_id=getattr(session.channel, "category_id", None),
+                            session_id=session.session_id,
+                            channel_name=session.channel.name,
+                            category_name=getattr(
+                                getattr(session.channel, "category", None),
+                                "name",
+                                "",
+                            ),
+                            started_at=session.started_at,
+                            transcript=session.transcript_text,
+                            transcript_url=transcript_url,
+                        )
+                    if not await session.mark_delivered(
+                        transcript_url=transcript_url
+                    ):
+                        raise RuntimeError(
+                            "terminal delivery checkpoint could not be persisted"
+                        )
                     return
 
                 from bot.commands.voice_cmd import _summarize_minutes
@@ -525,41 +576,53 @@ class YagaPon(discord.Bot):
                     if export_decision.allowed
                     else None
                 )
-                session.checkpoint_delivery_progress(
+                await session.checkpoint_delivery_progress(
                     transcript_url=transcript_url or "",
                     minutes_url=drive_url or "",
                     transcript_path=str(getattr(session, "transcript_path", "") or ""),
                 )
                 summary = await _summarize_minutes(minutes)
-                knowledge_url = await session.publish_knowledge(
-                    summary=summary,
-                    minutes=minutes,
-                )
-                await index_bot_meeting(
-                    self,
-                    guild_id=member.guild.id,
-                    channel_id=session.channel.id,
-                    parent_channel_id=getattr(session.channel, "parent_id", None),
-                    session_id=session.session_id,
-                    channel_name=session.channel.name,
-                    category_name=getattr(getattr(session.channel, "category", None), "name", ""),
-                    started_at=session.started_at,
-                    transcript=session.transcript_text,
-                    minutes=minutes,
-                    transcript_url=transcript_url,
-                    minutes_url=drive_url,
-                )
-                session.mark_delivered(
+                knowledge_url = None
+                if not protected_source:
+                    knowledge_url = await session.publish_knowledge(
+                        summary=summary,
+                        minutes=minutes,
+                    )
+                    await index_bot_meeting(
+                        self,
+                        guild_id=member.guild.id,
+                        channel_id=session.channel.id,
+                        parent_channel_id=getattr(session.channel, "parent_id", None),
+                        category_id=getattr(session.channel, "category_id", None),
+                        session_id=session.session_id,
+                        channel_name=session.channel.name,
+                        category_name=getattr(
+                            getattr(session.channel, "category", None),
+                            "name",
+                            "",
+                        ),
+                        started_at=session.started_at,
+                        transcript=session.transcript_text,
+                        minutes=minutes,
+                        transcript_url=transcript_url,
+                        minutes_url=drive_url,
+                    )
+                if not await session.mark_delivered(
                     drive_url=drive_url,
                     transcript_url=transcript_url,
-                )
+                ):
+                    raise RuntimeError(
+                        "terminal delivery checkpoint could not be persisted"
+                    )
             except Exception as exc:
                 if session.recording_sink:
-                    session.recording_sink.mark(
-                        "automatic_leave_failed",
-                        stage="delivery",
-                        error=type(exc).__name__,
-                    )
+                    mark_sink = getattr(session, "_mark_recording_sink", None)
+                    if callable(mark_sink):
+                        await mark_sink(
+                            "automatic_leave_failed",
+                            stage="delivery",
+                            error=type(exc).__name__,
+                        )
                 log.exception(
                     "Automatic voice delivery failed for guild %s; recording retained",
                     member.guild.id,
@@ -603,6 +666,16 @@ class YagaPon(discord.Bot):
                 embed.add_field(
                     name="🗂️ Knowledge",
                     value=f"[Draft PRを確認する]({knowledge_url})",
+                    inline=False,
+                )
+            capture_warning_reader = getattr(session, "capture_warning_text", None)
+            capture_warning = (
+                capture_warning_reader() if callable(capture_warning_reader) else ""
+            )
+            if capture_warning:
+                embed.add_field(
+                    name="⚠️ 録音の完全性",
+                    value=capture_warning,
                     inline=False,
                 )
 
@@ -908,59 +981,152 @@ class YagaPon(discord.Bot):
             )
         return sent_messages
 
-    async def close(self):
+    async def close(
+        self,
+        *,
+        shutdown_deadline: float | None = None,
+        voice_checkpointed: bool = False,
+    ):
         async with self._close_lock:
             if self._close_completed:
                 return
-            log.info("Shutting down, checkpointing voice sessions...")
-            from bot.voice import checkpoint_voice_sessions_for_shutdown
+            shutdown_started = time.monotonic()
+            if shutdown_deadline is None:
+                shutdown_deadline = shutdown_started + shutdown_deadline_seconds()
 
-            try:
-                await checkpoint_voice_sessions_for_shutdown()
-            except Exception:
-                log.exception("Voice session checkpoint failed during shutdown; continuing cleanup")
-            try:
-                from bot.reactions import shutdown_reactions
+            def remaining_seconds(*, cap: float | None = None) -> float:
+                return remaining_shutdown_seconds(shutdown_deadline, cap=cap)
 
-                await asyncio.wait_for(shutdown_reactions(self), timeout=20)
-            except Exception:
-                log.exception("Smart-reaction flush failed during shutdown; continuing cleanup")
-            try:
-                await self.recording_replays.shutdown(timeout=20)
-            except Exception:
-                log.exception("Recording replay shutdown failed; continuing cleanup")
-            try:
-                await self.scheduled_backfill.stop()
-            except Exception:
-                log.exception("Scheduled backfill shutdown failed; continuing cleanup")
-            pending_refreshes = [
-                task
-                for task in getattr(self, "knowledge_refresh_tasks", ())
-                if not task.done()
-            ]
-            for task in pending_refreshes:
-                task.cancel()
-            if pending_refreshes:
-                await asyncio.gather(*pending_refreshes, return_exceptions=True)
-            if self._recording_recovery_task and not self._recording_recovery_task.done():
-                self._recording_recovery_task.cancel()
+            async def run_bounded(label: str, factory, *, cap: float | None = None) -> bool:
+                timeout = remaining_seconds(cap=cap)
+                if timeout <= 0:
+                    log.error("Skipping %s: shutdown deadline exhausted", label)
+                    return False
+                task = None
                 try:
-                    await self._recording_recovery_task
+                    task = asyncio.create_task(factory(timeout))
+                    done, pending = await asyncio.wait({task}, timeout=timeout)
+                    if pending:
+                        task.cancel()
+
+                        def consume_result(completed: asyncio.Task) -> None:
+                            try:
+                                completed.exception()
+                            except asyncio.CancelledError:
+                                pass
+
+                        task.add_done_callback(consume_result)
+                        log.error(
+                            "%s timed out during shutdown after %.1fs; continuing cleanup",
+                            label,
+                            timeout,
+                        )
+                        return False
+                    task.result()
+                    return True
+                except asyncio.CancelledError:
+                    if task is not None and task.done() and task.cancelled():
+                        log.error("%s was cancelled during shutdown; continuing cleanup", label)
+                        return False
+                    if task is not None:
+                        task.cancel()
+                    raise
+                except Exception:
+                    log.exception("%s failed during shutdown; continuing cleanup", label)
+                return False
+
+            if voice_checkpointed:
+                log.info("Voice sessions were checkpointed by the process shutdown coordinator")
+            else:
+                log.info("Shutting down, checkpointing voice sessions...")
+                from bot.voice import checkpoint_voice_sessions_for_shutdown
+
+                await run_bounded(
+                    "Voice session checkpoint",
+                    lambda timeout: checkpoint_voice_sessions_for_shutdown(
+                        timeout_seconds=timeout,
+                    ),
+                    cap=VOICE_SHUTDOWN_BUDGET_SECONDS,
+                )
+
+            from bot.reactions import shutdown_reactions
+
+            await run_bounded(
+                "Smart-reaction flush",
+                lambda _timeout: shutdown_reactions(self),
+                cap=5.0,
+            )
+
+            recording_replays = getattr(self, "recording_replays", None)
+            if recording_replays is not None:
+                await run_bounded(
+                    "Recording replay shutdown",
+                    lambda timeout: recording_replays.shutdown(timeout=timeout),
+                    cap=5.0,
+                )
+
+            scheduled_backfill = getattr(self, "scheduled_backfill", None)
+            if scheduled_backfill is not None:
+                await run_bounded(
+                    "Scheduled backfill shutdown",
+                    lambda _timeout: scheduled_backfill.stop(),
+                    cap=2.0,
+                )
+
+            async def cancel_knowledge_refreshes(_timeout: float) -> None:
+                pending_refreshes = [
+                    task
+                    for task in getattr(self, "knowledge_refresh_tasks", ())
+                    if not task.done()
+                ]
+                for task in pending_refreshes:
+                    task.cancel()
+                if pending_refreshes:
+                    await asyncio.gather(*pending_refreshes, return_exceptions=True)
+
+            await run_bounded(
+                "Knowledge refresh cancellation",
+                cancel_knowledge_refreshes,
+                cap=2.0,
+            )
+
+            async def cancel_recording_recovery(_timeout: float) -> None:
+                recovery_task = getattr(self, "_recording_recovery_task", None)
+                if recovery_task is None or recovery_task.done():
+                    return
+                recovery_task.cancel()
+                try:
+                    await recovery_task
                 except asyncio.CancelledError:
                     pass
-                except Exception:
-                    log.exception("Recording recovery task failed during shutdown; continuing cleanup")
+
+            await run_bounded(
+                "Recording recovery cancellation",
+                cancel_recording_recovery,
+                cap=2.0,
+            )
             # Close the Discord connection before the slower corpus flush so
             # Pycord cannot start a reconnect against an already-closing HTTP
             # session during deployments.
             try:
-                await super().close()
+                await run_bounded(
+                    "Discord transport close",
+                    lambda _timeout: super(YagaPon, self).close(),
+                    cap=5.0,
+                )
             finally:
                 # A transport error while Discord is closing must not discard
                 # buffered knowledge waiting for its durable upload.
                 log.info("Discord closing finished; flushing corpus buffers...")
-                await self.corpus.shutdown()
+                await run_bounded(
+                    "Corpus shutdown",
+                    lambda timeout: self.corpus.shutdown(timeout_seconds=timeout),
+                )
                 self._close_completed = True
+                log.info(
+                    "Shutdown cleanup finished in %.1fs",
+                    time.monotonic() - shutdown_started,
+                )
 
 
 def create_bot() -> YagaPon:

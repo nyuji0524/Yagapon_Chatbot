@@ -3,15 +3,21 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.security import require_api_token
-from bot.recording_replay import find_recording_artifact, list_recording_artifacts
+from bot.recording_replay import (
+    find_recording_artifact,
+    list_recording_artifacts,
+    recording_artifact_is_replayable,
+)
 
 router = APIRouter(dependencies=[Depends(require_api_token)])
 
 
 class ReplayRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str = Field(min_length=1, max_length=120)
     target_guild_id: int | None = None
     target_guild_name: str | None = Field(default=None, max_length=100)
@@ -20,6 +26,8 @@ class ReplayRequest(BaseModel):
 
 
 class ReplayLongestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_guild_name: str | None = Field(default=None, max_length=100)
     target_guild_id: int | None = None
     target_channel_id: int | None = None
@@ -117,6 +125,11 @@ async def start_longest_recording_replay(
         item for item in artifacts
         if not item.session_id.startswith("replay-")
         and (item.raw_bytes > 0 if payload.retranscribe else item.transcript_bytes > 0)
+        and recording_artifact_is_replayable(
+            item,
+            retranscribe=payload.retranscribe,
+            config=getattr(bot, "config", None),
+        )
     ]
     if not candidates:
         kind = "raw recording" if payload.retranscribe else "transcript"

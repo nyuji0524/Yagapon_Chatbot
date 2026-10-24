@@ -176,7 +176,7 @@ flowchart TD
 ## 会議データの流れ
 
 1. `/join` でVC音声をDiscord ID別PCMとして永続化する。
-2. 録音中は小さいチャンク、終了後は先頭から大きいチャンクで再文字起こしする。
+2. listenモードは録音中のDiscord接続・PCM増加だけを監視し、終了後に先頭から大きいチャンクで再文字起こしする。meeting/chatのリアルタイムSTTは専用workerでイベントループ外へ隔離する。
 3. Discord IDを確定した親ラベルとし、その内側を声紋・話者分離で識別する。
 4. 生文字起こしを `/data/transcripts` へ必ず保存し、会議索引に `access_scope=channel` で登録する。
 5. DriveとKnowledgeへの外部化は、元チャンネルがサーバー全体に閲覧可能か、

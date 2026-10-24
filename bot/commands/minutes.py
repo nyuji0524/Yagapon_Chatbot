@@ -106,6 +106,8 @@ def register(bot):
                 session_id,
                 title or file.filename,
                 transcript,
+                transcript_complete=True,
+                status="uploaded_transcription_completed",
             )
 
             # 生文字起こしは議事録生成より先に外部へ退避する。
@@ -188,19 +190,24 @@ def register(bot):
 
             from bot.meeting_index import index_bot_meeting
 
-            await index_bot_meeting(
-                bot,
-                guild_id=ctx.guild_id,
-                channel_id=ctx.channel.id,
-                parent_channel_id=getattr(ctx.channel, "parent_id", None),
-                session_id=session_id,
-                channel_name=doc_title,
-                started_at=meeting_at,
-                transcript=transcript,
-                minutes=minutes,
-                transcript_url=transcript_url,
-                minutes_url=drive_url,
-            )
+            if export_decision.reason != "protected-channel":
+                await index_bot_meeting(
+                    bot,
+                    guild_id=ctx.guild_id,
+                    channel_id=ctx.channel.id,
+                    parent_channel_id=getattr(ctx.channel, "parent_id", None),
+                    category_id=getattr(ctx.channel, "category_id", None),
+                    session_id=session_id,
+                    channel_name=doc_title,
+                    category_name=getattr(
+                        getattr(ctx.channel, "category", None), "name", ""
+                    ),
+                    started_at=meeting_at,
+                    transcript=transcript,
+                    minutes=minutes,
+                    transcript_url=transcript_url,
+                    minutes_url=drive_url,
+                )
 
             # Discordに送信
             embed = discord.Embed(

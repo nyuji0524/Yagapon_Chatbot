@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,21 +26,47 @@ from bot.recording import (
     PCM_SAMPLE_RATE,
     PCM_SAMPLE_WIDTH,
     RecordingTimelineSegment,
+    _ensure_private_directory,
+    _fsync_directory,
+    _load_session_metadata,
+    _session_directories,
+    _synthesized_interrupted_metadata,
     load_recording_timeline_segments,
     load_transcript_content,
+    load_transcript_provenance,
     read_recording_timeline_audio,
     recording_root,
     save_external_transcript,
     transcript_root,
+    validate_recording_raw,
+)
+from bot.recording_publication import (
+    UnsafeRecordingPublication,
+    load_safe_finalized_recording,
+    require_complete_transcript_provenance,
 )
 
 log = logging.getLogger("yagapon.recording_replay")
 
 REPLAY_TERMINAL_CHECKPOINTS = {
     "completed": "replay_completed",
+    "review_completed": "replay_review_completed",
     "failed": "replay_failed",
     "interrupted": "replay_interrupted",
 }
+
+REVIEWABLE_RECORDING_STATUSES = frozenset(
+    {
+        "capture_interrupted",
+        "capture_suspicious",
+        "recording_truncated",
+        "storage_limit_reached",
+        "leave_failed",
+        "final_reprocess_deferred",
+        "final_reprocess_empty",
+        "recovery_dead_letter",
+    }
+)
 
 
 def replay_root() -> Path:
@@ -49,7 +76,7 @@ def replay_root() -> Path:
 
 def _atomic_json_write(path: Path, payload: dict) -> None:
     """Replace one JSON checkpoint without exposing a partially written file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
         suffix=".tmp",
@@ -64,6 +91,8 @@ def _atomic_json_write(path: Path, payload: dict) -> None:
             os.fsync(destination.fileno())
         temporary.chmod(0o600)
         os.replace(temporary, path)
+        path.chmod(0o600)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -197,6 +226,12 @@ class RecordingArtifact:
     transcript_bytes: int
     session_dir: Path
     source_channel_id: int | None = None
+    transcript_complete: bool = False
+    capture_integrity_failed: bool = False
+    provenance_present: bool = False
+    raw_integrity_valid: bool = False
+    raw_integrity_reason: str = ""
+    raw_manifest_verified: bool = False
 
     def public_dict(self) -> dict:
         value = asdict(self)
@@ -215,6 +250,7 @@ class ReplayJob:
     target_guild_id: int
     target_channel_id: int
     retranscribe: bool
+    review_only: bool = False
     status: str = "queued"
     stage: str = "queued"
     created_at: str = ""
@@ -258,36 +294,71 @@ def list_recording_artifacts() -> list[RecordingArtifact]:
     artifacts = []
     root = recording_root()
     pcm_bytes_per_second = PCM_CHANNELS * PCM_SAMPLE_RATE * PCM_SAMPLE_WIDTH
-    metadata_paths = root.glob("*/*/metadata.json") if root.exists() else []
-    for metadata_path in metadata_paths:
+    for session_dir in _session_directories(root):
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            guild_id = int(metadata.get("guild_id") or metadata_path.parent.parent.name)
-            pcm_files = list(metadata_path.parent.glob("user-*.pcm"))
+            metadata, metadata_state = _load_session_metadata(session_dir)
+            if metadata_state != "valid":
+                metadata = _synthesized_interrupted_metadata(
+                    session_dir,
+                    metadata_state,
+                )
+            guild_id = int(metadata.get("guild_id") or session_dir.parent.name)
+            pcm_files = list(session_dir.glob("user-*.pcm"))
             raw_bytes = sum(path.stat().st_size for path in pcm_files)
             longest_stream = max((path.stat().st_size for path in pcm_files), default=0)
-            transcript = _safe_transcript_path(guild_id, metadata_path.parent.name, metadata)
+            transcript = _safe_transcript_path(guild_id, session_dir.name, metadata)
             transcript_bytes = transcript.stat().st_size if transcript else 0
+            provenance = load_transcript_provenance(transcript)
             if raw_bytes <= 0 and transcript_bytes <= 0:
                 continue
+            raw_validation = validate_recording_raw(session_dir, metadata)
+            raw_integrity_valid = bool(
+                raw_bytes > 0
+                and metadata_state == "valid"
+                and raw_validation.valid
+            )
+            raw_integrity_reason = ""
+            if raw_bytes > 0 and metadata_state != "valid":
+                raw_integrity_reason = f"recording-metadata-{metadata_state}"
+            elif raw_bytes > 0 and not raw_validation.valid:
+                raw_integrity_reason = raw_validation.reason
+            listed_status = str(metadata.get("status") or "unknown")
+            if raw_bytes > 0 and not raw_integrity_valid:
+                listed_status = "capture_interrupted"
             artifacts.append(RecordingArtifact(
-                session_id=metadata_path.parent.name,
+                session_id=session_dir.name,
                 source_guild_id=guild_id,
                 channel_name=str(metadata.get("channel_name") or "unknown"),
                 mode=str(metadata.get("mode") or "listen"),
-                status=str(metadata.get("status") or "unknown"),
-                started_at=str(metadata.get("started_at") or metadata_path.parent.name),
+                status=listed_status,
+                started_at=str(metadata.get("started_at") or session_dir.name),
                 raw_bytes=raw_bytes,
                 estimated_seconds=round(longest_stream / pcm_bytes_per_second),
                 transcript_path=transcript,
                 transcript_bytes=transcript_bytes,
-                session_dir=metadata_path.parent,
+                session_dir=session_dir,
                 source_channel_id=(
                     int(metadata["channel_id"]) if metadata.get("channel_id") else None
                 ),
+                transcript_complete=bool(
+                    metadata.get("transcript_complete") is True
+                    and provenance.get("transcript_complete") is True
+                ),
+                capture_integrity_failed=bool(
+                    metadata.get("capture_integrity_failed") is True
+                    or provenance.get("capture_integrity_failed") is True
+                    or (raw_bytes > 0 and not raw_integrity_valid)
+                ),
+                provenance_present=bool(provenance),
+                raw_integrity_valid=raw_integrity_valid,
+                raw_integrity_reason=raw_integrity_reason,
+                raw_manifest_verified=bool(
+                    raw_integrity_valid
+                    and raw_validation.checked_against_manifest
+                ),
             ))
         except (OSError, ValueError, json.JSONDecodeError):
-            log.exception("Could not inspect recording metadata path=%s", metadata_path)
+            log.exception("Could not inspect recording session path=%s", session_dir)
     known = {(item.source_guild_id, item.session_id) for item in artifacts}
     transcript_archive = transcript_root()
     if transcript_archive.exists():
@@ -301,6 +372,7 @@ def list_recording_artifacts() -> list[RecordingArtifact]:
                     continue
                 with path.open(encoding="utf-8", errors="replace") as source:
                     first_line = source.readline().strip()
+                provenance = load_transcript_provenance(path)
                 channel_name = first_line.removeprefix("# 文字起こし - ").strip() or "archived"
                 artifacts.append(RecordingArtifact(
                     session_id=path.stem,
@@ -315,6 +387,14 @@ def list_recording_artifacts() -> list[RecordingArtifact]:
                     transcript_bytes=path.stat().st_size,
                     session_dir=root / str(guild_id) / path.stem,
                     source_channel_id=None,
+                    transcript_complete=provenance.get("transcript_complete") is True,
+                    capture_integrity_failed=(
+                        provenance.get("capture_integrity_failed") is True
+                    ),
+                    provenance_present=bool(provenance),
+                    raw_integrity_valid=False,
+                    raw_integrity_reason="raw-audio-missing",
+                    raw_manifest_verified=False,
                 ))
             except (OSError, ValueError):
                 log.exception("Could not inspect transcript archive path=%s", path)
@@ -341,16 +421,191 @@ def find_recording_artifact(session_id: str) -> RecordingArtifact:
     return matches[0]
 
 
+def validate_recording_artifact_for_replay(
+    artifact: RecordingArtifact,
+    *,
+    retranscribe: bool,
+    config=None,
+) -> dict:
+    """Prove a replay source is finalized, complete, and export-approved.
+
+    Even transcript-only replay sends meeting content to the minutes model and
+    external destinations, so it requires the retained raw recording and its
+    completeness manifest as independent evidence that the source capture is
+    safe.  Transcript archives without that evidence stay locally inspectable.
+    """
+    if artifact.raw_bytes <= 0:
+        raise UnsafeRecordingPublication("raw audio is no longer available")
+    if not artifact.raw_integrity_valid:
+        raise UnsafeRecordingPublication(
+            "raw audio failed integrity validation: "
+            f"{artifact.raw_integrity_reason or 'unknown'}"
+        )
+    if not artifact.raw_manifest_verified:
+        raise UnsafeRecordingPublication(
+            "raw audio has no trusted completeness manifest"
+        )
+    if artifact.capture_integrity_failed:
+        raise UnsafeRecordingPublication("raw audio capture is marked incomplete")
+
+    metadata = load_safe_finalized_recording(
+        artifact.session_dir,
+        source_guild_id=artifact.source_guild_id,
+        config=config,
+        require_raw_manifest=True,
+        expected_raw_bytes=artifact.raw_bytes,
+    )
+    if not retranscribe:
+        if artifact.transcript_path is None:
+            raise UnsafeRecordingPublication(
+                "saved transcript is unavailable; retry explicitly with retranscribe=true"
+            )
+        if not artifact.provenance_present or not artifact.transcript_complete:
+            raise UnsafeRecordingPublication(
+                "saved transcript may be incomplete; retry explicitly with retranscribe=true"
+            )
+        require_complete_transcript_provenance(
+            artifact.transcript_path,
+            expected_guild_id=artifact.source_guild_id,
+            expected_session_id=artifact.session_id,
+        )
+    return metadata
+
+
+def validate_recording_artifact_for_review(artifact: RecordingArtifact) -> dict:
+    """Validate retained partial PCM for an explicit owner-only review.
+
+    This deliberately does not promote the capture to healthy or exportable.
+    A partial manifest may be used for human inspection, but every manifest
+    fact that is present still has to match the retained files.
+    """
+    if artifact.raw_bytes <= 0:
+        raise UnsafeRecordingPublication("raw audio is no longer available")
+    expected_dir = (
+        recording_root() / str(artifact.source_guild_id) / artifact.session_id
+    ).resolve()
+    if artifact.session_dir.resolve() != expected_dir:
+        raise UnsafeRecordingPublication("review source is outside the recording archive")
+    metadata, metadata_state = _load_session_metadata(artifact.session_dir)
+    if metadata_state != "valid":
+        raise UnsafeRecordingPublication(
+            f"recording metadata is {metadata_state}; review identity is unresolved"
+        )
+    try:
+        metadata_guild_id = int(metadata.get("guild_id"))
+    except (TypeError, ValueError) as exc:
+        raise UnsafeRecordingPublication("source guild is unresolved") from exc
+    if metadata_guild_id != artifact.source_guild_id:
+        raise UnsafeRecordingPublication("source guild does not match recording metadata")
+    status = str(metadata.get("status") or "")
+    if status not in REVIEWABLE_RECORDING_STATUSES:
+        raise UnsafeRecordingPublication(
+            f"recording is not an interrupted review source: {status or 'unknown'}"
+        )
+    validation = validate_recording_raw(artifact.session_dir, metadata)
+    if not validation.valid:
+        raise UnsafeRecordingPublication(
+            "partial raw audio failed integrity validation: "
+            f"{validation.reason or 'unknown'}"
+        )
+    if validation.total_bytes != artifact.raw_bytes:
+        raise UnsafeRecordingPublication("partial raw audio changed after inventory")
+    return metadata
+
+
+def validate_recording_review_context(
+    artifact: RecordingArtifact,
+    *,
+    bot,
+    target_channel,
+    review_actor,
+) -> dict:
+    """Keep partial review inside the exact original Discord audience."""
+    metadata = validate_recording_artifact_for_review(artifact)
+    source_channel_id = artifact.source_channel_id
+    if source_channel_id is None:
+        raise UnsafeRecordingPublication("original source channel is unresolved")
+    target_guild = getattr(target_channel, "guild", None)
+    if getattr(target_guild, "id", None) != artifact.source_guild_id:
+        raise UnsafeRecordingPublication("review must run in the original source guild")
+    if getattr(target_channel, "id", None) != source_channel_id:
+        raise UnsafeRecordingPublication("review must run in the original source channel")
+
+    get_guild = getattr(bot, "get_guild", None)
+    source_guild = get_guild(artifact.source_guild_id) if callable(get_guild) else None
+    if source_guild is None:
+        raise UnsafeRecordingPublication("original source guild is unavailable")
+    get_channel = getattr(source_guild, "get_channel_or_thread", None)
+    if not callable(get_channel):
+        get_channel = getattr(source_guild, "get_channel", None)
+    source_channel = get_channel(source_channel_id) if callable(get_channel) else None
+    if source_channel is None or getattr(source_channel, "id", None) != source_channel_id:
+        raise UnsafeRecordingPublication("original source channel is unavailable")
+    actor_id = getattr(review_actor, "id", None)
+    get_member = getattr(source_guild, "get_member", None)
+    member = get_member(actor_id) if actor_id is not None and callable(get_member) else None
+    if member is None:
+        actor_guild = getattr(review_actor, "guild", None)
+        if getattr(actor_guild, "id", None) == artifact.source_guild_id:
+            member = review_actor
+    if member is None:
+        raise UnsafeRecordingPublication("review operator is not in the source guild")
+    permissions_for = getattr(source_channel, "permissions_for", None)
+    if not callable(permissions_for):
+        raise UnsafeRecordingPublication("source channel permissions are unresolved")
+    try:
+        permissions = permissions_for(member)
+    except Exception as exc:
+        raise UnsafeRecordingPublication(
+            "source channel permissions are unresolved"
+        ) from exc
+    if not bool(
+        getattr(
+            permissions,
+            "view_channel",
+            getattr(permissions, "read_messages", False),
+        )
+    ):
+        raise UnsafeRecordingPublication("review operator cannot view source channel")
+    return metadata
+
+
+def recording_artifact_is_replayable(
+    artifact: RecordingArtifact,
+    *,
+    retranscribe: bool,
+    config=None,
+) -> bool:
+    """Return whether automatic replay may safely select this artifact."""
+    try:
+        validate_recording_artifact_for_replay(
+            artifact,
+            retranscribe=retranscribe,
+            config=config,
+        )
+    except (OSError, UnsafeRecordingPublication):
+        return False
+    return True
+
+
 class ReadOnlyReplaySink:
     """VoiceSession-compatible sink that never edits or deletes source PCM."""
 
-    def __init__(self, artifact: RecordingArtifact, target_guild_id: int, job_id: str):
+    def __init__(
+        self,
+        artifact: RecordingArtifact,
+        target_guild_id: int,
+        job_id: str,
+        *,
+        review_only: bool = False,
+    ):
         self.artifact = artifact
         self.guild_id = target_guild_id
         self.channel_name = f"replay-{artifact.channel_name}"
         self.mode = "listen"
         self.session_dir = replay_root() / job_id
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.review_only = review_only
+        _ensure_private_directory(self.session_dir)
         self._metadata_path = self.session_dir / "metadata.json"
 
     @property
@@ -412,6 +667,14 @@ class ReadOnlyReplaySink:
         _atomic_json_write(self._metadata_path, current)
 
     def checkpoint(self, *, offsets, speaker_labels, transcript_path=None, status="processing", **extra):
+        if self.review_only:
+            status = "review_only_processing"
+            extra = {
+                **extra,
+                "transcript_complete": False,
+                "capture_integrity_failed": True,
+                "review_only": True,
+            }
         self._write_metadata(
             status,
             offsets={str(key): int(value) for key, value in offsets.items()},
@@ -430,6 +693,15 @@ class ReadOnlyReplaySink:
             self.channel_name,
             content,
             mode="recording-replay",
+            transcript_complete=not self.review_only,
+            capture_integrity_failed=(
+                self.review_only or self.artifact.capture_integrity_failed
+            ),
+            status=(
+                "review_only_partial"
+                if self.review_only
+                else "final_reprocess_completed"
+            ),
         )
 
     def delete_audio(self) -> int:
@@ -470,16 +742,27 @@ class RecordingReplayManager:
         artifact: RecordingArtifact,
         target_channel,
         retranscribe: bool,
+        review_only: bool = False,
+        review_actor=None,
     ) -> ReplayJob:
         if self._closing:
             raise RuntimeError("recording replay manager is shutting down")
         if self.active():
             raise RuntimeError("another recording replay is already running")
-        if retranscribe and artifact.raw_bytes <= 0:
-            raise ValueError("raw audio is no longer available")
-        if not retranscribe and artifact.transcript_path is None:
-            raise ValueError(
-                "saved transcript is unavailable; retry explicitly with retranscribe=true"
+        if review_only:
+            if not retranscribe:
+                raise ValueError("review_only requires retranscribe=true")
+            validate_recording_review_context(
+                artifact,
+                bot=self.bot,
+                target_channel=target_channel,
+                review_actor=review_actor,
+            )
+        else:
+            validate_recording_artifact_for_replay(
+                artifact,
+                retranscribe=retranscribe,
+                config=getattr(self.bot, "config", None),
             )
         now = datetime.now(timezone.utc).isoformat()
         job = ReplayJob(
@@ -489,12 +772,21 @@ class RecordingReplayManager:
             target_guild_id=target_channel.guild.id,
             target_channel_id=target_channel.id,
             retranscribe=retranscribe,
+            review_only=review_only,
             created_at=now,
             updated_at=now,
         )
         self.jobs[job.id] = job
         self._persist_job(job)
-        task = asyncio.create_task(self._run(job, artifact, target_channel), name=job.id)
+        task = asyncio.create_task(
+            self._run(
+                job,
+                artifact,
+                target_channel,
+                review_actor=review_actor,
+            ),
+            name=job.id,
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job
@@ -505,11 +797,26 @@ class RecordingReplayManager:
         tasks = [task for task in self._tasks if not task.done()]
         if not tasks:
             return
-        _done, pending = await asyncio.wait(tasks, timeout=timeout)
+        deadline = time.monotonic() + max(0.0, timeout)
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
         for task in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            # A Drive executor call cannot be force-cancelled. Give its
+            # checkpoint handler only the remaining caller budget, then let
+            # process shutdown end it rather than exceeding Docker's grace.
+            _done_after_cancel, stubborn = await asyncio.wait(
+                pending,
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            if stubborn:
+                log.error(
+                    "Recording replay shutdown deadline reached; abandoning %s task(s)",
+                    len(stubborn),
+                )
 
     def get(self, job_id: str) -> ReplayJob | None:
         in_memory = self.jobs.get(job_id)
@@ -535,31 +842,59 @@ class RecordingReplayManager:
     @staticmethod
     def _persist_job(job: ReplayJob) -> None:
         work_dir = replay_root() / job.id
-        work_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_directory(work_dir)
         metadata = work_dir / "job.json"
-        temporary = metadata.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(job.storage_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(temporary, metadata)
+        _atomic_json_write(metadata, job.storage_dict())
 
     def _stage(self, job: ReplayJob, stage: str) -> None:
         job.stage = stage
         job.updated_at = datetime.now(timezone.utc).isoformat()
         self._persist_job(job)
 
-    async def _run(self, job: ReplayJob, artifact: RecordingArtifact, target_channel) -> None:
+    async def _run(
+        self,
+        job: ReplayJob,
+        artifact: RecordingArtifact,
+        target_channel,
+        *,
+        review_actor=None,
+    ) -> None:
         job.status = "running"
         self._stage(job, "preparing")
         work_dir = replay_root() / job.id
-        work_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_directory(work_dir)
         replay_sink: ReadOnlyReplaySink | None = None
         try:
+            # Revalidate after task scheduling and before the first external
+            # call.  This closes the inventory/start race if retained files or
+            # policy are changed between command handling and execution.
+            if job.review_only:
+                validate_recording_review_context(
+                    artifact,
+                    bot=self.bot,
+                    target_channel=target_channel,
+                    review_actor=review_actor,
+                )
+            else:
+                validate_recording_artifact_for_replay(
+                    artifact,
+                    retranscribe=job.retranscribe,
+                    config=getattr(self.bot, "config", None),
+                )
+            if job.review_only:
+                heading = "⚠️ 中断録音の確認用文字起こしを開始します。"
+                method = "不完全PCMの確認専用"
+            else:
+                heading = "🧪 長時間録音のテスト議事録生成を開始します。"
+                method = (
+                    "PCMから再文字起こし"
+                    if job.retranscribe
+                    else "保存済み文字起こしを再利用"
+                )
             await target_channel.send(
-                f"🧪 長時間録音のテスト議事録生成を開始します。\n"
+                f"{heading}\n"
                 f"ジョブ: `{job.id}` / 元セッション: `{artifact.session_id}`\n"
-                f"方式: `{'PCMから再文字起こし' if job.retranscribe else '保存済み文字起こしを再利用'}`",
+                f"方式: `{method}`",
                 silent=True,
             )
             transcript = ""
@@ -573,6 +908,9 @@ class RecordingReplayManager:
                     f"テスト再生 - {artifact.channel_name}",
                     transcript,
                     mode="recording-replay",
+                    transcript_complete=True,
+                    capture_integrity_failed=False,
+                    status="transcript_reused",
                 )
                 job.transcript_path = str(archived or "")
             else:
@@ -590,13 +928,20 @@ class RecordingReplayManager:
                     VoiceMode.LISTEN,
                 )
                 replay_sink = ReadOnlyReplaySink(
-                    artifact, job.target_guild_id, job.id
+                    artifact,
+                    job.target_guild_id,
+                    job.id,
+                    review_only=job.review_only,
                 )
                 session.recording_sink = replay_sink
                 session.started_at = meeting_datetime(artifact.started_at or None)
-                await session._drain_recording()
+                completed = await session._reprocess_complete_recording()
                 await session._persist_transcript()
-                if session._transcription_failed or not session.transcript_text.strip():
+                if (
+                    not completed
+                    or session._transcription_failed
+                    or not session.transcript_text.strip()
+                ):
                     raise RuntimeError("replay transcription did not complete")
                 transcript = session.transcript_text
                 job.transcript_path = str(session.transcript_path or "")
@@ -605,7 +950,61 @@ class RecordingReplayManager:
                 raise RuntimeError("recording transcript is empty")
             (work_dir / "transcript.md").write_text(transcript, encoding="utf-8")
 
+            if job.review_only:
+                validate_recording_review_context(
+                    artifact,
+                    bot=self.bot,
+                    target_channel=target_channel,
+                    review_actor=review_actor,
+                )
+                embed = discord.Embed(
+                    title=f"⚠️ 確認専用・不完全な文字起こし - {artifact.channel_name}",
+                    description=(
+                        "録音中断前に保存できた範囲だけを文字起こししたものです。"
+                        "完全な会議記録ではなく、Drive・Knowledge・検索には公開していません。"
+                    ),
+                    color=discord.Color.orange(),
+                )
+                embed.add_field(
+                    name="元セッション",
+                    value=f"`{artifact.session_id}`",
+                    inline=False,
+                )
+                await target_channel.send(
+                    embed=embed,
+                    file=discord.File(
+                        io.BytesIO(transcript.encode()),
+                        filename=f"{job.id}-INCOMPLETE-transcript.md",
+                    ),
+                    silent=True,
+                )
+                job.status = "review_completed"
+                self._stage(job, "review_completed")
+                self._mark_checkpoint(
+                    replay_sink,
+                    REPLAY_TERMINAL_CHECKPOINTS["review_completed"],
+                    job_status=job.status,
+                    job_stage=job.stage,
+                    review_only=True,
+                    transcript_complete=False,
+                    capture_integrity_failed=True,
+                )
+                return
+
             self._stage(job, "generating_minutes")
+            validate_recording_artifact_for_replay(
+                artifact,
+                retranscribe=job.retranscribe,
+                config=getattr(self.bot, "config", None),
+            )
+            archived_transcript = Path(job.transcript_path) if job.transcript_path else None
+            if archived_transcript is None:
+                raise UnsafeRecordingPublication("replay transcript was not archived")
+            require_complete_transcript_provenance(
+                archived_transcript,
+                expected_guild_id=job.target_guild_id,
+                expected_session_id=job.id,
+            )
             minutes = await generate_minutes(
                 new_genai_client(os.environ.get("GOOGLE_API_KEY", "")),
                 transcript,
@@ -622,6 +1021,16 @@ class RecordingReplayManager:
             job.minutes_path = str(minutes_path)
 
             self._stage(job, "publishing")
+            validate_recording_artifact_for_replay(
+                artifact,
+                retranscribe=job.retranscribe,
+                config=getattr(self.bot, "config", None),
+            )
+            require_complete_transcript_provenance(
+                archived_transcript,
+                expected_guild_id=job.target_guild_id,
+                expected_session_id=job.id,
+            )
             from bot.commands.voice_cmd import _summarize_minutes
             from bot.gdrive import upload_minutes, upload_transcript
 
@@ -768,20 +1177,22 @@ class RecordingReplayManager:
                 failed_stage=failed_stage,
                 error=job.error_type,
             )
-            self.bot.operations.record_event(
-                "recording_replay", "minutes", "failed",
-                guild_id=job.target_guild_id, item_key=job.id,
-                details={"error_type": type(exc).__name__},
-            )
-            log.exception("Recording replay failed job=%s", job.id)
-            try:
-                await target_channel.send(
-                    f"❌ テスト議事録の生成に失敗しました。\n"
-                    f"ジョブ: `{job.id}` / 失敗段階: `{failed_stage}` / 種別: `{type(exc).__name__}`",
-                    silent=True,
+            if not isinstance(exc, UnsafeRecordingPublication):
+                self.bot.operations.record_event(
+                    "recording_replay", "minutes", "failed",
+                    guild_id=job.target_guild_id, item_key=job.id,
+                    details={"error_type": type(exc).__name__},
                 )
-            except Exception:
-                log.exception("Could not notify replay failure job=%s", job.id)
+            log.exception("Recording replay failed job=%s", job.id)
+            if not isinstance(exc, UnsafeRecordingPublication):
+                try:
+                    await target_channel.send(
+                        f"❌ テスト議事録の生成に失敗しました。\n"
+                        f"ジョブ: `{job.id}` / 失敗段階: `{failed_stage}` / 種別: `{type(exc).__name__}`",
+                        silent=True,
+                    )
+                except Exception:
+                    log.exception("Could not notify replay failure job=%s", job.id)
         finally:
             job.updated_at = datetime.now(timezone.utc).isoformat()
             self._persist_job(job)

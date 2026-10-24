@@ -339,7 +339,10 @@ def build_meeting_bundle(
         "summary": {"path": "summary.md", "humanReviewed": False} if summary else None,
         "minutes": ({"path": "minutes.md", "humanReviewed": False} if include_minutes and minutes else None),
         "materials": material_entries,
-        "rawAudio": {"published": False, "retention": "deleted-after-durable-transcript"},
+        "rawAudio": {
+            "published": False,
+            "retention": "retained-until-explicit-deletion",
+        },
     }
     files[f"{root}/manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     return root, files, manifest

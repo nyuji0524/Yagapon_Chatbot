@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,17 +41,144 @@ def test_remote_deploy_keeps_rollback_image_until_health_succeeds():
     pull = deploy.index('docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon')
     preflight = deploy.index("python -m bot.preflight")
     restart = deploy.rindex("systemctl restart yagapon")
-    health_check = deploy.index('"http://127.0.0.1:${host_port}/health"')
+    health_check = deploy.index('"http://127.0.0.1:${host_port}/ready"')
     prune = deploy.index("docker system prune --all --force")
 
     assert pull < preflight < restart < health_check < prune
     assert "Warning: deployment is healthy but Docker cleanup failed" in deploy
 
 
+def test_first_permanent_retention_deploy_snapshots_recordings_before_restart():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    snapshot = 'cp -al -- "$data_path/recordings/." "$recording_snapshot_dir/"'
+    restart = deploy.rindex("systemctl restart yagapon")
+    marker_write = deploy.index('> "$recording_snapshot_marker"')
+    health_check = deploy.index('"http://127.0.0.1:${host_port}/ready"')
+
+    assert snapshot in deploy
+    assert deploy.index(snapshot) < restart < health_check < marker_write
+    assert 'recording_snapshot_root="$data_path/recording-snapshots"' in deploy
+    assert 'install -d -o root -g root -m 0700 "$recording_snapshot_root"' in deploy
+
+
+def test_first_retention_rollback_snapshots_failed_generation_before_old_restart():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+    rollback = deploy[
+        deploy.index("rollback() {") : deploy.index("cleanup_staging() {")
+    ]
+
+    stopped = rollback.index("systemctl stop yagapon")
+    down = rollback.index(
+        'docker compose --project-directory "$app_dir" --env-file "$deploy_env" down'
+    )
+    snapshot = rollback.index('cp -al -- "$data_path/recordings/."')
+    snapshot_destination = rollback.index(
+        '"$recording_failed_generation_snapshot_dir/"',
+        snapshot,
+    )
+    snapshot_fsync = rollback.index(
+        'sync -f "$recording_failed_generation_snapshot_dir"'
+    )
+    restore = rollback.index(
+        'cp -a "$backup_dir/compose.yaml" "$compose_target"'
+    )
+    old_restart = rollback.index("systemctl restart yagapon")
+
+    assert (
+        stopped
+        < down
+        < snapshot
+        < snapshot_destination
+        < snapshot_fsync
+        < restore
+        < old_restart
+    )
+    assert (
+        'install -d -o root -g root -m 0700 \\\n'
+        '      "$recording_failed_generation_snapshot_dir"'
+    ) in rollback
+    assert '&& ! -f "$recording_snapshot_marker"' in rollback
+    assert "old generation remains stopped" in rollback
+
+
+def test_yagapon_overrides_legacy_runtime_recording_cap_without_mutating_env():
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    service_environment = compose["services"]["yagapon"]["environment"]
+    legacy_runtime_environment = {"YAGAPON_MAX_RECORDING_BYTES": "4294967296"}
+
+    # Compose service.environment has higher precedence than env_file.
+    effective_environment = {
+        **legacy_runtime_environment,
+        **service_environment,
+    }
+
+    assert service_environment["YAGAPON_MAX_RECORDING_BYTES"] == "0"
+    assert effective_environment["YAGAPON_MAX_RECORDING_BYTES"] == "0"
+    # Keeping the shared file unchanged is what makes rollback safe: restoring
+    # the old Compose file restores its former 4 GiB behavior instead of making
+    # old code interpret zero as an immediate recording limit.
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+    assert '> "$runtime_env"' not in deploy
+    assert 'mv -f -- "$runtime_env"' not in deploy
+
+
+def test_remote_deploy_requires_discord_readiness_not_only_process_liveness():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    assert '"http://127.0.0.1:${host_port}/ready"' in deploy
+    assert '"http://127.0.0.1:${host_port}/health"' not in deploy
+
+
+def test_non_voice_workers_cannot_see_retained_recording_mounts():
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    private_paths = {
+        "/data/recordings",
+        "/data/transcripts",
+        "/data/replays",
+        "/data/voiceprints",
+    }
+
+    assert not private_paths.intersection(services["yagapon"].get("tmpfs", ()))
+    for service_name in (
+        "knowledge-sync",
+        "source-index-watch",
+        "knowledge-curation-watch",
+        "knowledge-sync-watch",
+    ):
+        masked = {
+            entry.split(":", 1)[0]
+            for entry in services[service_name].get("tmpfs", ())
+        }
+        assert masked == private_paths
+        assert services[service_name]["environment"]["DISCORD_TOKEN"] == ""
+        assert services[service_name]["environment"]["YAGAPON_API_TOKEN"] == ""
+
+
+def test_remote_preflight_cannot_read_retained_voice_artifacts():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+    preflight = deploy[deploy.index("docker run --rm") : deploy.index("python -m bot.preflight")]
+
+    for path in (
+        "/data/recordings",
+        "/data/transcripts",
+        "/data/replays",
+        "/data/voiceprints",
+    ):
+        assert f"--tmpfs {path}:rw,noexec,nosuid,nodev,mode=000,size=4096" in preflight
+
+
 def _direct_source_credential_scanner() -> str:
     deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
     marker = 'if ! python3 - "$runtime_env" <<\'PY\'\n'
     return deploy.split(marker, 1)[1].split("\nPY\nthen", 1)[0]
+
+
+def _legacy_recording_cap_scanner() -> str:
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+    marker = 'if ! python3 - "$runtime_env" <<\'RECORDING_CAP_PY\'\n'
+    return deploy.split(marker, 1)[1].split("\nRECORDING_CAP_PY\nthen", 1)[0]
 
 
 @pytest.mark.parametrize(
@@ -105,6 +233,55 @@ def test_remote_deploy_rejects_direct_github_credentials_without_printing_values
     assert result.returncode != 0
     assert secret not in result.stdout
     assert secret not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "contents",
+    (
+        "DISCORD_TOKEN=secret\n",
+        "YAGAPON_MAX_RECORDING_BYTES=4294967296\n",
+        'export YAGAPON_MAX_RECORDING_BYTES="8589934592" # rollback-safe\n',
+    ),
+)
+def test_first_retention_deploy_keeps_legacy_runtime_cap_rollback_safe(
+    tmp_path,
+    contents,
+):
+    runtime_env = tmp_path / "yagapon.env"
+    runtime_env.write_text(contents, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _legacy_recording_cap_scanner(), str(runtime_env)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("0", "1", "not-an-integer", '""'),
+)
+def test_first_retention_deploy_rejects_runtime_cap_unsafe_for_old_image(
+    tmp_path,
+    value,
+):
+    runtime_env = tmp_path / "yagapon.env"
+    runtime_env.write_text(
+        f"YAGAPON_MAX_RECORDING_BYTES={value}\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", _legacy_recording_cap_scanner(), str(runtime_env)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
 
 
 def test_remote_deploy_atomically_installs_and_rolls_back_dedicated_knowledge_key():

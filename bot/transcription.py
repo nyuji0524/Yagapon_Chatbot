@@ -147,18 +147,14 @@ async def transcribe_audio(
     voiceprint_paths: dict[str, str] | None = None,
 ) -> str:
     """音声を一時アップロードし、専用STTまたはFlashで文字起こしする。"""
-    loop = asyncio.get_running_loop()
     uploaded = None
     uploaded_voiceprints = []
     reference_voiceprints = []
     try:
         async def upload():
-            return await loop.run_in_executor(
-                None,
-                lambda: client.files.upload(
-                    file=io.BytesIO(audio_bytes),
-                    config={"mime_type": mime_type, "display_name": display_name},
-                ),
+            return await client.aio.files.upload(
+                file=io.BytesIO(audio_bytes),
+                config={"mime_type": mime_type, "display_name": display_name},
             )
 
         uploaded = await retry_rate_limit(
@@ -260,15 +256,12 @@ async def transcribe_audio(
             async def upload_voiceprint(index: int, name: str, path: Path):
                 async with upload_slots:
                     sample = await retry_rate_limit(
-                        lambda: loop.run_in_executor(
-                            None,
-                            lambda: client.files.upload(
-                                file=str(path),
-                                config={
-                                    "mime_type": "audio/wav",
-                                    "display_name": f"voiceprint-{index}",
-                                },
-                            ),
+                        lambda: client.aio.files.upload(
+                            file=str(path),
+                            config={
+                                "mime_type": "audio/wav",
+                                "display_name": f"voiceprint-{index}",
+                            },
                         ),
                         operation_name="voiceprint_upload",
                     )
@@ -277,10 +270,8 @@ async def transcribe_audio(
                     uploaded_voiceprints.append(sample)
                     return index, name, sample
 
-            # Wait for every upload before propagating a sibling failure.  A
-            # regular ``gather`` fails fast, while the remaining executor jobs
-            # keep running and can create Files API resources after our outer
-            # cleanup has already taken its snapshot.
+            # Wait for every upload before propagating a sibling failure so
+            # every successfully created remote file is included in cleanup.
             upload_batch = asyncio.gather(
                 *(
                     upload_voiceprint(index, name, path)
@@ -289,9 +280,8 @@ async def transcribe_audio(
                 return_exceptions=True,
             )
             try:
-                # Do not cancel in-flight blocking uploads on shutdown: Python
-                # cannot stop their executor threads.  Let them finish so every
-                # successfully created remote file is registered for cleanup.
+                # Let the async upload batch settle so every successfully
+                # created remote file is registered for cleanup.
                 results = await asyncio.shield(upload_batch)
             except asyncio.CancelledError:
                 await upload_batch
@@ -362,9 +352,6 @@ async def transcribe_audio(
             if temporary is None:
                 continue
             try:
-                await loop.run_in_executor(
-                    None,
-                    lambda item=temporary: client.files.delete(name=item.name),
-                )
+                await client.aio.files.delete(name=temporary.name)
             except Exception as exc:
                 log.warning("Failed to delete uploaded audio %s: %s", temporary.name, exc)
