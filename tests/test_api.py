@@ -100,6 +100,7 @@ def make_client():
     )
     bot = SimpleNamespace(
         is_closed=lambda: False,
+        is_ready=lambda: True,
         user="YagaPon",
         guilds=[guild],
         config=FakeConfig(),
@@ -131,6 +132,50 @@ def test_health_is_public(monkeypatch):
     client, _ = make_client()
 
     assert client.get("/health").status_code == 200
+
+
+def test_ready_is_public_when_discord_bot_is_connected(monkeypatch):
+    monkeypatch.delenv("YAGAPON_API_TOKEN", raising=False)
+    client, _ = make_client()
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["bot_connected"] is True
+
+
+@pytest.mark.parametrize(
+    ("closed", "connected"),
+    [
+        (False, False),
+        (True, True),
+        (True, False),
+    ],
+)
+def test_ready_fails_closed_until_discord_bot_is_usable(closed, connected):
+    client, bot = make_client()
+    bot.is_closed = lambda: closed
+    bot.is_ready = lambda: connected
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Discord bot is not ready"
+
+
+def test_ready_fails_closed_when_discord_state_cannot_be_read():
+    client, bot = make_client()
+
+    def failed_probe():
+        raise RuntimeError("Discord state unavailable")
+
+    bot.is_ready = failed_probe
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Discord readiness is unavailable"
 
 
 def test_status_fails_closed_without_configured_token(monkeypatch):
@@ -341,6 +386,41 @@ async def test_api_shutdown_cancels_tasks_releases_guards_and_marks_jobs():
     bot.corpus.finish_backfill.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_api_shutdown_abandons_cancellation_resistant_backfill_at_deadline():
+    _, bot = make_client()
+    app = create_app(bot)
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stubborn_backfill():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+        # Ignore every subsequent cancellation too.  A real provider call can
+        # remain blocked after its asyncio waiter has been cancelled, so the
+        # shutdown path must not depend on another cancel making progress.
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+
+    task = asyncio.create_task(stubborn_backfill(), name="stubborn-api-backfill")
+    app.state.backfill_tasks.add(task)
+    await asyncio.sleep(0)
+    started = time.monotonic()
+
+    await shutdown_backfill_tasks(app, timeout_seconds=0.05)
+
+    assert time.monotonic() - started < 0.5
+    assert cancellation_seen.is_set()
+    assert not task.done()
+    release.set()
+    await task
+
+
 def test_backfill_rejects_new_work_after_shutdown_begins(monkeypatch):
     monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
     client, bot = make_client()
@@ -474,37 +554,58 @@ def test_recording_replay_api_is_authenticated_and_targets_named_guild(monkeypat
     )
 
 
-def test_recording_replay_api_can_select_longest_transcript(monkeypatch, tmp_path):
+def test_recording_replay_api_does_not_expose_incomplete_review_override(monkeypatch):
+    monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
+    client, bot = make_client()
+
+    response = client.post(
+        "/admin/recordings/replay",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "session_id": "interrupted-session",
+            "target_guild_name": "毛蟹のサーバー",
+            "retranscribe": True,
+            "review_only": True,
+        },
+    )
+
+    assert response.status_code == 422
+    bot.recording_replays.start.assert_not_called()
+
+
+def test_recording_replay_api_selects_longest_safe_transcript(monkeypatch, tmp_path):
     monkeypatch.setenv("YAGAPON_API_TOKEN", "secret")
     artifact = RecordingArtifact(
-        session_id="longest-session",
+        session_id="safe-session",
         source_guild_id=2,
         channel_name="長時間会議",
         mode="listen",
-        status="transcript_archived",
+        status="delivered_recording_retained",
         started_at="2026-10-01",
-        raw_bytes=0,
-        estimated_seconds=0,
+        raw_bytes=5_000_000,
+        estimated_seconds=30,
         transcript_path=tmp_path / "transcript.md",
         transcript_bytes=100_000,
         session_dir=tmp_path / "source",
     )
-    short_pcm = RecordingArtifact(
-        session_id="short-pcm-session",
+    unsafe_longer = RecordingArtifact(
+        session_id="unsafe-longer-session",
         source_guild_id=2,
-        channel_name="短い会議",
+        channel_name="不完全な長時間会議",
         mode="listen",
         status="transcription_failed",
         started_at="2026-10-02",
         raw_bytes=10_000_000,
         estimated_seconds=60,
         transcript_path=tmp_path / "short.md",
-        transcript_bytes=1_000,
+        transcript_bytes=200_000,
         session_dir=tmp_path / "short-source",
     )
     monkeypatch.setattr(
-        "api.recordings.list_recording_artifacts", lambda: [short_pcm, artifact]
+        "api.recordings.list_recording_artifacts", lambda: [unsafe_longer, artifact]
     )
+    safety = Mock(side_effect=lambda item, **_kwargs: item is artifact)
+    monkeypatch.setattr("api.recordings.recording_artifact_is_replayable", safety)
     client, bot = make_client()
 
     response = client.post(
@@ -519,3 +620,4 @@ def test_recording_replay_api_can_select_longest_transcript(monkeypatch, tmp_pat
         target_channel=bot.guilds[0].system_channel,
         retranscribe=False,
     )
+    assert safety.call_count == 2

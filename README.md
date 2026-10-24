@@ -18,7 +18,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - **3つのモード**: listen（聞き専）/ meeting（参加者）/ chat（おしゃべり）
 - **音声録音 & 文字起こし**: pycord + Gemini Audio APIで自動文字起こし
 - **Discord確定話者ラベル**: ユーザー別受信トラックをサーバー表示名へ確実に紐付け
-- **終了後の全体再処理**: `/leave`時に録音先頭から再文字起こしし、成功時だけ途中結果を置換
+- **録音優先の長時間処理**: listenは会議中に重いSTTを走らせず、`/leave`後に保存PCM全体を再処理
 - **リアルタイム応答**: meeting/chatモードでは会話に参加（15秒間隔）
 - **TTS読み上げ**: edge-tts（ja-JP-NanamiNeural）でVCに音声出力
 - **議事録自動生成**: `/leave`時にGeminiで構造化議事録を作成 → Google Docsに保存
@@ -87,6 +87,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/backfill [mode] [days] [channel]` | 差分更新（推奨）または指定期間を安全に再構築 |
 | `/ignore` | 現在のチャンネルを学習対象から除外 |
 | `/join <mode> [document_url]` | VCに参加。`drive_set`配下のGoogle Docsを会議資料として任意で紐付け |
+| `/recording_status` | 録音経過時間・受信音声量・トラック数と欠落警告を確認 |
 | `/leave` | VCから退出（議事録生成） |
 | `/recording list` | 再生可能な保存録音・文字起こしを確認（Bot所有者のみ） |
 | `/recording replay <session_id>` | `/leave` 相当の議事録生成を元データ非破壊で再実行 |
@@ -233,9 +234,13 @@ YAGAPON_SCHEDULED_BACKFILL_STATE=/data/scheduled-backfill-state.json
 YAGAPON_SCHEDULED_BACKFILL_INTERVAL_SECONDS=21600
 YAGAPON_SCHEDULED_BACKFILL_RETRY_SECONDS=900
 YAGAPON_SCHEDULED_BACKFILL_INITIAL_DELAY_SECONDS=300
-YAGAPON_MAX_RECORDING_BYTES=4294967296
+YAGAPON_MAX_RECORDING_BYTES=0
 YAGAPON_RECORDING_FREE_SPACE_RESERVE_BYTES=2147483648
-YAGAPON_RECORDING_RETENTION_DAYS=7
+YAGAPON_MIN_RECORDING_HEADROOM_BYTES=67108864
+YAGAPON_CAPTURE_HEALTH_MAX_SILENCE_SECONDS=300
+YAGAPON_CAPTURE_ALERT_COOLDOWN_SECONDS=300
+YAGAPON_CAPTURE_DURABILITY_INTERVAL_SECONDS=10
+YAGAPON_STOP_RECORDING_TIMEOUT_SECONDS=10
 YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
 YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS=your_discord_guild_id
 YAGAPON_MEETING_EXPORT_CHANNEL_IDS=
@@ -315,9 +320,15 @@ mkdir -p data
 docker compose up --build
 ```
 
-コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMを逐次保存し、メモリ量を録音時間に依存させない。逐語文字起こしは議事録とは別に`data/transcripts/`とGoogle Docsへ保存する。正常配信後は生PCMを即時削除し、文字起こし失敗や容量上限に達した録音だけを復旧用に保持する。配信済み録音のメタデータは既定7日で削除するが、独立保存した文字起こしは削除しない。
+コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMと受信順timelineを非バッファ書込みし、既定10秒ごとに全トラックを`fsync`するため、メモリ量を録音時間に依存させずプロセス異常終了時の末尾損失も抑える。逐語文字起こしは議事録とは別に`data/transcripts/`とGoogle Docsへ保存し、同じ場所の`*.provenance.json`に最終文字起こしの完全性と録音経路の健全性を保存する。正常配信・復旧・再処理の成否を問わず、PCM、timeline、セッションmetadataは自動削除せず、明示削除まで再処理可能な状態で保持する。起動時のretention cleanupも録音ディレクトリを変更しない。ディスク空き容量の監視と、確認後の明示的な削除は運用者の責任で行う。
 
-`/recording replay`は、保存済み文字起こし、または障害復旧用に残っているPCMを使い、元の録音やオフセットを更新せずに長時間議事録を再生成する。結果は実行先Discordチャンネルと、設定済みの場合はGoogle Driveへ出力する。テスト出力はKnowledgeに自動投稿しない。
+録音中に既定5分間PCMが増えない場合は、実際に全員が無言のケースも含む運用警告を元VCの内蔵テキストchatへ一度だけ通常通知する。PCMの増加を確認すると静かな復旧通知を一度だけ送る。警告後も録音は継続するが、終了まで新しいPCMを一度も確認できなければ完全性を証明できないため自動議事録公開を止め、保存済みPCMからの手動再処理対象にする。Discord切断・recorder停止、容量上限、PCM/timeline/metadataの書込異常、fsync/cleanup異常は即座に完全性障害として警告し、不完全な自動公開を止める。通知はincident状態とcooldownで抑制し、メンションを許可しない。
+
+プロセスが録音中に強制終了した場合、次回起動時に未完了セッションを`capture_interrupted`へ隔離し、元PCM/timelineを変更せず元VCへ再処理案内を通知する。通常の自動復旧キューには流さないため、途中までの音声が完全な会議として公開されることはない。
+
+`/recording replay`は、保存済み文字起こし、または障害復旧用に残っているPCMを使い、元の録音やオフセットを更新せずに長時間議事録を再生成する。保存済み文字起こしの再利用は完全性provenanceが確認できる場合だけ許可し、不明・不完全ならPCMからの明示的な再文字起こしを要求する。結果は実行先Discordチャンネルと、設定済みの場合はGoogle Driveへ出力する。テスト出力はKnowledgeに自動投稿しない。
+
+`/leave`の最終文字起こしは既定10分を対話上限とする。上限に達しても録音を失敗扱いで削除せず、PCMと途中経過を保持して常駐の復旧ループへ引き継ぐ。プロセス停止時も全体60秒、音声保存40秒の単一deadline内で先に録音末尾をfsyncし、Dockerの90秒graceを超えて強制終了されないようにする。
 
 VC終了時には生文字起こしとAI要約を`data/knowledge-outbox/`へ必ず保存する。本番では
 `YAGAPON_KNOWLEDGE_GCS_BUCKET`へcreate-onlyで候補を送り、Knowledgeリポジトリ自身の

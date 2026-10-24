@@ -43,7 +43,14 @@ def register(bot):
         for item in artifacts[:15]:
             sources = []
             if item.raw_bytes:
-                sources.append(f"PCM {_duration(item.estimated_seconds)}")
+                pcm_label = f"PCM {_duration(item.estimated_seconds)}"
+                if (
+                    not item.raw_integrity_valid
+                    or not item.raw_manifest_verified
+                    or item.capture_integrity_failed
+                ):
+                    pcm_label += "（⚠️ 自動処理不可・要確認）"
+                sources.append(pcm_label)
             if item.transcript_bytes:
                 sources.append("文字起こし")
             candidate = (
@@ -55,7 +62,7 @@ def register(bot):
                 break
             lines.append(candidate)
         await ctx.followup.send(
-            "**再生可能な録音（長い順）**\n" + "\n".join(lines),
+            "**保存済み録音（長い順）**\n" + "\n".join(lines),
             ephemeral=True,
         )
 
@@ -68,10 +75,17 @@ def register(bot):
         type=bool,
         default=False,
     )
+    @discord.option(
+        "review_only",
+        description="中断録音を確認専用で文字起こし（外部保存・議事録生成なし）",
+        type=bool,
+        default=False,
+    )
     async def recording_replay(
         ctx: discord.ApplicationContext,
         session_id: str,
         retranscribe: bool = False,
+        review_only: bool = False,
     ):
         if not await _require_operator(ctx, bot):
             return
@@ -82,12 +96,20 @@ def register(bot):
                 artifact=artifact,
                 target_channel=ctx.channel,
                 retranscribe=retranscribe,
+                review_only=review_only,
+                review_actor=ctx.author if review_only else None,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             await ctx.followup.send(f"開始できません: {exc}", ephemeral=True)
             return
-        await ctx.followup.send(
-            f"テスト議事録ジョブ `{job.id}` を開始しました。"
-            "完了後にこのチャンネルへ議事録と生文字起こしを投稿します。",
-            ephemeral=True,
-        )
+        if review_only:
+            message = (
+                f"確認専用ジョブ `{job.id}` を開始しました。"
+                "完了後に不完全であることを明示した文字起こしだけを投稿します。"
+            )
+        else:
+            message = (
+                f"テスト議事録ジョブ `{job.id}` を開始しました。"
+                "完了後にこのチャンネルへ議事録と生文字起こしを投稿します。"
+            )
+        await ctx.followup.send(message, ephemeral=True)

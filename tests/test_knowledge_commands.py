@@ -795,6 +795,59 @@ def test_meeting_external_export_requires_same_audience_or_explicit_channel(monk
     assert evaluate_meeting_export(guild_id=1, channel=public).allowed is True
 
 
+@pytest.mark.parametrize(
+    ("deny_ids", "channel_name", "parent_name", "category_name"),
+    [
+        ("10", "会議", "", "会議"),
+        ("20", "会議", "役員", "会議"),
+        ("30", "会議", "役員", "会議"),
+        ("", "会議", "役員", "IT局員選考"),
+    ],
+)
+def test_meeting_export_protected_lineage_overrides_explicit_allowlist(
+    monkeypatch,
+    deny_ids,
+    channel_name,
+    parent_name,
+    category_name,
+):
+    monkeypatch.setenv("YAGAPON_MEETING_EXPORT_CHANNEL_IDS", "10,20,30")
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", deny_ids)
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", raising=False)
+    default_role = SimpleNamespace(id=1)
+    guild = SimpleNamespace(default_role=default_role)
+    category = SimpleNamespace(id=30, name=category_name)
+    parent = SimpleNamespace(
+        id=20,
+        name=parent_name,
+        category_id=30,
+        category=category,
+    )
+    channel = SimpleNamespace(
+        id=10,
+        name=channel_name,
+        guild=guild,
+        parent_id=20,
+        category_id=30,
+        parent=parent,
+        category=category,
+        permissions_for=lambda _role: SimpleNamespace(
+            view_channel=True,
+            read_message_history=True,
+        ),
+    )
+
+    decision = evaluate_meeting_export(
+        guild_id=1,
+        channel=channel,
+        parent=parent,
+        category=category,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "protected-channel"
+
+
 def test_automatic_promotion_requires_guildwide_audience_and_respects_deny(monkeypatch):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
     default_role = SimpleNamespace(id=1)

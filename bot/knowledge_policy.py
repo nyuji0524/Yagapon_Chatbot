@@ -94,6 +94,12 @@ def evaluate_meeting_export(
     if getattr(channel, "_knowledge_export_lineage_resolved", True) is False:
         return KnowledgeExportDecision(False, "channel-lineage-unresolved")
     parent = parent or getattr(channel, "parent", None)
+    # Protected sources are a hard privacy boundary, not an audience hint.
+    # Keep this ahead of both the operator allowlist and guild-wide visibility:
+    # neither is permission to copy selection/personnel material to Drive,
+    # Knowledge, or File Search.
+    if protected_channel(channel, parent=parent, category=category):
+        return KnowledgeExportDecision(False, "protected-channel")
     if callable(is_ignored):
         related_ids = {
             value

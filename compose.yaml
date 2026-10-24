@@ -28,6 +28,11 @@ services:
       YAGAPON_KNOWLEDGE_INTAKE_DISPATCH_ENABLED: ${YAGAPON_KNOWLEDGE_INTAKE_DISPATCH_ENABLED:-true}
       YAGAPON_KNOWLEDGE_INTAKE_WORKFLOW: ${YAGAPON_KNOWLEDGE_INTAKE_WORKFLOW:-yagapon-intake.yml}
       API_PORT: "8000"
+      # Service environment overrides the shared env_file.  Keep this literal
+      # so hosts carrying the former 4 GiB production value cannot truncate a
+      # long meeting; rollback restores the old Compose file and leaves the
+      # old generation's runtime environment untouched.
+      YAGAPON_MAX_RECORDING_BYTES: "0"
       YAGAPON_RAG_REQUIRE_ANSWER_STATUS: ${YAGAPON_RAG_REQUIRE_ANSWER_STATUS:-true}
       YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS: ${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}
       YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD: ${YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD:-0.8}
@@ -98,6 +103,11 @@ services:
     env_file:
       - ${YAGAPON_ENV_FILE:-.env}
     environment:
+      # Tool containers never need to impersonate the Discord bot or call the
+      # bot's operator API.  Override secrets inherited from the shared env
+      # file so a compromised sync process cannot request a recording replay.
+      DISCORD_TOKEN: ""
+      YAGAPON_API_TOKEN: ""
       YAGAPON_SOURCE_GITHUB_APP_ID: ""
       YAGAPON_SOURCE_GITHUB_APP_ID_FILE: ""
       YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID: ""
@@ -117,6 +127,14 @@ services:
       GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
+    # Hide retained voice/biometric artifacts even though this tool shares the
+    # state volume. All application containers use the same Unix UID, so file
+    # mode alone would not isolate the permanent raw recordings.
+    tmpfs:
+      - /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096
     command: ["python", "-m", "knowledge_sync"]
     healthcheck:
       disable: true
@@ -132,6 +150,8 @@ services:
     env_file:
       - ${YAGAPON_ENV_FILE:-.env}
     environment:
+      DISCORD_TOKEN: ""
+      YAGAPON_API_TOKEN: ""
       # Force read_secret() past direct env values to the worker-only PEM.
       YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY: ""
       YAGAPON_SOURCE_GITHUB_TOKEN: ""
@@ -175,6 +195,11 @@ services:
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
       - ${YAGAPON_SOURCE_GITHUB_APP_PRIVATE_KEY_HOST_FILE:-/dev/null}:/run/secrets/github-app-private-key.pem:ro
+    tmpfs:
+      - /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096
     command: ["python", "-m", "source_index", "--watch-interval", "900"]
     healthcheck:
       disable: true
@@ -190,6 +215,8 @@ services:
     env_file:
       - ${YAGAPON_ENV_FILE:-.env}
     environment:
+      DISCORD_TOKEN: ""
+      YAGAPON_API_TOKEN: ""
       YAGAPON_SOURCE_GITHUB_APP_ID: ""
       YAGAPON_SOURCE_GITHUB_APP_ID_FILE: ""
       YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID: ""
@@ -234,6 +261,11 @@ services:
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
       - ${YAGAPON_KNOWLEDGE_GITHUB_APP_PRIVATE_KEY_HOST_FILE:-/dev/null}:/run/secrets/knowledge-github-app-private-key.pem:ro
+    tmpfs:
+      - /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096
     command:
       - python
       - -m
@@ -252,6 +284,8 @@ services:
     env_file:
       - ${YAGAPON_ENV_FILE:-.env}
     environment:
+      DISCORD_TOKEN: ""
+      YAGAPON_API_TOKEN: ""
       YAGAPON_SOURCE_GITHUB_APP_ID: ""
       YAGAPON_SOURCE_GITHUB_APP_ID_FILE: ""
       YAGAPON_SOURCE_GITHUB_APP_INSTALLATION_ID: ""
@@ -271,6 +305,11 @@ services:
       GOOGLE_OAUTH_AUTHORIZED_USER_JSON: ${YAGAPON_GOOGLE_OAUTH_FILE:-}
     volumes:
       - ${YAGAPON_DATA_PATH:-./data}:/data
+    tmpfs:
+      - /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096
+      - /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096
     command: ["python", "-m", "knowledge_sync", "--watch-interval", "900"]
     healthcheck:
       disable: true

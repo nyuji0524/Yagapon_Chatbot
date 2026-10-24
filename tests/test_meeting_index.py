@@ -461,15 +461,29 @@ async def test_bot_meeting_index_raises_when_required_upload_fails(tmp_path):
         _upload_document=AsyncMock(return_value=None),
         _delete_documents=AsyncMock(return_value=0),
     )
+    channel = SimpleNamespace(
+        id=10,
+        name="会議",
+        parent_id=None,
+        category_id=None,
+        parent=None,
+        category=None,
+    )
+    guild = SimpleNamespace(
+        id=123,
+        get_channel_or_thread=lambda channel_id: channel if channel_id == 10 else None,
+    )
     bot = SimpleNamespace(
         corpus=corpus,
         config=SimpleNamespace(get_corpus=lambda _guild_id: "fileSearchStores/test"),
+        get_guild=lambda guild_id: guild if guild_id == 123 else None,
     )
 
     with pytest.raises(RuntimeError, match="transcript was not indexed"):
         await index_bot_meeting(
             bot,
             guild_id=123,
+            channel_id=10,
             session_id="failed-upload",
             channel_name="会議",
             started_at="2026-10-10T06:14:31Z",
@@ -483,6 +497,25 @@ async def test_bot_meeting_index_honors_ignore_for_channel_and_thread_parent(tmp
         rag_store=RagStore(tmp_path / "rag.sqlite3"),
         _upload_document=AsyncMock(),
     )
+    parent = SimpleNamespace(
+        id=50,
+        name="非公開",
+        category_id=None,
+        category=None,
+    )
+    channel = SimpleNamespace(
+        id=51,
+        name="非公開スレッド",
+        parent_id=50,
+        category_id=None,
+        parent=parent,
+        category=None,
+    )
+    channels = {50: parent, 51: channel}
+    guild = SimpleNamespace(
+        id=123,
+        get_channel_or_thread=lambda channel_id: channels.get(channel_id),
+    )
     bot = SimpleNamespace(
         corpus=corpus,
         config=SimpleNamespace(
@@ -490,6 +523,7 @@ async def test_bot_meeting_index_honors_ignore_for_channel_and_thread_parent(tmp
             is_ignored=lambda guild_id, channel_id: guild_id == 123
             and channel_id == 50,
         ),
+        get_guild=lambda guild_id: guild if guild_id == 123 else None,
     )
 
     result = await index_bot_meeting(
@@ -505,3 +539,138 @@ async def test_bot_meeting_index_honors_ignore_for_channel_and_thread_parent(tmp
 
     assert result.indexed is False
     corpus._upload_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deny_ids", "category_name"),
+    [
+        ("10", "会議"),
+        ("20", "会議"),
+        ("30", "会議"),
+        ("", "役員選考"),
+    ],
+)
+async def test_bot_meeting_index_never_uploads_protected_lineage(
+    monkeypatch,
+    deny_ids,
+    category_name,
+):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_IDS", deny_ids)
+    monkeypatch.delenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", raising=False)
+    category = SimpleNamespace(id=30, name=category_name)
+    parent = SimpleNamespace(
+        id=20,
+        name="役員",
+        category_id=30,
+        category=category,
+    )
+    channel = SimpleNamespace(
+        id=10,
+        name="会議",
+        parent_id=20,
+        category_id=30,
+        parent=parent,
+        category=category,
+    )
+    channels = {10: channel, 20: parent, 30: category}
+    guild = SimpleNamespace(
+        id=123,
+        get_channel_or_thread=lambda channel_id: channels.get(channel_id)
+    )
+    corpus = SimpleNamespace(_upload_document=AsyncMock())
+    bot = SimpleNamespace(
+        corpus=corpus,
+        config=SimpleNamespace(
+            get_corpus=lambda _guild_id: "fileSearchStores/test",
+            is_ignored=lambda *_args: False,
+        ),
+        get_guild=lambda guild_id: guild if guild_id == 123 else None,
+    )
+
+    result = await index_bot_meeting(
+        bot,
+        guild_id=123,
+        channel_id=10,
+        parent_channel_id=20,
+        category_id=30,
+        session_id="protected-session",
+        channel_name="会議",
+        category_name=category_name,
+        started_at="2026-10-10T06:14:31Z",
+        transcript="索引してはいけない内容",
+    )
+
+    assert result.indexed is False
+    corpus._upload_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_meeting_index_fails_closed_when_source_lineage_is_unresolved():
+    corpus = SimpleNamespace(_upload_document=AsyncMock())
+    bot = SimpleNamespace(
+        corpus=corpus,
+        config=SimpleNamespace(
+            get_corpus=lambda _guild_id: "fileSearchStores/test",
+            is_ignored=lambda *_args: False,
+        ),
+        get_guild=lambda _guild_id: None,
+    )
+
+    result = await index_bot_meeting(
+        bot,
+        guild_id=123,
+        channel_id=10,
+        session_id="unresolved-recovery",
+        channel_name="限定会議",
+        started_at="2026-10-10T06:14:31Z",
+        transcript="外部へ送ってはいけない内容",
+    )
+
+    assert result.indexed is False
+    corpus._upload_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_meeting_index_keeps_resolved_private_nonprotected_acl_indexing(
+    tmp_path,
+):
+    corpus = SimpleNamespace(
+        rag_store=RagStore(tmp_path / "rag.sqlite3"),
+        _upload_document=AsyncMock(return_value="documents/private-transcript"),
+        _delete_documents=AsyncMock(return_value=0),
+    )
+    channel = SimpleNamespace(
+        id=10,
+        name="局内会議",
+        parent_id=None,
+        category_id=None,
+        parent=None,
+        category=None,
+        is_private=lambda: True,
+    )
+    guild = SimpleNamespace(
+        id=123,
+        get_channel_or_thread=lambda channel_id: channel if channel_id == 10 else None,
+    )
+    bot = SimpleNamespace(
+        corpus=corpus,
+        config=SimpleNamespace(
+            get_corpus=lambda _guild_id: "fileSearchStores/test",
+            is_ignored=lambda *_args: False,
+        ),
+        get_guild=lambda guild_id: guild if guild_id == 123 else None,
+    )
+
+    result = await index_bot_meeting(
+        bot,
+        guild_id=123,
+        channel_id=10,
+        session_id="resolved-private",
+        channel_name="局内会議",
+        started_at="2026-10-10T06:14:31Z",
+        transcript="ACL付きで索引する内容",
+    )
+
+    assert result.transcript_document == "documents/private-transcript"
+    corpus._upload_document.assert_awaited_once()

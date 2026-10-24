@@ -5,7 +5,7 @@
     "festival": null,
     "status": "current",
     "source_url": "https://github.com/nyuji0524/Yagapon_Chatbot#google-drive%E9%80%A3%E6%90%BA",
-    "body": "おしゃべりやがぽんの議事録と生文字起こしの保存先。/leaveで生成した議事録は、サーバーに設定されたGoogle Drive保存先フォルダの直下へGoogleドキュメントとして保存する。生文字起こしは、その保存先フォルダの直下に作る「文字起こし」サブフォルダへ、議事録とは別のGoogleドキュメントとして保存する。ローカルでは生文字起こしを /data/transcripts に永続保存する。正常処理後の生録音PCMは削除する。"
+    "body": "おしゃべりやがぽんの議事録と生文字起こしの保存先。/leaveで生成した議事録は、サーバーに設定されたGoogle Drive保存先フォルダの直下へGoogleドキュメントとして保存する。生文字起こしは、その保存先フォルダの直下に作る「文字起こし」サブフォルダへ、議事録とは別のGoogleドキュメントとして保存する。ローカルでは生文字起こしを /data/transcripts に永続保存する。正常処理後も生録音PCM、受信timeline、セッションmetadataは再処理用に保持し、明示的に削除されるまで自動削除しない。"
   },
   {
     "document_key": "builtin:27th-standby-pass-access",

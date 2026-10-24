@@ -44,6 +44,10 @@ def test_meeting_bundle_requires_transcript_and_keeps_minutes_optional():
     assert "[Speaker 1]: 提案します" in files[f"{root}/transcript.md"]
     assert manifest["festival"] == 28
     assert manifest["rawAudio"]["published"] is False
+    assert (
+        manifest["rawAudio"]["retention"]
+        == "retained-until-explicit-deletion"
+    )
 
 
 def test_meeting_bundle_preserves_origin_channel_visibility():

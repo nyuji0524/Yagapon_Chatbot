@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -400,6 +401,22 @@ async def test_shutdown_flushes_with_buffer_store(corpus_manager):
 
     assert corpus_manager._upload_document.await_args.args[0] == "fileSearchStores/test"
     assert corpus_manager._buffers == {}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_a_provider_upload_at_its_deadline(corpus_manager):
+    add_message(corpus_manager, content="shutdown deadline")
+
+    async def upload_forever(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    corpus_manager._upload_document = upload_forever
+    started = time.monotonic()
+
+    await corpus_manager.shutdown(timeout_seconds=0.05)
+
+    assert time.monotonic() - started < 0.5
+    assert corpus_manager._buffers[(1, 2)].messages
 
 
 def fake_message(message_id: int, minute: int = 0, *, content: str = "決定事項です"):
@@ -4016,6 +4033,23 @@ def test_recovered_recording_claims_reject_opposite_retention_polarity(
     ) is False
 
 
+def test_recovered_recording_claims_follow_retained_until_explicit_delete_contract(
+    corpus_manager,
+):
+    evidence = [
+        "正常処理後も生録音PCMは保持し、明示的に削除されるまで自動削除しない。"
+    ]
+
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは保持され、明示削除まで自動削除されないぽん。",
+        evidence,
+    ) is True
+    assert corpus_manager._recovered_claims_supported(
+        "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+        evidence,
+    ) is False
+
+
 def test_recovered_recording_claims_keep_anaphoric_polarity_on_the_pcm_subject(
     corpus_manager,
 ):
@@ -4249,7 +4283,7 @@ def test_recovered_claim_paraphrases_keep_negation_and_role_values_fail_closed(
     [
         (
             "正常に処理が終わった録音PCMは残りますか",
-            "正常に処理が終わった録音PCMは削除され、残らないぽん。",
+            "正常に処理が終わった録音PCMは保持され、明示削除まで自動削除されないぽん。",
             "builtin:yagapon-drive-storage",
         ),
         (

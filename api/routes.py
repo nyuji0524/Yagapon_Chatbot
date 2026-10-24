@@ -61,6 +61,31 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+@router.get("/ready")
+async def ready(request: Request):
+    """Report whether Discord finished connecting and can serve bot commands.
+
+    ``/health`` deliberately remains a process-level liveness probe so a
+    transient Discord outage does not make Docker treat the API process as
+    unhealthy. Deployments use this stricter endpoint before accepting a new
+    release and pruning the rollback image.
+    """
+    bot = request.app.state.bot
+    try:
+        closed = bool(bot.is_closed())
+        connected = bool(bot.is_ready())
+    except Exception as exc:
+        log.exception("Discord readiness probe failed")
+        raise HTTPException(status_code=503, detail="Discord readiness is unavailable") from exc
+    if closed or not connected:
+        raise HTTPException(status_code=503, detail="Discord bot is not ready")
+    return {
+        "status": "ready",
+        "bot_connected": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.get("/status", dependencies=[Depends(require_api_token)])
 async def status(request: Request):
     bot = request.app.state.bot
