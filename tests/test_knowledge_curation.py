@@ -1,18 +1,23 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from bot.rag_store import RagStore
 from knowledge_curation.__main__ import (
+    BatchPending,
+    CurationPlan,
     DecisionDraft,
     KnowledgeCurationConfigurationError,
+    _generate_json,
     build_bundle,
     classify_bureau,
     curate_once,
     curation_document_allowed,
     render_decision,
 )
+from knowledge_curation.topic import TopicStateStore
 
 
 def source_document():
@@ -47,6 +52,73 @@ def decision():
         systems=["やがサポート"],
         tags=["優先順位"],
     )
+
+
+@pytest.mark.asyncio
+async def test_batch_generation_is_durable_across_curation_cycles(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_KNOWLEDGE_CURATION_USE_BATCH_API", "true")
+    store = TopicStateStore(tmp_path / "state.sqlite3")
+    response = SimpleNamespace(
+        text=json.dumps(
+            {
+                "has_knowledge_value": True,
+                "topic": "新歓Web",
+                "aliases": [],
+                "search_terms": ["新歓"],
+                "reason": "継続的な実装記録",
+            },
+            ensure_ascii=False,
+        ),
+        candidates=[],
+        usage_metadata=None,
+    )
+    create_calls = 0
+    get_calls = 0
+
+    async def create(**kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        assert kwargs["model"] == "gemini-3.8-flash"
+        assert len(kwargs["src"]) == 1
+        return SimpleNamespace(name="batches/knowledge-1", state=SimpleNamespace(name="JOB_STATE_PENDING"))
+
+    async def get_batch(*, name):
+        nonlocal get_calls
+        get_calls += 1
+        assert name == "batches/knowledge-1"
+        return SimpleNamespace(
+            name=name,
+            state=SimpleNamespace(name="JOB_STATE_SUCCEEDED"),
+            dest=SimpleNamespace(
+                inlined_responses=[SimpleNamespace(response=response, error=None)]
+            ),
+        )
+
+    client = SimpleNamespace(
+        aio=SimpleNamespace(batches=SimpleNamespace(create=create, get=get_batch))
+    )
+    kwargs = {
+        "prompt": "新歓Webについて整理する",
+        "schema": CurationPlan,
+        "operation": "knowledge_curation_plan",
+        "batch_store": store,
+    }
+
+    with pytest.raises(BatchPending) as pending:
+        await _generate_json(client, **kwargs)
+    assert pending.value.submitted is True
+    assert create_calls == 1
+
+    result = await _generate_json(client, **kwargs)
+    assert result.topic == "新歓Web"
+    assert get_calls == 1
+
+    # A crash after result retrieval must not submit or retrieve the same paid
+    # request again; the parsed response remains in the durable SQLite ledger.
+    cached = await _generate_json(client, **kwargs)
+    assert cached == result
+    assert create_calls == 1
+    assert get_calls == 1
 
 
 def test_rendered_curation_draft_separates_evidence_and_uncertainty():

@@ -339,6 +339,19 @@ class TopicStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS bundle_lineage_topic
                     ON bundle_lineage(topic_id, bundle_id);
+                CREATE TABLE IF NOT EXISTS model_batches (
+                    request_key TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    job_name TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    response_text TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS model_batches_state
+                    ON model_batches(state, updated_at);
                 """
             )
 
@@ -522,6 +535,55 @@ class TopicStateStore:
                 "SELECT * FROM source_observations WHERE document_key=?", (document_key,)
             ).fetchone()
         return dict(row) if row else None
+
+    def model_batch(self, request_key: str) -> dict | None:
+        """Return a durable Batch API handoff without persisting prompt contents."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM model_batches WHERE request_key=?", (request_key,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_model_batch(
+        self,
+        request_key: str,
+        *,
+        operation: str,
+        model: str,
+        job_name: str,
+        state: str,
+        response_text: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO model_batches
+                   (request_key, operation, model, job_name, state, response_text,
+                    last_error, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(request_key) DO UPDATE SET
+                       job_name=excluded.job_name,
+                       state=excluded.state,
+                       response_text=excluded.response_text,
+                       last_error=excluded.last_error,
+                       updated_at=excluded.updated_at""",
+                (
+                    request_key,
+                    operation,
+                    model,
+                    job_name,
+                    state,
+                    response_text,
+                    (last_error or "")[:2000] or None,
+                    now,
+                    now,
+                ),
+            )
+
+    def forget_model_batch(self, request_key: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM model_batches WHERE request_key=?", (request_key,))
 
     def source_actionable(self, document_key: str, source_sha256: str) -> bool:
         observation = self.source_observation(document_key)

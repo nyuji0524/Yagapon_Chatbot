@@ -22,6 +22,11 @@ def fast_model() -> str:
     return os.environ.get("YAGAPON_FAST_MODEL", "gemini-3.1-flash-lite")
 
 
+def knowledge_curation_model() -> str:
+    """Non-urgent Knowledge curation model submitted through the Batch API."""
+    return os.environ.get("YAGAPON_KNOWLEDGE_CURATION_MODEL", "gemini-3.8-flash")
+
+
 def transcribe_model() -> str:
     return os.environ.get("YAGAPON_TRANSCRIBE_MODEL", "gemini-3.5-transcribe")
 
