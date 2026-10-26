@@ -12,6 +12,7 @@ from bot.recording import (
     RecordingLimitExceeded,
     _atomic_write_private_json,
     cleanup_old_recordings,
+    degraded_recording_is_processable,
     finalize_recording_replay,
     find_recoverable_recordings,
     find_stale_active_recordings,
@@ -22,6 +23,79 @@ from bot.recording import (
     save_transcript_provenance,
     validate_recording_raw,
 )
+
+
+def test_manifest_verified_disconnect_can_be_processed_as_partial(tmp_path):
+    session = tmp_path / "recording"
+    session.mkdir()
+    pcm = b"\x00\x01" * 1024
+    (session / "user-42.pcm").write_bytes(pcm)
+    metadata = {
+        "capture_integrity_failed": True,
+        "capture_integrity_reason": "bot-disconnected",
+        "capture_ended_at": datetime.now(timezone.utc).isoformat(),
+        "timeline_complete": True,
+        "track_bytes": {"42": len(pcm)},
+        "total_bytes": len(pcm),
+        "durable_total_bytes": len(pcm),
+        "capture_health": {"suspicious": False},
+    }
+
+    assert degraded_recording_is_processable(session, metadata)
+
+
+def test_existing_manifest_verified_interruption_enters_recovery_queue(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path))
+    session = tmp_path / "1" / "interrupted"
+    session.mkdir(parents=True)
+    pcm = b"\x00\x01" * 1024
+    (session / "user-42.pcm").write_bytes(pcm)
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "guild_id": "1",
+        "channel_name": "meeting",
+        "mode": "listen",
+        "status": "capture_interrupted",
+        "started_at": now.isoformat(),
+        "capture_integrity_failed": True,
+        "capture_integrity_reason": "bot-disconnected",
+        "capture_ended_at": now.isoformat(),
+        "timeline_complete": True,
+        "track_bytes": {"42": len(pcm)},
+        "total_bytes": len(pcm),
+        "durable_total_bytes": len(pcm),
+        "capture_health": {"suspicious": False},
+    }
+    (session / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    candidates = find_recoverable_recordings(now=now)
+
+    assert [item.session_dir for item in candidates] == [session]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("pcm-write-failed", "timeline-write-failed", "sink-finalization-failed"),
+)
+def test_storage_or_manifest_failures_never_auto_process(tmp_path, reason):
+    session = tmp_path / reason
+    session.mkdir()
+    pcm = b"\x00\x01" * 1024
+    (session / "user-42.pcm").write_bytes(pcm)
+    metadata = {
+        "capture_integrity_failed": True,
+        "capture_integrity_reason": reason,
+        "capture_ended_at": datetime.now(timezone.utc).isoformat(),
+        "timeline_complete": True,
+        "track_bytes": {"42": len(pcm)},
+        "total_bytes": len(pcm),
+        "durable_total_bytes": len(pcm),
+    }
+
+    assert not degraded_recording_is_processable(session, metadata)
 
 
 def test_atomic_private_json_fsyncs_file_before_replace_and_parent_after(
@@ -605,7 +679,12 @@ def test_capture_interruption_survives_pycord_callback_then_cleanup(
     assert metadata["status"] == "capture_interrupted"
     assert metadata["capture_integrity_failed"] is True
     assert metadata["capture_integrity_reason"] == "recorder-stopped-unexpectedly"
-    assert find_recoverable_recordings() == []
+    # The interruption remains sticky, but its fsynced manifest is complete.
+    # It is therefore eligible only for visibly partial automatic processing;
+    # the raw bytes remain retained throughout that path.
+    assert [item.session_dir for item in find_recoverable_recordings()] == [
+        sink.session_dir
+    ]
 
 
 def test_sticky_capture_integrity_is_not_recoverable_after_later_checkpoint(

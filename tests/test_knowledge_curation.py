@@ -78,7 +78,7 @@ async def test_batch_generation_is_durable_across_curation_cycles(tmp_path, monk
     async def create(**kwargs):
         nonlocal create_calls
         create_calls += 1
-        assert kwargs["model"] == "gemini-3.8-flash"
+        assert kwargs["model"] == "gemini-3.5-flash-lite"
         assert len(kwargs["src"]) == 1
         return SimpleNamespace(name="batches/knowledge-1", state=SimpleNamespace(name="JOB_STATE_PENDING"))
 

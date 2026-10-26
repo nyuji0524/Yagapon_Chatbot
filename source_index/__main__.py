@@ -977,9 +977,27 @@ class GitHubSourceClient:
                 if not self._has_next(headers):
                     break
                 if page == page_count:
-                    raise RuntimeError(
-                        f"GitHub commit exceeds max file pages for {repository}@{sha}"
+                    # A bulk/generated commit must not abort indexing for every
+                    # repository forever. Keep the bounded, allowlisted prefix
+                    # and make the truncation explicit in the indexed record.
+                    log.warning(
+                        "Truncating oversized GitHub commit at %s files for %s@%s",
+                        settings.max_files_per_commit,
+                        repository,
+                        sha,
                     )
+                    changes.append(
+                        SourceHistoryChange(
+                            path="[commit-file-list-truncated]",
+                            status="modified",
+                            patch=(
+                                "[additional changed files omitted by the bounded "
+                                "source-history indexer]"
+                            ),
+                            patch_state="indexer_omitted_size",
+                        )
+                    )
+                    break
             results.append(
                 SourceHistoryCommit(
                     sha=sha,

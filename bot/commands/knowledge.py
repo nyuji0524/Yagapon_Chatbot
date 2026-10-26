@@ -1017,7 +1017,7 @@ def register(bot):
             structured = await asyncio.to_thread(
                 structure_source,
                 sanitized,
-                os.environ.get("YAGAPON_KNOWLEDGE_MODEL", "gemini-3.8-flash"),
+                os.environ.get("YAGAPON_KNOWLEDGE_MODEL", "gemini-3.5-flash-lite"),
             )
             args = build_drive_intake_bundle(
                 guild_id=ctx.guild.id,
