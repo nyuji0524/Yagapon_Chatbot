@@ -52,6 +52,7 @@ STOP_RECORDING_TIMEOUT_SECONDS = 10
 TRANSCRIPTION_CHUNK_BYTES_REALTIME = 5 * 1024 * 1024
 TRANSCRIPTION_CHUNK_BYTES_LISTEN = 50 * 1024 * 1024
 FINAL_REPROCESS_CHUNK_BYTES = 50 * 1024 * 1024
+FINAL_REPROCESS_IO_TIMEOUT_SECONDS = 120
 TRANSCRIPTION_TIMEOUT_SECONDS = 180
 LATE_STT_RESULT_TTL_SECONDS = 30 * 60
 LATE_STT_RESULT_MAX_ITEMS = 16
@@ -2595,7 +2596,10 @@ class VoiceSession:
             try:
                 timeline_segments = await self._run_sink_worker(
                     read_timeline_segments,
-                    timeout=10.0,
+                    timeout=self._capture_alert_seconds(
+                        "YAGAPON_FINAL_REPROCESS_IO_TIMEOUT_SECONDS",
+                        FINAL_REPROCESS_IO_TIMEOUT_SECONDS,
+                    ),
                     max_bytes=FINAL_REPROCESS_CHUNK_BYTES,
                 )
             except Exception:
@@ -2726,7 +2730,10 @@ class VoiceSession:
                 chunks = await self._run_sink_worker(
                     self.recording_sink.read_chunks,
                     offsets,
-                    timeout=10.0,
+                    timeout=self._capture_alert_seconds(
+                        "YAGAPON_FINAL_REPROCESS_IO_TIMEOUT_SECONDS",
+                        FINAL_REPROCESS_IO_TIMEOUT_SECONDS,
+                    ),
                     chunk_bytes=FINAL_REPROCESS_CHUNK_BYTES,
                 )
                 if not chunks:

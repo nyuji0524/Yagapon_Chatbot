@@ -21,6 +21,8 @@ from bot.corpus import (
     calculate_incremental_after,
     calculate_resumable_incremental_after,
     citation_reference_is_safe,
+    citation_source_family_count,
+    evidence_confidence,
     generated_answer_is_sensitive,
     parse_model_answer,
     requires_comprehensive_answer,
@@ -2047,6 +2049,81 @@ def test_requires_comprehensive_answer_detects_broad_requests(question):
 
 def test_requires_comprehensive_answer_keeps_single_fact_query_normal():
     assert requires_comprehensive_answer("11-21の読み方は？") is False
+
+
+def test_entity_overview_fallback_is_generic_and_extracts_authorized_sources():
+    hit = LexicalHit(
+        document_key="knowledge:project",
+        channel_name="企画資料",
+        festival=28,
+        source_url="https://example.com/knowledge",
+        excerpt="プロジェクトXは技術展示を行う企画である。",
+        score=10,
+        authority="curated",
+        status="approved",
+    )
+    runtime = FirebaseEvidence(
+        document_key="firebase:events:1",
+        title="28th 企画",
+        body=(
+            "Firestore現在値（28th / events）\n"
+            'fields: {"eventName": "プロジェクトX", "place": "11-21", '
+            '"shortDescription": "技術展示"}'
+        ),
+        source_url="https://example.com/firebase",
+    )
+
+    rendered = CorpusManager._render_entity_overview_fallback(
+        "プロジェクトX",
+        [hit],
+        [runtime],
+    )
+
+    assert "Firebaseの企画データ" in rendered
+    assert "プロジェクトX" in rendered
+    assert "11-21" in rendered
+    assert "文書・コード上の記録" in rendered
+
+
+def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():
+    assert evidence_confidence(
+        answered=False,
+        evidence_count=0,
+        source_family_count=0,
+        candidate_count=0,
+        locally_verified=False,
+    ) == (0, "根拠なし", "許可された検索範囲で一致する根拠が0件")
+
+    rejected = evidence_confidence(
+        answered=False,
+        evidence_count=0,
+        source_family_count=0,
+        candidate_count=3,
+        locally_verified=False,
+    )
+    assert rejected[0] > 0
+    assert rejected[1] == "低"
+    assert "候補3件" in rejected[2]
+
+
+def test_evidence_confidence_rewards_verified_cross_source_answers():
+    score, label, detail = evidence_confidence(
+        answered=True,
+        evidence_count=3,
+        source_family_count=2,
+        candidate_count=4,
+        locally_verified=True,
+    )
+
+    assert score >= 80
+    assert label == "高"
+    assert "2系統" in detail
+    assert citation_source_family_count(
+        (
+            "[Firebase現在値: 28th 企画](https://console.firebase.google.com/x)",
+            "[Discord会話](https://discord.com/channels/1/2/3)",
+        )
+    ) == 2
 
 
 @pytest.mark.parametrize(

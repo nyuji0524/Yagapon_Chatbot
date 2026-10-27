@@ -57,6 +57,10 @@ def test_history_does_not_short_circuit_on_current_source_code():
     assert not can_answer_directly(QuestionKind.RUNTIME, "repository_history", "historical")
 
 
+def test_general_entity_overview_can_use_projected_live_data_directly():
+    assert can_answer_directly(QuestionKind.GENERAL, "live_data", "current")
+
+
 @pytest.mark.parametrize(
     "kind",
     (

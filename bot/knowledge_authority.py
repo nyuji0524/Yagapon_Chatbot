@@ -174,7 +174,8 @@ _DIRECT_AUTHORITIES = {
     QuestionKind.HISTORY: {"reviewed_record", "curated", "repository_history"},
     QuestionKind.PEOPLE: {"canonical", "curated", "reviewed_record"},
     QuestionKind.GENERAL: {
-        "canonical", "deployed_implementation", "curated", "reviewed_record", "repository_context",
+        "canonical", "deployed_implementation", "live_data", "curated", "reviewed_record",
+        "repository_context",
     },
 }
 

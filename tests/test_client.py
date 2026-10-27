@@ -13,6 +13,7 @@ from bot.client import (
     _is_rag_invocation,
     _is_voice_reference_channel,
     _mentioned_bot_role_ids,
+    _rag_confidence_line,
     _split_discord_text,
 )
 
@@ -173,6 +174,13 @@ def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
     decorated = _decorate_rag_answer("見つからなかったぽん。", guild, no_answer=True)
 
     assert decorated.startswith("<:yagapon_cry:2> 見つからなかったぽん。")
+
+
+def test_rag_confidence_line_explains_server_side_search_audit():
+    assert _rag_confidence_line(82, "高", "根拠3件 / 2系統 / 監査済み") == (
+        "**根拠信頼度（検索・監査）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
+    )
+    assert _rag_confidence_line(None, None, None) == ""
 
 
 def test_split_discord_text_hard_splits_a_single_oversized_line_without_loss():
