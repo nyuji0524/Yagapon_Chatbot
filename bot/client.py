@@ -172,6 +172,19 @@ def _decorate_rag_answer(answer: str, guild, *, no_answer: bool) -> str:
     return f"{selected[0]} {answer}\n\n{selected[1]}"
 
 
+def _rag_confidence_line(
+    score: int | None,
+    label: str | None,
+    detail: str | None,
+) -> str:
+    """Render server-calculated retrieval confidence, never model self-rating."""
+    if score is None or label is None:
+        return ""
+    bounded_score = max(0, min(100, int(score)))
+    suffix = f" — {detail}" if detail else ""
+    return f"**根拠信頼度（検索・監査）: {bounded_score}/100（{label}）**{suffix}"
+
+
 def _split_discord_text(text: str, *, limit: int = 1900) -> list[str]:
     """Split arbitrary text without dropping oversized lines or breaking fences.
 
@@ -933,7 +946,16 @@ class YagaPon(discord.Bot):
                 message.guild,
                 no_answer=result.no_answer,
             )
-            discord_answer = f"{decorated_answer}\n\n{RAG_FEEDBACK_PROMPT}"
+            confidence_line = _rag_confidence_line(
+                result.confidence_score,
+                result.confidence_label,
+                result.confidence_detail,
+            )
+            discord_answer = "\n\n".join(
+                part
+                for part in (decorated_answer, confidence_line, RAG_FEEDBACK_PROMPT)
+                if part
+            )
             sent_messages = await self.send_split_message(message.channel, discord_answer)
             if result.query_id and sent_messages:
                 self.corpus.rag_store.bind_response_message(

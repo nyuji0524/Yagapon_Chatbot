@@ -1473,6 +1473,73 @@ class RagAnswer:
     no_answer: bool = False
     metadata_filter: str | None = None
     lexical_keys: tuple[str, ...] = ()
+    confidence_score: int | None = None
+    confidence_label: str | None = None
+    confidence_detail: str | None = None
+
+
+def evidence_confidence(
+    *,
+    answered: bool,
+    evidence_count: int,
+    source_family_count: int,
+    candidate_count: int,
+    locally_verified: bool,
+    extractive_fallback: bool = False,
+) -> tuple[int, str, str]:
+    """Estimate retrieval confidence from server-observed evidence signals.
+
+    This is not a model's self-rated probability. It describes how much
+    authorized evidence was retrieved and whether the final text passed local
+    grounding checks.
+    """
+    if not answered:
+        if candidate_count <= 0:
+            return 0, "根拠なし", "許可された検索範囲で一致する根拠が0件"
+        score = min(35, 10 + candidate_count * 4)
+        return (
+            score,
+            "低",
+            f"候補{candidate_count}件は取得したが、回答文との対応を確認できず",
+        )
+
+    score = 45
+    score += min(20, max(0, evidence_count) * 5)
+    score += min(15, max(0, source_family_count - 1) * 8)
+    if locally_verified:
+        score += 15
+    if extractive_fallback:
+        # Extractive output avoids unsupported synthesis, but it may be less
+        # complete than a fully grounded answer.
+        score += 5
+    score = min(95, score)
+    label = "高" if score >= 80 else "中" if score >= 55 else "低"
+    method = "監査済み" if locally_verified else "未監査"
+    if extractive_fallback:
+        method += "・抽出表示"
+    return (
+        score,
+        label,
+        f"根拠{evidence_count}件 / {source_family_count}系統 / {method}",
+    )
+
+
+def citation_source_family_count(citations: list[str] | tuple[str, ...]) -> int:
+    """Count broad evidence families without trusting citation title text."""
+    families: set[str] = set()
+    for citation in citations:
+        normalized = citation.casefold()
+        if "console.firebase.google.com" in normalized or "firebase現在値" in citation:
+            families.add("firebase")
+        elif "discord.com/channels/" in normalized:
+            families.add("discord")
+        elif "github.com/" in normalized:
+            families.add("github")
+        elif "docs.google.com/" in normalized:
+            families.add("drive")
+        else:
+            families.add("knowledge")
+    return len(families)
 
 
 @dataclass(frozen=True)
@@ -2873,7 +2940,8 @@ class CorpusManager:
                 f"## {facet_titles[facet]}\n{result.text}"
                 for facet, result in zip(facets, results, strict=True)
             )
-        if generated_answer_is_sensitive(question, answer):
+        sensitive_blocked = generated_answer_is_sensitive(question, answer)
+        if sensitive_blocked:
             log.warning(
                 "Blocked generated RAG answer containing credential/private-contact pattern "
                 "(guild=%s actor=%s)",
@@ -2884,6 +2952,36 @@ class CorpusManager:
             sources = []
             lexical_keys = ()
             no_answer = True
+
+        confidence_results = [
+            result
+            for result in results
+            if result.confidence_score is not None
+        ]
+        if sensitive_blocked or not confidence_results:
+            confidence_score = None
+            confidence_label = None
+            confidence_detail = None
+        else:
+            scores = [int(result.confidence_score or 0) for result in confidence_results]
+            confidence_score = max(scores) if no_answer else min(scores)
+            confidence_label = (
+                "高"
+                if confidence_score >= 80
+                else "中"
+                if confidence_score >= 55
+                else "根拠なし"
+                if confidence_score == 0
+                else "低"
+            )
+            if len(confidence_results) == 1:
+                confidence_detail = confidence_results[0].confidence_detail
+            else:
+                confidence_detail = (
+                    f"{len(confidence_results)}論点のうち最も弱い根拠を表示"
+                    if not no_answer
+                    else f"{len(confidence_results)}論点を検索したが回答可能な根拠なし"
+                )
         if sources and not no_answer:
             answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
         elif no_answer:
@@ -2922,6 +3020,9 @@ class CorpusManager:
             no_answer=no_answer,
             metadata_filter=metadata_filter,
             lexical_keys=lexical_keys,
+            confidence_score=confidence_score,
+            confidence_label=confidence_label,
+            confidence_detail=confidence_detail,
         )
 
     async def _query_single_facet(
@@ -3083,12 +3184,22 @@ class CorpusManager:
                 firebase_groups = self._parse_firebase_list_groups(firebase_evidence)
                 firebase_sources = self._firebase_sources(firebase_evidence, [])
                 if firebase_groups and firebase_sources:
+                    confidence = evidence_confidence(
+                        answered=True,
+                        evidence_count=len(firebase_sources),
+                        source_family_count=1,
+                        candidate_count=len(firebase_evidence),
+                        locally_verified=True,
+                    )
                     return RagAnswer(
                         text=self._render_firebase_list_groups(firebase_groups),
                         citations=tuple(firebase_sources),
                         festival=festival,
                         no_answer=False,
                         metadata_filter=metadata_filter,
+                        confidence_score=confidence[0],
+                        confidence_label=confidence[1],
+                        confidence_detail=confidence[2],
                     )
             if firebase_evidence:
                 evidence_context += self._untrusted_evidence(
@@ -3109,6 +3220,8 @@ class CorpusManager:
             has_answer = False
             sources: list[str] = []
             used_lexical_hits: list[LexicalHit] = []
+            semantic_candidate_count = 0
+            extractive_fallback = False
             remaining_output_tokens = max_output_tokens
 
             def selected_lexical_hits(
@@ -3446,6 +3559,7 @@ class CorpusManager:
                     recovery_semantic_evidence = tuple(
                         item for item in semantic_audit.evidence if item.text
                     )
+                    semantic_candidate_count = len(recovery_semantic_evidence)
                     if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                         not has_answer
                         or not (semantic_sources or used_lexical_hits or used_firebase)
@@ -3501,6 +3615,7 @@ class CorpusManager:
                     used_lexical_hits = fallback_hits
                     has_answer = True
                     no_answer = False
+                    extractive_fallback = True
                 else:
                     answer = (
                         "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
@@ -3516,6 +3631,18 @@ class CorpusManager:
                 # look grounded.  They also make the feedback/evaluation record
                 # misleading, so omit them from both the response and trace.
                 sources = []
+            confidence = evidence_confidence(
+                answered=not no_answer,
+                evidence_count=len(sources),
+                source_family_count=citation_source_family_count(sources),
+                candidate_count=(
+                    len(lexical_hits)
+                    + len(firebase_evidence)
+                    + semantic_candidate_count
+                ),
+                locally_verified=not no_answer,
+                extractive_fallback=extractive_fallback,
+            )
             return RagAnswer(
                 text=answer,
                 citations=tuple(sources),
@@ -3523,22 +3650,39 @@ class CorpusManager:
                 no_answer=no_answer,
                 metadata_filter=metadata_filter,
                 lexical_keys=tuple(hit.document_key for hit in used_lexical_hits),
+                confidence_score=confidence[0],
+                confidence_label=confidence[1],
+                confidence_detail=confidence[2],
             )
         except Exception:
             log.exception("RAG query failed")
             if schema_fallback_allowed and schema_contracts and schema_sources:
+                confidence = evidence_confidence(
+                    answered=True,
+                    evidence_count=len(schema_sources),
+                    source_family_count=citation_source_family_count(schema_sources),
+                    candidate_count=len(schema_contracts),
+                    locally_verified=True,
+                    extractive_fallback=True,
+                )
                 return RagAnswer(
                     text=self._render_firebase_schema_contracts(schema_contracts),
                     citations=tuple(schema_sources),
                     festival=festival,
                     no_answer=False,
                     metadata_filter=metadata_filter,
+                    confidence_score=confidence[0],
+                    confidence_label=confidence[1],
+                    confidence_detail=confidence[2],
                 )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,
                 no_answer=True,
                 metadata_filter=metadata_filter,
+                confidence_score=0,
+                confidence_label="処理失敗",
+                confidence_detail="検索処理が完了していないため信頼度を算出できず",
             )
 
     async def _recover_from_lexical_hits(
