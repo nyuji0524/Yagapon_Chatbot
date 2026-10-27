@@ -32,6 +32,7 @@ def test_deploy_uses_image_assets_instead_of_iap_scp():
     # SCP is retained only as a one-time bootstrap migration on a fresh VM.
     assert workflow.count("gcloud compute scp") == 1
     assert 'if [[ "$deploy_status" == 42 ]]' in workflow
+    assert "sudo install -D -o root -g root -m 0755" in workflow
     assert "/opt/yagapon/deploy/remote-bootstrap.sh" in workflow
     assert "docker/build-push-action@" in workflow
     assert "cache-from: type=gha,scope=yagapon-production-image" in workflow

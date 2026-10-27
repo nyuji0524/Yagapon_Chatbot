@@ -117,7 +117,7 @@ jobs:
               --project "$GCP_PROJECT_ID" \
               --zone "$GCE_ZONE" \
               --tunnel-through-iap \
-              --command "sudo install -o root -g root -m 0755 $quoted_bootstrap_tmp /opt/yagapon/deploy/remote-bootstrap.sh && rm -f $quoted_bootstrap_tmp && sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
+              --command "sudo install -D -o root -g root -m 0755 $quoted_bootstrap_tmp /opt/yagapon/deploy/remote-bootstrap.sh && rm -f $quoted_bootstrap_tmp && sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
           elif [[ "$deploy_status" != 0 ]]; then
             exit "$deploy_status"
           fi
