@@ -1016,16 +1016,20 @@ class YagaPon(discord.Bot):
             return
         self._closed = True
         try:
-            await self.http.close()
-        finally:
             for voice in self.voice_clients:
                 try:
                     await voice.disconnect(force=True)
                 except Exception:
                     pass
-            if self.ws is not None and self.ws.open:
-                await self.ws.close(code=1000)
-            self._ready.clear()
+        finally:
+            try:
+                if self.ws is not None and self.ws.open:
+                    await self.ws.close(code=1000)
+            finally:
+                try:
+                    await self.http.close()
+                finally:
+                    self._ready.clear()
 
     async def close(
         self,

@@ -93,10 +93,31 @@ jobs:
         env:
           IMAGE_SHA: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
         run: |
+          set +e
           quoted_image=$(printf '%q' "$IMAGE_SHA")
           quoted_stage=$(printf '%q' "$DEPLOY_STAGE")
           gcloud compute ssh "$GCE_INSTANCE" \
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            --command "sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
+            --command "sudo test -x /opt/yagapon/deploy/remote-bootstrap.sh || exit 42; sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
+          deploy_status=$?
+          set -e
+          if [[ "$deploy_status" == 42 ]]; then
+            # One-time migration for a newly provisioned or legacy VM. Normal
+            # releases never open this second IAP connection or transfer files.
+            bootstrap_tmp="/tmp/yagapon-remote-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}.sh"
+            gcloud compute scp \
+              --project "$GCP_PROJECT_ID" \
+              --zone "$GCE_ZONE" \
+              --tunnel-through-iap \
+              deploy/remote-bootstrap.sh "$GCE_INSTANCE:$bootstrap_tmp"
+            quoted_bootstrap_tmp=$(printf '%q' "$bootstrap_tmp")
+            gcloud compute ssh "$GCE_INSTANCE" \
+              --project "$GCP_PROJECT_ID" \
+              --zone "$GCE_ZONE" \
+              --tunnel-through-iap \
+              --command "sudo install -o root -g root -m 0755 $quoted_bootstrap_tmp /opt/yagapon/deploy/remote-bootstrap.sh && rm -f $quoted_bootstrap_tmp && sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
+          elif [[ "$deploy_status" != 0 ]]; then
+            exit "$deploy_status"
+          fi
