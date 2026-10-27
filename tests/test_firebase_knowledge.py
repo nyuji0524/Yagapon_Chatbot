@@ -3,7 +3,12 @@ from urllib.parse import quote
 
 import pytest
 
-from bot.firebase_knowledge import COLLECTIONS, FirebaseDocumentBatch, FirebaseKnowledgeReader
+from bot.firebase_knowledge import (
+    COLLECTIONS,
+    FirebaseDocumentBatch,
+    FirebaseKnowledgeReader,
+    entity_overview_subject,
+)
 from bot.firestore_readonly import FirestoreListPage
 from bot.knowledge_authority import QuestionKind
 
@@ -67,6 +72,58 @@ def test_allowlist_never_contains_personal_collections():
         "score",
     )
     assert "areaImagePaths" not in COLLECTIONS["maps"]["fields"]
+
+
+@pytest.mark.parametrize(
+    ("question", "subject"),
+    [
+        ("ITラボについて教えて", "ITラボ"),
+        ("新歓Webとは？", "新歓Web"),
+        ("あなたについて教えて", None),
+        ("企画について教えて", None),
+        ("ITラボの開催場所を教えて", None),
+    ],
+)
+def test_entity_overview_subject_only_accepts_concrete_broad_subjects(question, subject):
+    assert entity_overview_subject(question) == subject
+
+
+def test_firebase_terms_drop_particle_left_after_festival_marker():
+    assert FirebaseKnowledgeReader._terms(
+        "27thのプロジェクトX企画について教えて",
+        source_type="events",
+    ) == ["プロジェクトX"]
+
+
+async def test_entity_overview_also_reads_matching_public_event(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "emulator")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    document = {
+        "name": "projects/demo/databases/(default)/documents/festival/28/events/it-lab",
+        "fields": {
+            "eventName": {"stringValue": "ITラボ"},
+            "shortDescription": {"stringValue": "IT局による技術展示"},
+            "place": {"stringValue": "11-21"},
+        },
+    }
+
+    async def collection(name, _path, _statuses, _exhaustive=False):
+        assert name == "events"
+        return FirebaseDocumentBatch([document], complete=True, reader_limit=100)
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    evidence = await reader.evidence_for(
+        "ITラボについて教えて",
+        QuestionKind.GENERAL,
+        festival=28,
+    )
+
+    assert len(evidence) == 1
+    assert "ITラボ" in evidence[0].body
+    assert "IT局による技術展示" in evidence[0].body
 
 
 def test_firebase_projection_drops_unapproved_fields(monkeypatch):

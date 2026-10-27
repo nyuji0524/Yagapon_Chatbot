@@ -26,6 +26,35 @@ from bot.knowledge_authority import QuestionKind
 log = logging.getLogger("yagapon.firebase_knowledge")
 
 
+_ENTITY_OVERVIEW_RE = re.compile(
+    r"^\s*(?P<subject>.{2,48}?)\s*(?:について(?:詳しく)?(?:教えて(?:ください|下さい)?|知りたい)|"
+    r"とは(?:何|なん)?(?:ですか)?|の概要(?:を)?(?:教えて(?:ください|下さい)?)?)\s*[？?。\s]*$",
+    re.IGNORECASE,
+)
+_ENTITY_OVERVIEW_STOP_SUBJECTS = {
+    "あなた",
+    "これ",
+    "それ",
+    "あれ",
+    "この件",
+    "その件",
+    "機能",
+    "企画",
+    "イベント",
+}
+
+
+def entity_overview_subject(question: str) -> str | None:
+    """Return a concrete subject from a broad entity-overview question."""
+    match = _ENTITY_OVERVIEW_RE.fullmatch(question.strip())
+    if not match:
+        return None
+    subject = match.group("subject").strip(" \t\r\n「」『』\"'")
+    if subject.casefold() in {item.casefold() for item in _ENTITY_OVERVIEW_STOP_SUBJECTS}:
+        return None
+    return subject
+
+
 def _field_value(value: dict[str, Any] | None) -> Any:
     """Decode only the Firestore value types used by reviewed projections."""
     if not value:
@@ -399,6 +428,14 @@ class FirebaseKnowledgeReader:
                 and not ranking_needs_event_details
             )
         ]
+        # An overview question can name a concrete entity without containing
+        # the generic word "企画". Treat it as a focused event lookup too, so
+        # the safe Firestore projection can complement documents, Discord and
+        # source-code evidence for any named project.
+        if entity_overview_subject(question) and not any(
+            name == "events" for name, _config in selected
+        ):
+            selected.append(("events", COLLECTIONS["events"]))
         if not selected:
             return []
         year = festival or current_festival()
@@ -893,6 +930,10 @@ class FirebaseKnowledgeReader:
             )
             if part in {"詳しく", "具体的に", "詳細に"}:
                 continue
+            # Removing an explicit festival marker can leave a Japanese
+            # particle at the beginning (``27thのITラボ`` -> ``のITラボ``).
+            # A leading particle is grammar, not part of the entity name.
+            part = re.sub(r"^(?:の|は|を|が|に|で|と)+", "", part)
             part = re.sub(r"(?:の|は|を|が|に|で|と)+$", "", part)
             if len(part) >= 2:
                 terms.append(part)

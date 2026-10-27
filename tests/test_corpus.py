@@ -2049,6 +2049,40 @@ def test_requires_comprehensive_answer_keeps_single_fact_query_normal():
     assert requires_comprehensive_answer("11-21の読み方は？") is False
 
 
+def test_entity_overview_fallback_is_generic_and_extracts_authorized_sources():
+    hit = LexicalHit(
+        document_key="knowledge:project",
+        channel_name="企画資料",
+        festival=28,
+        source_url="https://example.com/knowledge",
+        excerpt="プロジェクトXは技術展示を行う企画である。",
+        score=10,
+        authority="curated",
+        status="approved",
+    )
+    runtime = FirebaseEvidence(
+        document_key="firebase:events:1",
+        title="28th 企画",
+        body=(
+            "Firestore現在値（28th / events）\n"
+            'fields: {"eventName": "プロジェクトX", "place": "11-21", '
+            '"shortDescription": "技術展示"}'
+        ),
+        source_url="https://example.com/firebase",
+    )
+
+    rendered = CorpusManager._render_entity_overview_fallback(
+        "プロジェクトX",
+        [hit],
+        [runtime],
+    )
+
+    assert "Firebaseの企画データ" in rendered
+    assert "プロジェクトX" in rendered
+    assert "11-21" in rendered
+    assert "文書・コード上の記録" in rendered
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [

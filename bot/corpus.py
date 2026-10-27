@@ -11,7 +11,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -34,6 +34,7 @@ from bot.discord_visibility import normalized_channel_ids
 from bot.festival import (
     calendar_date_from_query,
     calendar_window_from_query,
+    current_festival,
     festival_from_query,
     festival_metadata_filter,
     festival_number,
@@ -47,6 +48,7 @@ from bot.firebase_knowledge import (
     FIREBASE_SCHEMA_CONTRACT_VERSION,
     FirebaseEvidence,
     FirebaseKnowledgeReader,
+    entity_overview_subject,
     firebase_projected_fields_are_safe,
     is_explicit_firebase_list_query,
 )
@@ -2811,7 +2813,11 @@ class CorpusManager:
             )
         started = time.monotonic()
         facets = classify_question_facets(question)
-        comprehensive = requires_comprehensive_answer(question) or len(facets) > 1
+        comprehensive = (
+            requires_comprehensive_answer(question)
+            or entity_overview_subject(question) is not None
+            or len(facets) > 1
+        )
         total_budget = (
             RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS
             if comprehensive
@@ -3031,6 +3037,34 @@ class CorpusManager:
                 question_kind,
                 festival=festival,
             )
+            overview_subject = entity_overview_subject(question)
+            if overview_subject and festival is None:
+                # Broad entity questions often refer to a recurring festival
+                # project before the current year's event document exists.
+                # Read the immediately previous festival as well and keep the
+                # year label in every evidence body/citation.
+                previous_festival = max(1, current_festival() - 1)
+                previous_evidence = await self.firebase_knowledge.evidence_for(
+                    question,
+                    question_kind,
+                    festival=previous_festival,
+                )
+                previous_evidence = [
+                    replace(
+                        item,
+                        document_key=(
+                            f"firebase:{previous_festival}:"
+                            f"{item.document_key.removeprefix('firebase:')}"
+                        ),
+                    )
+                    for item in previous_evidence
+                ]
+                firebase_evidence = list(
+                    {
+                        item.document_key + "\0" + item.title: item
+                        for item in [*firebase_evidence, *previous_evidence]
+                    }.values()
+                )
             if question_kind is QuestionKind.DATA_CONTRACT:
                 schema_contracts = self._parse_firebase_schema_contracts(
                     firebase_evidence,
@@ -3441,6 +3475,38 @@ class CorpusManager:
                 sources = schema_sources
                 has_answer = True
                 no_answer = False
+            elif no_answer and overview_subject:
+                fallback_hits = [
+                    hit
+                    for hit in authoritative_hits
+                    if can_answer_directly(question_kind, hit.authority, hit.status)
+                ]
+                fallback_runtime = [
+                    item
+                    for item in firebase_evidence
+                    if can_answer_directly(question_kind, item.authority, item.status)
+                ]
+                fallback_answer = self._render_entity_overview_fallback(
+                    overview_subject,
+                    fallback_hits,
+                    fallback_runtime,
+                )
+                fallback_sources = self._lexical_sources(fallback_hits, [])
+                fallback_sources.extend(
+                    self._firebase_sources(fallback_runtime, fallback_sources)
+                )
+                if fallback_answer and fallback_sources:
+                    answer = fallback_answer
+                    sources = fallback_sources
+                    used_lexical_hits = fallback_hits
+                    has_answer = True
+                    no_answer = False
+                else:
+                    answer = (
+                        "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
+                        "年度や用語を変えて質問するか、資料を追加してほしいぽん。"
+                    )
+                    sources = []
             elif no_answer:
                 answer = (
                     "その件を裏付ける記録を、現在検索できるナレッジから見つけられなかったぽん。"
@@ -3555,6 +3621,77 @@ class CorpusManager:
     def _firebase_context(evidence: list[FirebaseEvidence]) -> str:
         return "\n\n".join(
             f"[runtime:{item.document_key} {item.authority}/{item.status}]\n{item.body}" for item in evidence
+        )
+
+    @staticmethod
+    def _render_entity_overview_fallback(
+        subject: str,
+        hits: list[LexicalHit],
+        runtime_evidence: list[FirebaseEvidence],
+    ) -> str:
+        """Render authorized evidence when free-form synthesis cannot pass audit.
+
+        This is deliberately extractive: it is better to show a useful,
+        attributed record than to turn successful retrieval into a false
+        "no evidence" response. The normal model-generated answer remains the
+        preferred path.
+        """
+        sections: list[str] = []
+        runtime_lines: list[str] = []
+        for item in runtime_evidence[:6]:
+            fields_match = re.search(r"^fields:\s*(\{.*\})$", item.body, re.MULTILINE)
+            if not fields_match:
+                continue
+            try:
+                fields = json.loads(fields_match.group(1))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(fields, dict):
+                continue
+            title = next(
+                (
+                    str(fields[key]).strip()
+                    for key in ("eventName", "name", "title")
+                    if fields.get(key)
+                ),
+                item.title,
+            )
+            details = []
+            for key, label in (
+                ("shortDescription", "概要"),
+                ("longDescription", "詳細"),
+                ("organizationDescription", "団体"),
+                ("place", "場所"),
+                ("placeRoom", "教室"),
+                ("status", "状態"),
+                ("category", "カテゴリ"),
+            ):
+                value = fields.get(key)
+                if value not in (None, "", [], {}, ()):
+                    details.append(f"{label}: {value}")
+            suffix = " / ".join(details[:5]) or "公開企画データを確認"
+            runtime_lines.append(f"- **{title}** — {suffix}")
+        if runtime_lines:
+            sections.append("### Firebaseの企画データ\n" + "\n".join(runtime_lines))
+
+        record_lines = []
+        for hit in hits[:4]:
+            excerpt = re.sub(r"\s+", " ", hit.excerpt).strip()
+            if len(excerpt) > 420:
+                excerpt = excerpt[:419].rstrip() + "…"
+            if excerpt:
+                period = f" / {hit.festival}th" if hit.festival is not None else ""
+                record_lines.append(
+                    f"- **{hit.channel_name}{period}** — {excerpt}"
+                )
+        if record_lines:
+            sections.append("### 文書・コード上の記録\n" + "\n".join(record_lines))
+
+        if not sections:
+            return ""
+        return (
+            f"**{subject}**について、確認できた根拠を種類ごとに整理するぽん。\n\n"
+            + "\n\n".join(sections)
         )
 
     @staticmethod
