@@ -1003,6 +1003,30 @@ class YagaPon(discord.Bot):
             )
         return sent_messages
 
+    async def _close_discord_transport(self) -> None:
+        """Close Pycord without leaving a reconnect window.
+
+        Pycord closes its HTTP session before setting ``_closed``. If the
+        gateway reader fails during that await, ``Client.connect`` observes an
+        open client and starts a reconnect with the already-closed session.
+        Marking the client closed first makes shutdown monotonic while retaining
+        the same websocket and voice cleanup performed by Pycord.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self.http.close()
+        finally:
+            for voice in self.voice_clients:
+                try:
+                    await voice.disconnect(force=True)
+                except Exception:
+                    pass
+            if self.ws is not None and self.ws.open:
+                await self.ws.close(code=1000)
+            self._ready.clear()
+
     async def close(
         self,
         *,
@@ -1133,7 +1157,7 @@ class YagaPon(discord.Bot):
             try:
                 await run_bounded(
                     "Discord transport close",
-                    lambda _timeout: super(YagaPon, self).close(),
+                    lambda _timeout: self._close_discord_transport(),
                     cap=5.0,
                 )
             finally:

@@ -33,6 +33,17 @@ COPY source_index ./source_index
 COPY rag_eval ./rag_eval
 COPY main.py ./
 
+# Deployment metadata travels with the immutable image. The VM bootstrap can
+# therefore extract the exact Compose/unit/scripts matching this commit without
+# a second IAP/SCP connection or a mutable checkout on the host.
+RUN mkdir -p /opt/yagapon-deploy
+COPY compose.yaml /opt/yagapon-deploy/compose.yaml
+COPY deploy/remote-bootstrap.sh /opt/yagapon-deploy/remote-bootstrap.sh
+COPY deploy/remote-deploy.sh /opt/yagapon-deploy/remote-deploy.sh
+COPY deploy/rag-eval-control.sh /opt/yagapon-deploy/rag-eval-control.sh
+COPY docs/rag-eval-cases.yaml /opt/yagapon-deploy/rag-eval-cases.yaml
+COPY deploy/systemd/yagapon.service /opt/yagapon-deploy/yagapon.service
+
 RUN useradd --create-home --uid 10001 yagapon \
     && mkdir -p /data/voiceprints /data/recordings /data/transcripts /data/knowledge-outbox \
     && chown -R yagapon:yagapon /app /data

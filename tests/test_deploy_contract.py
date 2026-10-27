@@ -24,6 +24,30 @@ def test_remote_deploy_wait_exceeds_container_start_period():
     assert "timeout --signal=TERM --kill-after=30s 420s docker run --rm" in deploy
 
 
+def test_deploy_uses_image_assets_instead_of_iap_scp():
+    workflow = (ROOT / ".github/workflows/deploy-gce.yml").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "deploy/remote-bootstrap.sh").read_text(encoding="utf-8")
+
+    assert "gcloud compute scp" not in workflow
+    assert "/opt/yagapon/deploy/remote-bootstrap.sh" in workflow
+    assert "docker/build-push-action@" in workflow
+    assert "cache-from: type=gha,scope=yagapon-production-image" in workflow
+    assert "COPY compose.yaml /opt/yagapon-deploy/compose.yaml" in dockerfile
+    assert 'docker cp "$container_id:/opt/yagapon-deploy/." "$staging_dir/"' in bootstrap
+
+
+def test_remote_preflights_remain_fail_fast_and_report_timing():
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    bot_start = deploy.index('"$image" python -m bot.preflight')
+    source_start = deploy.index("python -m source_index --preflight")
+    timing = deploy.index('echo "Deploy timing: preflight=')
+
+    assert bot_start < source_start < timing
+    assert 'echo "Deploy timing: restart-to-ready=' in deploy
+
+
 def test_remote_deploy_preflights_source_index_before_restart():
     deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
 

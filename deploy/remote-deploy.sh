@@ -15,6 +15,8 @@ rag_eval_source="$staging_dir/rag-eval-control.sh"
 rag_eval_target="$app_dir/deploy/rag-eval-control.sh"
 rag_eval_cases_source="$staging_dir/rag-eval-cases.yaml"
 rag_eval_cases_target="$app_dir/deploy/rag-eval-cases.yaml"
+bootstrap_source="$staging_dir/remote-bootstrap.sh"
+bootstrap_target="$app_dir/deploy/remote-bootstrap.sh"
 backup_dir=/var/backups/yagapon/"$(date -u +%Y%m%dT%H%M%SZ)"
 github_app_key_path=/etc/yagapon/secrets/github-app-private-key.pem
 github_app_key_existed=false
@@ -42,7 +44,7 @@ if [[ "$staging_dir" != /tmp \
   exit 2
 fi
 if [[ ! -f "$compose_source" || ! -f "$staging_dir/remote-deploy.sh" || ! -f "$unit_source" \
-  || ! -f "$rag_eval_source" ]]; then
+  || ! -f "$rag_eval_source" || ! -f "$bootstrap_source" ]]; then
   echo "Deployment files were not copied to the staging directory" >&2
   exit 2
 fi
@@ -398,6 +400,7 @@ data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
 data_path=${data_path:-/var/lib/yagapon}
 install -d -o 10001 -g 10001 -m 0750 "$data_path/releases"
 recording_snapshot_marker="$data_path/releases/recording-retention-v1.json"
+preflight_started=$SECONDS
 timeout --signal=TERM --kill-after=30s 420s docker run --rm \
   --env-file /etc/yagapon/yagapon.env \
   --volume "$data_path:/data" \
@@ -411,6 +414,7 @@ timeout --signal=TERM --kill-after=30s 420s docker compose \
   --env-file "$deploy_env" \
   run --rm --no-deps source-index-watch \
   python -m source_index --preflight
+echo "Deploy timing: preflight=$((SECONDS - preflight_started))s"
 
 # The image deployed before permanent retention removed terminal PCM during
 # cleanup. A failed first migration can therefore roll back to code that would
@@ -428,7 +432,9 @@ if [[ ! -f "$recording_snapshot_marker" ]]; then
   fi
   sync -f "$recording_snapshot_dir"
 fi
+restart_started=$SECONDS
 systemctl restart yagapon
+echo "Deploy timing: systemd-restart=$((SECONDS - restart_started))s"
 
 host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
 host_port=${host_port:-8000}
@@ -482,7 +488,11 @@ for _ in $(seq 1 48); do
       # the new generation is healthy so a failed migration can still roll back.
       rm -f -- /var/lib/yagapon/github-app-private-key.pem
     fi
+    # Update the stable entrypoint only after the release is proven healthy.
+    # A failed release therefore cannot strand the next deployment.
+    install -o root -g root -m 0755 "$bootstrap_source" "$bootstrap_target"
     cleanup_staging
+    echo "Deploy timing: restart-to-ready=$((SECONDS - restart_started))s"
     echo "Deployment healthy: $image (container: $container_id)"
     exit 0
   fi

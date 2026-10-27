@@ -62,6 +62,9 @@ jobs:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           version: ">= 506.0.0"
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
       - name: Build and push image
         env:
           IMAGE_SHA: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
@@ -71,29 +74,20 @@ jobs:
           gcloud auth configure-docker "$registry" --quiet
           if gcloud artifacts docker images describe "$IMAGE_SHA" >/dev/null 2>&1; then
             echo "Reusing existing image: $IMAGE_SHA"
+            echo "IMAGE_EXISTS=true" >> "$GITHUB_ENV"
           else
-            docker build --tag "$IMAGE_SHA" .
-            docker push "$IMAGE_SHA"
+            echo "IMAGE_EXISTS=false" >> "$GITHUB_ENV"
           fi
 
-      - name: Copy deployment files
-        run: |
-          quoted_stage=$(printf '%q' "$DEPLOY_STAGE")
-          # The path is unique per run. A collision may indicate stale ownership
-          # or tampering, so deliberately fail closed instead of using mkdir -p.
-          gcloud compute ssh "$GCE_INSTANCE" \
-            --project "$GCP_PROJECT_ID" \
-            --zone "$GCE_ZONE" \
-            --tunnel-through-iap \
-            --command "umask 077; mkdir $quoted_stage"
-          gcloud compute scp \
-            --project "$GCP_PROJECT_ID" \
-            --zone "$GCE_ZONE" \
-            --tunnel-through-iap \
-            compose.yaml deploy/remote-deploy.sh deploy/rag-eval-control.sh \
-            docs/rag-eval-cases.yaml \
-            deploy/systemd/yagapon.service \
-            "$GCE_INSTANCE:$DEPLOY_STAGE/"
+      - name: Build and push uncached image
+        if: env.IMAGE_EXISTS != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ vars.GCP_ARTIFACT_IMAGE }}:${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha,scope=yagapon-production-image
+          cache-to: type=gha,mode=max,scope=yagapon-production-image
 
       - name: Deploy and verify health
         env:
@@ -105,4 +99,4 @@ jobs:
             --project "$GCP_PROJECT_ID" \
             --zone "$GCE_ZONE" \
             --tunnel-through-iap \
-            --command "sudo /bin/bash $quoted_stage/remote-deploy.sh $quoted_image $quoted_stage"
+            --command "sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
