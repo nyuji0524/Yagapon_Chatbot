@@ -44,6 +44,11 @@ COPY deploy/rag-eval-control.sh /opt/yagapon-deploy/rag-eval-control.sh
 COPY docs/rag-eval-cases.yaml /opt/yagapon-deploy/rag-eval-cases.yaml
 COPY deploy/systemd/yagapon.service /opt/yagapon-deploy/yagapon.service
 
+# Validate the complete runtime import graph on the 4-core CI builder. Doing
+# this again on the 1 GiB production VM caused several minutes of swap pressure
+# before every restart while adding no host-specific coverage.
+RUN python -c "from api.server import create_app; from bot.client import YagaPon"
+
 RUN useradd --create-home --uid 10001 yagapon \
     && mkdir -p /data/voiceprints /data/recordings /data/transcripts /data/knowledge-outbox \
     && chown -R yagapon:yagapon /app /data

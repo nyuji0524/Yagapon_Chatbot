@@ -28,10 +28,6 @@ def main() -> None:
                 result = connection.execute("PRAGMA quick_check").fetchone()[0]
                 if result != "ok":
                     raise RuntimeError(f"SQLite integrity check failed: {path}: {result}")
-    # Import the startup graph without connecting to Discord or external APIs.
-    from api.server import create_app  # noqa: F401
-    from bot.client import YagaPon  # noqa: F401
-
     print("preflight ok")
 
 

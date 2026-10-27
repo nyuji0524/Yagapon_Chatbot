@@ -268,9 +268,6 @@ install -o root -g root -m 0755 "$rag_eval_source" "$rag_eval_target"
 install -o root -g root -m 0644 "$rag_eval_cases_source" "$rag_eval_cases_target"
 systemctl daemon-reload
 
-registry=${image%%/*}
-gcloud auth configure-docker "$registry" --quiet
-
 oauth_secret=$(sed -n 's/^YAGAPON_GOOGLE_OAUTH_SECRET=//p' "$deploy_env" | tail -1)
 oauth_project=$(sed -n 's/^YAGAPON_GCP_PROJECT_ID=//p' "$deploy_env" | tail -1)
 if [[ -n "$oauth_secret" ]]; then
@@ -395,7 +392,10 @@ if [[ -n "$knowledge_github_app_key_secret$knowledge_github_app_id$knowledge_git
 fi
 
 docker compose --project-directory "$app_dir" --env-file "$deploy_env" config --quiet
-docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon
+# remote-bootstrap.sh authenticated and pulled this exact immutable SHA before
+# extracting these scripts. Repeating Compose pull here added another registry
+# round trip and layer verification without changing the selected image.
+docker image inspect "$image" >/dev/null
 data_path=$(sed -n 's/^YAGAPON_DATA_PATH=//p' "$deploy_env" | tail -1)
 data_path=${data_path:-/var/lib/yagapon}
 install -d -o 10001 -g 10001 -m 0750 "$data_path/releases"
