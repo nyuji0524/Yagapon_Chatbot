@@ -26,6 +26,7 @@ from bot.minutes_generation import generate_minutes
 from bot.recording import (
     PersistentPCMSink,
     RecordingLimitExceeded,
+    degraded_recording_is_processable,
     find_recoverable_recordings,
     find_stale_active_recordings,
     load_transcript_content,
@@ -54,6 +55,10 @@ FINAL_REPROCESS_CHUNK_BYTES = 50 * 1024 * 1024
 TRANSCRIPTION_TIMEOUT_SECONDS = 180
 LATE_STT_RESULT_TTL_SECONDS = 30 * 60
 LATE_STT_RESULT_MAX_ITEMS = 16
+DEGRADED_RECORDING_WARNING = (
+    "[録音警告] 音声接続が途中で切れたため、保存できた範囲のみを文字起こししています。"
+    "欠落している発言がある可能性があります。"
+)
 MAX_REFERENCE_DOCUMENTS = 64
 # Keep a finite in-memory bound, but do not cut ordinary long meeting packs at
 # the old 120k limit. minutes_generation chunks every retained character.
@@ -197,6 +202,7 @@ class VoiceSession:
         self._delivery_claimed = False
         self._transcription_failed = False
         self._capture_interrupted = False
+        self._degraded_auto_processing = False
         self._capture_suspicious = False
         self._capture_suspicious_reason = ""
         self._capture_warning_sent = False
@@ -2391,8 +2397,39 @@ class VoiceSession:
             )
 
         if self._capture_interrupted:
-            await self._mark_recording_sink("capture_interrupted")
-            raise RuntimeError("Voice capture was interrupted; recording retained for review")
+            read_metadata = getattr(self.recording_sink, "read_metadata", None)
+            metadata = (
+                await self._run_sink_worker(read_metadata, timeout=10.0)
+                if callable(read_metadata)
+                else {}
+            )
+            session_dir = getattr(self.recording_sink, "session_dir", None)
+            can_process_partial = bool(
+                isinstance(session_dir, Path)
+                and degraded_recording_is_processable(session_dir, metadata)
+            )
+            if not can_process_partial:
+                await self._mark_recording_sink("capture_interrupted")
+                raise RuntimeError(
+                    "Voice capture was interrupted; recording retained for review"
+                )
+            self._degraded_auto_processing = True
+            # The interruption latch set this to protect old builds. From this
+            # point only the manifest-verified prefix is processed and the raw
+            # recording remains retained for another retry.
+            self._transcription_failed = False
+            await self._mark_recording_sink(
+                "processing",
+                degraded_auto_processing=True,
+                partial_recording=True,
+                raw_recording_retained=True,
+            )
+            log.warning(
+                "Processing manifest-verified partial recording guild=%s session=%s reason=%s",
+                self.guild_id,
+                self.session_id,
+                metadata.get("capture_integrity_reason"),
+            )
 
         if self._capture_suspicious:
             await self._mark_recording_sink(
@@ -2454,6 +2491,11 @@ class VoiceSession:
                     ) from exc
             else:
                 await self._drain_recording()
+            if (
+                self._degraded_auto_processing
+                and (not self.transcript or self.transcript[0] != DEGRADED_RECORDING_WARNING)
+            ):
+                self.transcript.insert(0, DEGRADED_RECORDING_WARNING)
             await self._persist_transcript()
 
         if self._transcription_failed:
@@ -2474,6 +2516,11 @@ class VoiceSession:
                 # meeting failures so manual/automatic callers do not confuse
                 # the two states and delete the only recoverable PCM.
                 raise
+            if self._degraded_auto_processing:
+                minutes = (
+                    "> ⚠️ この議事録は音声接続が途中で切れたため、保存できた範囲から作成しています。"
+                    "欠落している発言がある可能性があります。\n\n" + minutes
+                )
             if self.recording_sink and not self._transcription_failed:
                 await self._mark_recording_sink("minutes_generated")
             return minutes
@@ -3519,13 +3566,18 @@ async def _notify_recovery_completed_once(
 
 async def _recover_recording(bot, candidate) -> None:
     metadata = candidate.metadata
+    degraded_recovery = degraded_recording_is_processable(
+        candidate.session_dir,
+        metadata,
+    )
     if (
         not metadata.get("capture_ended_at")
-        or metadata.get("capture_integrity_failed")
-        or str(metadata.get("status") or "") in {
-        "capture_interrupted",
-        "capture_suspicious",
-        }
+        or (metadata.get("capture_integrity_failed") and not degraded_recovery)
+        or (
+            str(metadata.get("status") or "") == "capture_interrupted"
+            and not degraded_recovery
+        )
+        or str(metadata.get("status") or "") == "capture_suspicious"
     ):
         log.error(
             "Refusing automatic recovery for incomplete capture session=%s reason=%s",
@@ -3567,6 +3619,7 @@ async def _recover_recording(bot, candidate) -> None:
     channel = _resolve_recovery_channel(bot, guild_id, metadata)
     channel_id = getattr(channel, "id", None)
     session = VoiceSession(bot, guild_id, channel, mode)
+    session._degraded_auto_processing = degraded_recovery
     started_at = metadata.get("started_at")
     if started_at:
         try:
@@ -3611,6 +3664,9 @@ async def _recover_recording(bot, candidate) -> None:
     if not await session._mark_recording_sink(
         "recovery_processing",
         recovery_attempts=attempts,
+        degraded_auto_processing=degraded_recovery,
+        partial_recording=degraded_recovery,
+        raw_recording_retained=True,
     ):
         return
     try:
@@ -3642,12 +3698,22 @@ async def _recover_recording(bot, candidate) -> None:
                 "recording raw audio changed during recovery: "
                 f"{post_process_validation.reason or 'raw-manifest-unverified'}"
             )
+        if degraded_recovery and (
+            not session.transcript
+            or session.transcript[0] != DEGRADED_RECORDING_WARNING
+        ):
+            session.transcript.insert(0, DEGRADED_RECORDING_WARNING)
         await session._persist_transcript()
         if session._transcription_failed:
             raise RuntimeError("transcription remains rate limited or unavailable")
         minutes = None
         if mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
             minutes = await session._generate_minutes()
+            if degraded_recovery:
+                minutes = (
+                    "> ⚠️ この議事録は音声接続が途中で切れたため、保存できた範囲から作成しています。"
+                    "欠落している発言がある可能性があります。\n\n" + minutes
+                )
         from bot.gdrive import upload_minutes, upload_transcript
 
         export_decision = session.external_export_decision()

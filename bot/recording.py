@@ -71,6 +71,20 @@ REPLAY_FINALIZATION_STATUSES = {
     "recovery_dead_letter",
 }
 
+# These failures prove that Discord reception ended unexpectedly, but do not
+# imply that bytes already acknowledged by the durable sink are corrupt. Such
+# recordings may be processed as explicitly partial artifacts after their final
+# manifest is verified. Storage/fsync/timeline failures are intentionally absent.
+DEGRADED_AUTO_PROCESS_REASONS = {
+    "bot-disconnected",
+    "bot-moved",
+    "voice-connection-lost",
+    "voice-recorder-stopped",
+    "recorder-stopped-unexpectedly",
+    "recorder-restarted-after-gap",
+    "recorder-not-running-at-stop",
+}
+
 
 @dataclass(frozen=True)
 class RecoverableRecording:
@@ -359,6 +373,28 @@ def validate_recording_raw(
     # available for manual inspection but is never eligible for auto-publish.
     checked = has_complete_manifest
     return RecordingRawValidation(True, "", total, sizes, checked)
+
+
+def degraded_recording_is_processable(session_dir: Path, metadata: dict) -> bool:
+    """Allow only manifest-verified PCM from a known receive interruption.
+
+    This does not declare the meeting complete. It allows transcription and
+    minutes generation with a durable partial-recording warning, so a Discord
+    disconnect no longer strands otherwise usable audio.
+    """
+    reason = str(metadata.get("capture_integrity_reason") or "")
+    health = metadata.get("capture_health")
+    if (
+        reason not in DEGRADED_AUTO_PROCESS_REASONS
+        or not metadata.get("capture_ended_at")
+        or metadata.get("storage_limit_reached")
+        or metadata.get("capture_suspicious")
+        or metadata.get("timeline_complete") is not True
+        or (isinstance(health, dict) and health.get("suspicious") is True)
+    ):
+        return False
+    validation = validate_recording_raw(session_dir, metadata)
+    return validation.valid and validation.checked_against_manifest
 
 
 def _pcm_file_sizes(session_dir: Path) -> dict[int, int]:
@@ -1651,9 +1687,16 @@ def find_recoverable_recordings(*, now: datetime | None = None) -> list[Recovera
             # A later processing checkpoint must never make a known-incomplete
             # capture eligible for automatic publication. Integrity failures
             # are sticky even if an older build overwrote the visible status.
-            if metadata.get("capture_integrity_failed"):
+            degraded_ok = degraded_recording_is_processable(session_dir, metadata)
+            if metadata.get("capture_integrity_failed") and not degraded_ok:
                 continue
-            if status not in RECOVERABLE_STATUSES or status in TERMINAL_STATUSES:
+            if status not in RECOVERABLE_STATUSES and not (
+                degraded_ok and status == "capture_interrupted"
+            ):
+                continue
+            if status in TERMINAL_STATUSES and not (
+                degraded_ok and status == "capture_interrupted"
+            ):
                 continue
             # A recoverable processing/delivery status is trustworthy only
             # after receiver cleanup durably recorded its end. A process may

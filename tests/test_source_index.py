@@ -1464,6 +1464,43 @@ def test_history_details_records_omitted_patch_and_exact_sha_source(monkeypatch)
         assert redacted.patch == "[patch redacted by credential-like content policy]"
 
 
+def test_history_details_truncates_oversized_commit_without_aborting(monkeypatch):
+    client = GitHubSourceClient("")
+    monkeypatch.setattr(
+        client,
+        "_request_with_headers",
+        lambda *_args: (
+            {
+                "files": [
+                    {
+                        "filename": "src/kept.py",
+                        "status": "modified",
+                        "patch": "+kept = True",
+                        "additions": 1,
+                        "deletions": 0,
+                    }
+                ]
+            },
+            {
+                "Link": '<https://api.github.test/next>; rel="next"',
+                "X-RateLimit-Remaining": "900",
+            },
+        ),
+    )
+
+    details = client.history_details(
+        "example/repo",
+        [_history_commit("a")],
+        ("src/",),
+        _history_settings(max_files_per_commit=1),
+    )
+
+    assert [change.path for change in details[0].changes] == [
+        "src/kept.py",
+        "[commit-file-list-truncated]",
+    ]
+
+
 def test_history_chunk_has_exact_sha_citation_and_mandatory_fields():
     commit = SourceHistoryCommit(
         sha="a" * 40,

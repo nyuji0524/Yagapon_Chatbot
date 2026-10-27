@@ -11,15 +11,25 @@ from google.genai import types
 
 
 def rag_model() -> str:
-    return os.environ.get("YAGAPON_RAG_MODEL", "gemini-3.8-flash")
+    return os.environ.get("YAGAPON_RAG_MODEL", "gemini-3.5-flash-lite")
 
 
 def response_model() -> str:
-    return os.environ.get("YAGAPON_RESPONSE_MODEL", "gemini-3.8-flash")
+    return os.environ.get("YAGAPON_RESPONSE_MODEL", "gemini-3.5-flash-lite")
+
+
+def minutes_model() -> str:
+    """Long-form final minutes keep a separately tunable quality model."""
+    return os.environ.get("YAGAPON_MINUTES_MODEL", "gemini-3.8-flash")
 
 
 def fast_model() -> str:
     return os.environ.get("YAGAPON_FAST_MODEL", "gemini-3.1-flash-lite")
+
+
+def knowledge_curation_model() -> str:
+    """Non-urgent Knowledge curation model submitted through the Batch API."""
+    return os.environ.get("YAGAPON_KNOWLEDGE_CURATION_MODEL", "gemini-3.5-flash-lite")
 
 
 def transcribe_model() -> str:
@@ -28,12 +38,12 @@ def transcribe_model() -> str:
 
 def transcribe_fallback_model() -> str:
     """Dedicated STT quota exhaustion and realtime voice fallback."""
-    return os.environ.get("YAGAPON_TRANSCRIBE_FALLBACK_MODEL", "gemini-3.8-flash")
+    return os.environ.get("YAGAPON_TRANSCRIBE_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 
 
 def audio_analysis_model() -> str:
     """音声サンプルの音質確認専用。本人識別の権限根拠には使用しない。"""
-    return os.environ.get("YAGAPON_AUDIO_MODEL", "gemini-3.8-flash")
+    return os.environ.get("YAGAPON_AUDIO_MODEL", "gemini-3.5-flash-lite")
 
 
 def generation_config(model: str, *, thinking_level: str | None = "low", **kwargs):

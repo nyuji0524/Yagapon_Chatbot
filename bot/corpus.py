@@ -1528,9 +1528,13 @@ class _GroundingAudit:
 
     @property
     def requires_recovery(self) -> bool:
+        # Rejected chunks are excluded from evidence. Their mere presence in a
+        # broad File Search result must not invalidate an answer whose actual
+        # claim-support mapping is entirely covered by other authorized chunks.
+        # If a rejected chunk supported answer text, removing its segment makes
+        # claim_coverage_complete false below and still fails closed.
         return bool(
-            self.rejected_supported_chunks
-            or self.invalid_supports
+            self.invalid_supports
             or not self.claim_coverage_complete
         )
 

@@ -1,20 +1,29 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from bot.ai_models import fast_model, log_usage, rag_model, response_model, transcribe_model
+from bot.ai_models import (
+    fast_model,
+    log_usage,
+    minutes_model,
+    rag_model,
+    response_model,
+    transcribe_model,
+)
 
 
 def test_default_models(monkeypatch):
     for name in (
         "YAGAPON_RAG_MODEL",
         "YAGAPON_RESPONSE_MODEL",
+        "YAGAPON_MINUTES_MODEL",
         "YAGAPON_FAST_MODEL",
         "YAGAPON_TRANSCRIBE_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
 
-    assert rag_model() == "gemini-3.8-flash"
-    assert response_model() == "gemini-3.8-flash"
+    assert rag_model() == "gemini-3.5-flash-lite"
+    assert response_model() == "gemini-3.5-flash-lite"
+    assert minutes_model() == "gemini-3.8-flash"
     assert fast_model() == "gemini-3.1-flash-lite"
     assert transcribe_model() == "gemini-3.5-transcribe"
 

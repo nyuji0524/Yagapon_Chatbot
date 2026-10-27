@@ -101,6 +101,11 @@ def test_watch_delay_retries_failed_work_and_durable_delivery_schedule():
     assert curation.next_watch_delay(
         21_600,
         900,
+        {"enabled": True, "checkpoint_ready": True, "batch_pending": 1},
+    ) == 900
+    assert curation.next_watch_delay(
+        21_600,
+        900,
         {
             "enabled": True,
             "checkpoint_ready": True,

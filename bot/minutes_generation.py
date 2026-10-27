@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
-from bot.ai_models import generation_config, log_usage, response_model
+from bot.ai_models import generation_config, log_usage, minutes_model
 from bot.ai_retry import retry_rate_limit
 
 log = logging.getLogger("yagapon.minutes_generation")
@@ -140,7 +140,7 @@ def _minutes_instruction(
 
 
 async def _generate(client, *, prompt: str, operation_name: str, max_output_tokens: int) -> str:
-    model = response_model()
+    model = minutes_model()
 
     async def request():
         return await client.aio.models.generate_content(

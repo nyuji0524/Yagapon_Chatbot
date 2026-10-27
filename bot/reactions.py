@@ -139,7 +139,10 @@ async def _flush_reactions(bot) -> bool:
             response = await client.aio.models.generate_content(
                 model=model,
                 contents=prompt,
-                config=generation_config(model, thinking_level="low", max_output_tokens=128),
+                # This is a tiny classification task. Thinking regularly used
+                # most of the output budget and left truncated JSON, which was
+                # then retried forever by the flush loop.
+                config=generation_config(model, thinking_level=None, max_output_tokens=128),
             )
             log_usage(log, "reaction_batch", model, response)
 
