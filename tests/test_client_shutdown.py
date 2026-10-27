@@ -1,9 +1,8 @@
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
-import discord
 import pytest
 
 from bot.client import YagaPon
@@ -27,7 +26,7 @@ async def test_close_flushes_corpus_when_voice_checkpoint_fails(monkeypatch):
         checkpoint,
     )
     monkeypatch.setattr("bot.reactions.shutdown_reactions", shutdown_reactions)
-    monkeypatch.setattr(discord.Bot, "close", discord_close)
+    monkeypatch.setattr(YagaPon, "_close_discord_transport", discord_close)
 
     await YagaPon.close(bot)
 
@@ -65,7 +64,7 @@ async def test_close_enforces_one_end_to_end_shutdown_deadline(monkeypatch):
         stuck_checkpoint,
     )
     monkeypatch.setattr("bot.reactions.shutdown_reactions", shutdown_reactions)
-    monkeypatch.setattr(discord.Bot, "close", discord_close)
+    monkeypatch.setattr(YagaPon, "_close_discord_transport", discord_close)
 
     started = time.monotonic()
     await YagaPon.close(bot)
@@ -77,3 +76,36 @@ async def test_close_enforces_one_end_to_end_shutdown_deadline(monkeypatch):
     shutdown_reactions.assert_not_awaited()
     discord_close.assert_not_awaited()
     bot.corpus.shutdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discord_transport_is_marked_closed_before_http_session(monkeypatch):
+    bot = object.__new__(YagaPon)
+    bot._closed = False
+    order = []
+
+    async def disconnect_voice(*, force):
+        assert force is True
+        order.append("voice")
+
+    async def close_websocket(*, code):
+        assert code == 1000
+        order.append("websocket")
+
+    bot._connection = SimpleNamespace(
+        voice_clients=[SimpleNamespace(disconnect=disconnect_voice)]
+    )
+    bot.ws = SimpleNamespace(open=True, close=close_websocket)
+    bot._ready = SimpleNamespace(clear=Mock())
+
+    async def close_http():
+        assert bot._closed is True
+        order.append("http")
+
+    bot.http = SimpleNamespace(close=close_http)
+
+    await YagaPon._close_discord_transport(bot)
+
+    assert bot._closed is True
+    assert order == ["voice", "websocket", "http"]
+    bot._ready.clear.assert_called_once_with()
