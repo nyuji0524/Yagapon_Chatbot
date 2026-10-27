@@ -7,6 +7,14 @@ from bot.secret_value import read_secret
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_bot_uses_long_recording_io_timeout_large_enough_for_vm_storage():
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+
+    assert compose["services"]["yagapon"]["environment"][
+        "YAGAPON_FINAL_REPROCESS_IO_TIMEOUT_SECONDS"
+    ] == "${YAGAPON_FINAL_REPROCESS_IO_TIMEOUT_SECONDS:-120}"
+
+
 def test_bot_and_worker_receive_the_same_curation_policy():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     bot_environment = compose["services"]["yagapon"]["environment"]
