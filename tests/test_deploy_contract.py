@@ -65,14 +65,26 @@ def test_remote_deploy_preflights_source_index_before_restart():
 def test_remote_deploy_keeps_rollback_image_until_health_succeeds():
     deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
 
-    pull = deploy.index('docker compose --project-directory "$app_dir" --env-file "$deploy_env" pull yagapon')
+    image_ready = deploy.index('docker image inspect "$image"')
     preflight = deploy.index("python -m bot.preflight")
     restart = deploy.rindex("systemctl restart yagapon")
     health_check = deploy.index('"http://127.0.0.1:${host_port}/ready"')
     prune = deploy.index("docker system prune --all --force")
 
-    assert pull < preflight < restart < health_check < prune
+    assert image_ready < preflight < restart < health_check < prune
     assert "Warning: deployment is healthy but Docker cleanup failed" in deploy
+
+
+def test_runtime_import_graph_is_validated_at_image_build_not_on_small_vm():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    preflight = (ROOT / "bot/preflight.py").read_text(encoding="utf-8")
+    deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
+
+    assert 'RUN python -c "from api.server import create_app; from bot.client import YagaPon"' in dockerfile
+    assert "from api.server import create_app" not in preflight
+    assert "from bot.client import YagaPon" not in preflight
+    assert "gcloud auth configure-docker" not in deploy
+    assert "pull yagapon" not in deploy
 
 
 def test_first_permanent_retention_deploy_snapshots_recordings_before_restart():
