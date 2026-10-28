@@ -236,7 +236,12 @@ def generate_review(
     return ReviewResult.model_validate(json.loads(response.text))
 
 
-def build_review_payload(result: ReviewResult, head_sha: str, marker: str) -> dict:
+def build_review_payload(
+    result: ReviewResult,
+    head_sha: str,
+    marker: str,
+    discarded_findings: bool = False,
+) -> dict:
     severity_labels = {
         "critical": "[🟥blocker]",
         "major": "[🟧must]",
@@ -272,9 +277,9 @@ def build_review_payload(result: ReviewResult, head_sha: str, marker: str) -> di
         else "✅ LGTM — ブロッキングな問題は見つからなかったぽん。"
     )
     summary = (
-        result.summary
-        if result.findings
-        else "変更内容を確認し、有効なインライン指摘はありませんでしたぽん。"
+        "変更内容を確認し、有効なインライン指摘はありませんでしたぽん。"
+        if discarded_findings and not result.findings
+        else result.summary
     )
     body = (
         "## おしゃべりやがぽん AIレビュー\n\n"
@@ -318,7 +323,13 @@ def run_review(
     files = github.list_pull_files(repository, pull_number)
     context, allowed_lines = build_review_context(github, repository, pull_request, files)
     result = generate_review(context, model, thinking_level, profile)
+    original_finding_count = len(result.findings)
     result.findings = validate_findings(result.findings, allowed_lines)
-    payload = build_review_payload(result, head_sha, marker)
+    payload = build_review_payload(
+        result,
+        head_sha,
+        marker,
+        discarded_findings=original_finding_count > len(result.findings),
+    )
     github.create_review(repository, pull_number, payload)
     return "reviewed"

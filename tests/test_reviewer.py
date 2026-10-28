@@ -130,13 +130,27 @@ def test_non_blocking_review_is_lgtm_and_uses_imho_nits_labels():
     assert "[🟩nits]" in payload["comments"][1]["body"]
 
 
+def test_review_payload_keeps_clean_model_summary_when_nothing_was_discarded():
+    result = ReviewResult(summary="変更内容を確認し、問題はありませんぽん。", findings=[])
+
+    payload = build_review_payload(result, "abc123", "<!-- marker -->")
+
+    assert "変更内容を確認し、問題はありませんぽん。" in payload["body"]
+    assert "✅ LGTM" in payload["body"]
+
+
 def test_review_payload_discards_unsubstantiated_summary_when_no_findings_survive():
     result = ReviewResult(
         summary="重大な欠落があるためマージできませんぽん。",
         findings=[],
     )
 
-    payload = build_review_payload(result, "abc123", "<!-- marker -->")
+    payload = build_review_payload(
+        result,
+        "abc123",
+        "<!-- marker -->",
+        discarded_findings=True,
+    )
 
     assert "重大な欠落" not in payload["body"]
     assert "有効なインライン指摘はありませんでしたぽん。" in payload["body"]
