@@ -3604,6 +3604,37 @@ class CorpusManager:
                 QuestionKind.GENERAL,
             }
             direct_declared_no_evidence = False
+            # Use the cheaper local path only for explicitly broad questions
+            # with multiple independent candidates. A single history hit still
+            # goes through File Search so safety stops and semantic expansion
+            # keep their existing fail-closed behavior.
+            if comprehensive and len(lexical_hits) >= 2:
+                local_first_context = with_lexical_context(
+                    evidence_context,
+                    lexical_hits,
+                )
+                recovered_locally = await recover_verified_evidence(
+                    local_first_context,
+                    lexical_hits,
+                )
+                if recovered_locally and requires_comprehensive_recovery(
+                    comprehensive=comprehensive,
+                    source_count=len(sources),
+                    candidate_count=len(lexical_hits) + len(firebase_evidence),
+                ):
+                    log.warning(
+                        "Local-first comprehensive answer used too few sources; "
+                        "continuing to File Search (kind=%s guild=%s sources=%s "
+                        "candidates=%s)",
+                        question_kind.value,
+                        guild_id,
+                        len(sources),
+                        len(lexical_hits) + len(firebase_evidence),
+                    )
+                    has_answer = False
+                    sources = []
+                    used_lexical_hits = []
+
             if (
                 not comprehensive
                 and not cross_source_history
@@ -4052,7 +4083,9 @@ class CorpusManager:
             "要約は1つの箇条書きにつき1つの根拠だけから作り、複数の記録を"
             "1つの事実へ合成しないぽん。人名・数値・日付・状態・役職は根拠の"
             "表記をそのまま使うぽん。根拠に明記されていない件数や『主に』などの"
-            "評価を付け足さないぽん。"
+            "評価を付け足さないぽん。各箇条書きは、主語と内容が分かる1つの完全な"
+            "文章にするぽん。見出し、発言者名だけの行、『内容:』だけを分離した行、"
+            "回答する・まとめるという前置きは出力しないぽん。"
             "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
             "提示されていない事実は補完しないぽん。"
@@ -5460,7 +5493,8 @@ class CorpusManager:
         verified = [
             claim
             for claim in claims
-            if cls._recovered_claims_supported(claim, evidence_texts)
+            if cls._recovered_claim_is_standalone(claim)
+            and cls._recovered_claims_supported(claim, evidence_texts)
         ]
         if not verified:
             return ""
@@ -5469,6 +5503,21 @@ class CorpusManager:
             "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
             + "\n".join(f"- {claim}" for claim in verified)
         )
+
+    @staticmethod
+    def _recovered_claim_is_standalone(claim: str) -> bool:
+        """Reject headings, orphan labels, and generic answer preambles."""
+        plain = re.sub(r"[*_`#]", "", claim).strip()
+        if not plain:
+            return False
+        if re.match(
+            r"^(?:発言者|日時|日付|出典|根拠|チャンネル|カテゴリ|参加者)\s*[:：]",
+            plain,
+        ):
+            return False
+        if re.search(r"(?:まとめ|説明|お伝え|回答)(?:た|る|する)?.{0,8}ぽん[。.!！?？]?$", plain):
+            return False
+        return len(plain) >= 12 and bool(re.search(r"[。.!！?？]$", plain))
 
     @staticmethod
     def _support_segment_text(support, answer_text: str) -> str:

@@ -4412,6 +4412,20 @@ def test_recovered_answer_rejects_all_unsupported_claims(corpus_manager):
     ) == ""
 
 
+def test_recovered_answer_drops_orphan_labels_and_generic_preambles(corpus_manager):
+    evidence = "近政檀さんから、各局のメッセージを掲載してほしいという要望があった。"
+    result = corpus_manager._verified_recovered_answer(
+        "新歓Webへの要望をまとめたぽん！\n"
+        "- **発言者**: 近政檀さん\n"
+        "- 各局のメッセージを掲載してほしいという要望があったぽん。",
+        [evidence],
+    )
+
+    assert "要望があったぽん" in result
+    assert "まとめたぽん" not in result
+    assert "発言者" not in result
+
+
 @pytest.mark.parametrize(
     "answer",
     [
