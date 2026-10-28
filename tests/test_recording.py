@@ -317,9 +317,16 @@ def test_cleanup_fsyncs_and_closes_every_track_after_one_failure(
     sink._timeline_file = timeline
     fsynced = []
 
+    failed_once = False
+
     def failing_fsync(descriptor):
+        nonlocal failed_once
         fsynced.append(descriptor)
-        if descriptor == 101:
+        # Model one damaged track checkpoint.  Do not key every later fsync
+        # failure solely by the integer descriptor: the OS may reuse 101 for
+        # the atomic metadata temp file after the fake track is closed.
+        if descriptor == 101 and not failed_once:
+            failed_once = True
             raise OSError("disk error")
 
     monkeypatch.setattr(os, "fsync", failing_fsync)
