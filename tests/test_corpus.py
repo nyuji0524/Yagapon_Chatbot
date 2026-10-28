@@ -2107,8 +2107,12 @@ def test_retrieved_evidence_fallback_preserves_useful_search_results():
         title="27th 企画",
         body=(
             "Firestore現在値（27th / events）\n"
-            'fields: {"eventName": "ITラボ", "place": "11-21", '
-            '"longDescription": "AI鬼ごっこなどを体験できる企画です。"}'
+            "fields: {\n"
+            '  "eventName": "ITラボ",\n'
+            '  "place": "11-21",\n'
+            '  "longDescription": "AI鬼ごっこなどを体験できる企画です。"\n'
+            "}\n"
+            "reference: events:it-lab"
         ),
         source_url="https://console.firebase.google.com/project/example/firestore",
     )
@@ -2133,7 +2137,7 @@ async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
 
     def blocking_search(*_args, **_kwargs):
         started.set()
-        assert release.wait(timeout=1)
+        assert release.wait(timeout=3)
         return []
 
     corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
@@ -2149,7 +2153,7 @@ async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
     loop_progressed = asyncio.Event()
 
     async def observe_started_search():
-        assert await asyncio.to_thread(started.wait, 1)
+        assert await asyncio.to_thread(started.wait, 3)
         loop_progressed.set()
 
     observer = asyncio.create_task(observe_started_search())

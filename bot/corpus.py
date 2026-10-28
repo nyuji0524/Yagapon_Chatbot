@@ -3834,15 +3834,15 @@ class CorpusManager:
         fields, with conservative size bounds; the citation still links to the
         original record.
         """
-        fields_match = re.search(
-            r"^fields:\s*(\{.*\})\s*$",
-            item.body,
-            re.MULTILINE,
-        )
-        if not fields_match:
+        fields_marker = re.search(r"^fields:\s*", item.body, re.MULTILINE)
+        if not fields_marker:
             return None
         try:
-            fields = json.loads(fields_match.group(1))
+            # ``raw_decode`` accepts compact or pretty-printed JSON and stops
+            # before any later evidence metadata in the same body.
+            fields, _end = json.JSONDecoder().raw_decode(
+                item.body[fields_marker.end():].lstrip()
+            )
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
         if not isinstance(fields, dict):
