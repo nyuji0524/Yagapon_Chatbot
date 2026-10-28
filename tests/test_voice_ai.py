@@ -1158,6 +1158,49 @@ async def test_voice_start_failure_stays_terminal_after_sink_cleanup(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_listen_start_runs_capture_monitors_without_realtime_transcription(
+    monkeypatch,
+    tmp_path,
+):
+    sink = SimpleNamespace(session_dir=tmp_path / "session")
+    voice_client = SimpleNamespace(
+        is_connected=Mock(return_value=True),
+        is_recording=Mock(return_value=True),
+        start_recording=Mock(),
+    )
+    channel = SimpleNamespace(
+        id=10,
+        name="会議",
+        category_id=None,
+        category=None,
+        connect=AsyncMock(return_value=voice_client),
+    )
+    monitor_release = asyncio.Event()
+
+    async def wait_for_release():
+        await monitor_release.wait()
+
+    monkeypatch.setattr("bot.voice.PersistentPCMSink", lambda *_args, **_kwargs: sink)
+    monkeypatch.setattr("bot.voice.asyncio.sleep", AsyncMock())
+    session = VoiceSession(SimpleNamespace(), 1, channel, VoiceMode.LISTEN)
+    session._capture_monitor_loop = wait_for_release
+    session._durability_loop = wait_for_release
+    session._realtime_loop = AsyncMock(side_effect=AssertionError("realtime STT started"))
+
+    await session.start()
+    try:
+        assert session.is_active is True
+        assert session._capture_monitor_task is not None
+        assert session._durability_task is not None
+        assert session._realtime_task is None
+        session._realtime_loop.assert_not_awaited()
+    finally:
+        monitor_release.set()
+        tasks = [session._capture_monitor_task, session._durability_task]
+        await asyncio.gather(*(task for task in tasks if task is not None))
+
+
+@pytest.mark.asyncio
 async def test_live_meeting_never_exports_protected_category_to_knowledge(monkeypatch, tmp_path):
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS", "1")
     monkeypatch.setenv("YAGAPON_KNOWLEDGE_DENY_CHANNEL_TERMS", "選考")
