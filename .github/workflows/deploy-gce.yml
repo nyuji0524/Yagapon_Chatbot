@@ -96,12 +96,22 @@ jobs:
           set +e
           quoted_image=$(printf '%q' "$IMAGE_SHA")
           quoted_stage=$(printf '%q' "$DEPLOY_STAGE")
-          gcloud compute ssh "$GCE_INSTANCE" \
-            --project "$GCP_PROJECT_ID" \
-            --zone "$GCE_ZONE" \
-            --tunnel-through-iap \
-            --command "sudo test -x /opt/yagapon/deploy/remote-bootstrap.sh || exit 42; sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
-          deploy_status=$?
+          deploy_status=255
+          for attempt in 1 2 3; do
+            gcloud compute ssh "$GCE_INSTANCE" \
+              --project "$GCP_PROJECT_ID" \
+              --zone "$GCE_ZONE" \
+              --tunnel-through-iap \
+              --command "sudo test -x /opt/yagapon/deploy/remote-bootstrap.sh || exit 42; sudo /opt/yagapon/deploy/remote-bootstrap.sh $quoted_image $quoted_stage"
+            deploy_status=$?
+            if [[ "$deploy_status" != 255 ]]; then
+              break
+            fi
+            if [[ "$attempt" != 3 ]]; then
+              echo "Transient SSH/OS Login failure; retrying IAP connection ($attempt/3)" >&2
+              sleep $((attempt * 10))
+            fi
+          done
           set -e
           if [[ "$deploy_status" == 42 ]]; then
             # One-time migration for a newly provisioned or legacy VM. Normal

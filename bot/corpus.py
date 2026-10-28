@@ -19,7 +19,6 @@ from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
-from google import genai
 from google.genai import types
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
@@ -28,6 +27,7 @@ from bot.ai_retry import (
     RateLimitExceeded,
     is_ai_unavailable_error,
     is_transient_api_error,
+    new_genai_client,
     retry_rate_limit,
     retry_transient_api,
 )
@@ -1627,7 +1627,12 @@ class _GroundingAudit:
 class CorpusManager:
     def __init__(self):
         api_key = os.environ.get("GOOGLE_API_KEY", "")
-        self._client = genai.Client(api_key=api_key)
+        # Keep Gemini's generated-client retries out of the RAG request path.
+        # In particular, the SDK default retried permanent HTTP 402 billing
+        # failures for tens of seconds before our deterministic evidence
+        # fallback could run. The shared client retries only short-lived
+        # network/server statuses and leaves 402/429 policy to this service.
+        self._client = new_genai_client(api_key)
         self.rag_store = RagStore()
         self.firebase_knowledge = FirebaseKnowledgeReader()
         self._seed_trusted_knowledge()
@@ -3251,6 +3256,40 @@ class CorpusManager:
             else:
                 schema_contracts = ()
                 schema_sources = []
+            current_implementation_hits = [
+                hit
+                for hit in authoritative_hits
+                if hit.authority in CURRENT_IMPLEMENTATION_AUTHORITIES
+                and hit.status in CURRENT_STATUSES
+            ]
+            if (
+                schema_fallback_allowed
+                and schema_contracts
+                and schema_sources
+                and not current_implementation_hits
+            ):
+                # Public Firestore projection questions already have a fully
+                # validated, deterministic answer. Calling File Search first
+                # made every schema question wait on Gemini (and on depleted
+                # billing) without being able to improve the safe projection.
+                confidence = evidence_confidence(
+                    answered=True,
+                    evidence_count=len(schema_sources),
+                    source_family_count=citation_source_family_count(schema_sources),
+                    candidate_count=len(schema_contracts),
+                    locally_verified=True,
+                    extractive_fallback=True,
+                )
+                return RagAnswer(
+                    text=self._render_firebase_schema_contracts(schema_contracts),
+                    citations=tuple(schema_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                    confidence_score=confidence[0],
+                    confidence_label=confidence[1],
+                    confidence_detail=confidence[2],
+                )
             if comprehensive and self._is_firebase_only_exhaustive_request(question):
                 firebase_groups = self._parse_firebase_list_groups(firebase_evidence)
                 firebase_sources = self._firebase_sources(firebase_evidence, [])
@@ -3786,8 +3825,11 @@ class CorpusManager:
             if is_ai_unavailable_error(exc):
                 fallback_hits = [
                     hit
-                    for hit in authoritative_hits
-                    if can_answer_directly(question_kind, hit.authority, hit.status)
+                    for hit in lexical_hits
+                    if (
+                        can_answer_directly(question_kind, hit.authority, hit.status)
+                        or allows_unreviewed_evidence(question_kind)
+                    )
                 ]
                 fallback_runtime = [
                     item
@@ -3834,6 +3876,19 @@ class CorpusManager:
                         confidence_label=confidence[1],
                         confidence_detail=confidence[2],
                     )
+                return RagAnswer(
+                    text=(
+                        "AI回答生成は現在利用できないため、許可された範囲を検索したものの、"
+                        "質問へ直接答えられる根拠を確認できなかったぽん。"
+                        "年度・期間・企画名などを加えると絞り込みやすいぽん。"
+                    ),
+                    festival=festival,
+                    no_answer=True,
+                    metadata_filter=metadata_filter,
+                    confidence_score=0,
+                    confidence_label="根拠なし",
+                    confidence_detail="AI利用不可時のローカル・Firebase検索で一致する根拠が0件",
+                )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,
