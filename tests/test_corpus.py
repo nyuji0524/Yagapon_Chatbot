@@ -3588,11 +3588,7 @@ async def test_data_contract_uses_projection_immediately_when_direct_source_is_r
     corpus_manager.rag_store.query_terms = Mock(return_value=["ranking", "構造"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[source_hit])
     corpus_manager._recover_from_lexical_hits = AsyncMock(
-        return_value=(
-            "ランキングは `yagamy/27/ranking` にあるぽん。\n"
-            "[[YAGAPON_EVIDENCE_KEYS:exact:repo-ranking-contract]]\n"
-            "[[YAGAPON_ANSWER_STATUS:complete]]"
-        )
+        side_effect=AssertionError("an explicit collection-name question needs no model")
     )
     corpus_manager._recovered_claims_supported = Mock(return_value=False)
     corpus_manager._client.aio.models.generate_content = AsyncMock(
@@ -3600,7 +3596,7 @@ async def test_data_contract_uses_projection_immediately_when_direct_source_is_r
     )
 
     result = await corpus_manager.query_with_trace(
-        "27thのrankingの構造はどうなっていた？",
+        "27thのrankingのFirestore構造と、実装で使うコレクション名を教えて",
         "fileSearchStores/test",
         guild_id=1,
     )
@@ -3613,7 +3609,7 @@ async def test_data_contract_uses_projection_immediately_when_direct_source_is_r
     assert "`category`" in result.text
     assert "`score`" in result.text
     assert len(result.citations) == 2
-    corpus_manager._recover_from_lexical_hits.assert_awaited_once()
+    corpus_manager._recover_from_lexical_hits.assert_not_awaited()
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
