@@ -30,6 +30,7 @@ from bot.corpus import (
     generated_answer_is_sensitive,
     parse_model_answer,
     requires_comprehensive_answer,
+    requires_comprehensive_recovery,
     retrieval_metadata_filter,
     run_backfill_channels,
     sensitive_request_response,
@@ -2105,6 +2106,29 @@ def test_requires_comprehensive_answer_detects_broad_requests(question):
 
 def test_requires_comprehensive_answer_keeps_single_fact_query_normal():
     assert requires_comprehensive_answer("11-21の読み方は？") is False
+
+
+def test_comprehensive_answer_retries_when_only_one_of_multiple_sources_was_used():
+    assert requires_comprehensive_recovery(
+        comprehensive=True,
+        source_count=1,
+        candidate_count=8,
+    ) is True
+    assert requires_comprehensive_recovery(
+        comprehensive=True,
+        source_count=2,
+        candidate_count=8,
+    ) is False
+    assert requires_comprehensive_recovery(
+        comprehensive=False,
+        source_count=1,
+        candidate_count=8,
+    ) is False
+    assert requires_comprehensive_recovery(
+        comprehensive=True,
+        source_count=1,
+        candidate_count=1,
+    ) is False
 
 
 def test_entity_overview_fallback_is_generic_and_extracts_authorized_sources():
