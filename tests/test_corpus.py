@@ -5794,6 +5794,8 @@ async def test_calendar_window_is_applied_to_exact_search_and_prompt(
     assert search_kwargs["date_to"] == "2025-10-31"
     config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
     assert "2025-10-01から2025-10-31" in config.system_instruction
+    assert "『本番前の準備』" in config.system_instruction
+    assert "異なるイベントを単に『本番』としてまとめず" in config.system_instruction
     assert config.tools[0].file_search.top_k == 20
 
 
@@ -5838,6 +5840,53 @@ async def test_history_uses_unreviewed_conversation_when_ai_is_unavailable(
     assert "新歓Webの要件整理" in result.text
     assert result.lexical_keys == ("discord-history",)
     assert result.confidence_label != "根拠なし"
+
+
+@pytest.mark.asyncio
+async def test_ai_unavailable_does_not_mix_unrelated_hits_into_firebase_result(
+    corpus_manager,
+):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    ranking = FirebaseEvidence(
+        document_key="firebase:ranking:1",
+        title="27th 大賞企画の公開集計",
+        body=(
+            "Firestore現在値（27th / ranking）\n"
+            "collection_path: yagamy/27/ranking\n"
+            "reference: ranking:1\n"
+            'fields: {"category": "exhibition", "eventName": "ITラボ", "score": 62}'
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    unrelated = lexical_hit(
+        "unrelated-code",
+        score=900,
+        authority="repository_context",
+        source_type="source_code",
+        excerpt="個人通知のParserとdeep linkを実装する。",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[ranking])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["大賞企画", "票数"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[unrelated])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted("prepayment credits are depleted")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの大賞企画の結果を、票数もあわせて教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "ITラボ" in result.text
+    assert "62" in result.text
+    assert "個人通知" not in result.text
+    assert result.lexical_keys == ()
+    assert len(result.citations) == 1
+    assert "Firebase現在値" in result.citations[0]
 
 
 @pytest.mark.asyncio

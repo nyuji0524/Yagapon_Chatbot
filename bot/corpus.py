@@ -3312,6 +3312,9 @@ class CorpusManager:
                 system += (
                     f"\n【対象期間】{target_date_from}から{target_date_to}までと重なる記録だけを"
                     "根拠に回答するぽん。期間外の活動や別年度の同じ月を混ぜてはいけないぽん。"
+                    "記録にイベント名や開催前後が明記されていない限り、活動を『本番前の準備』"
+                    "『本番後の振り返り』などと推測してはいけないぽん。異なるイベントを単に"
+                    "『本番』としてまとめず、確認できる日付と活動内容をそのまま説明するぽん。"
                 )
             evidence_context = ""
             if members_info:
@@ -3877,27 +3880,52 @@ class CorpusManager:
                                 search_hits,
                                 question_kind,
                             )
-                            fallback_answer = (
-                                ""
-                                if overview_subject and (firebase_evidence or search_hits)
-                                else self._render_retrieved_evidence_fallback(
-                                    fallback_search_hits,
-                                    firebase_evidence,
-                                    recovery_semantic_evidence,
+                            fallback_runtime = [
+                                item
+                                for item in firebase_evidence
+                                if can_answer_directly(
+                                    question_kind,
+                                    item.authority,
+                                    item.status,
                                 )
-                            )
-                            fallback_sources = self._lexical_sources(
-                                fallback_search_hits,
-                                [],
-                            )
-                            fallback_sources.extend(
-                                self._firebase_sources(firebase_evidence, fallback_sources)
-                            )
-                            fallback_sources.extend(
-                                item.citation
-                                for item in recovery_semantic_evidence
-                                if item.citation and item.citation not in fallback_sources
-                            )
+                                and not item.document_key.startswith("firebase:schema:")
+                            ]
+                            if fallback_runtime:
+                                # A reviewed Firestore projection is already a
+                                # complete, current source for the fields it
+                                # exposes.  If synthesis fails, return only
+                                # those records. Mixing broad semantic/lexical
+                                # hits here previously appended unrelated code
+                                # and Discord excerpts to ranking results.
+                                fallback_answer = self._render_retrieved_evidence_fallback(
+                                    [],
+                                    fallback_runtime,
+                                    (),
+                                )
+                                fallback_sources = self._firebase_sources(
+                                    fallback_runtime,
+                                    [],
+                                )
+                                fallback_search_hits = []
+                            else:
+                                fallback_answer = (
+                                    ""
+                                    if overview_subject and search_hits
+                                    else self._render_retrieved_evidence_fallback(
+                                        fallback_search_hits,
+                                        [],
+                                        recovery_semantic_evidence,
+                                    )
+                                )
+                                fallback_sources = self._lexical_sources(
+                                    fallback_search_hits,
+                                    [],
+                                )
+                                fallback_sources.extend(
+                                    item.citation
+                                    for item in recovery_semantic_evidence
+                                    if item.citation and item.citation not in fallback_sources
+                                )
                             if (
                                 fallback_answer
                                 and fallback_sources
@@ -4042,16 +4070,24 @@ class CorpusManager:
                         fallback_hits,
                         fallback_runtime,
                     )
-                else:
+                elif fallback_runtime:
                     fallback_answer = self._render_retrieved_evidence_fallback(
-                        fallback_hits,
+                        [],
                         fallback_runtime,
                         (),
                     )
-                fallback_sources = self._lexical_sources(fallback_hits, [])
-                fallback_sources.extend(
-                    self._firebase_sources(fallback_runtime, fallback_sources)
-                )
+                    fallback_hits = []
+                else:
+                    fallback_answer = self._render_retrieved_evidence_fallback(
+                        fallback_hits,
+                        [],
+                        (),
+                    )
+                fallback_sources = self._firebase_sources(fallback_runtime, [])
+                if not fallback_runtime:
+                    fallback_sources.extend(
+                        self._lexical_sources(fallback_hits, fallback_sources)
+                    )
                 if fallback_answer and fallback_sources:
                     confidence = evidence_confidence(
                         answered=True,
