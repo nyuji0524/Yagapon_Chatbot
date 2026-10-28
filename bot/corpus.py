@@ -1934,13 +1934,49 @@ def answer_requirement_coverage(
         )
 
     explicit_requirements = answer_requirement_labels(question)
+    normalized_requirement_labels = {
+        re.sub(r"[\s*_`#]", "", label.casefold()): label
+        for label in explicit_requirements
+    }
+    answer_lines = answer.splitlines()
+
+    def requirement_section(label: str) -> str:
+        normalized_label = re.sub(r"[\s*_`#]", "", label.casefold())
+        for index, line in enumerate(answer_lines):
+            normalized_line = re.sub(r"[\s*_`#：:]", "", line.casefold())
+            if normalized_line != normalized_label:
+                continue
+            section: list[str] = []
+            for following in answer_lines[index + 1:]:
+                normalized_following = re.sub(
+                    r"[\s*_`#：:]",
+                    "",
+                    following.casefold(),
+                )
+                if normalized_following in normalized_requirement_labels:
+                    break
+                section.append(following)
+            return "\n".join(section).strip()
+        return ""
+
     for label in explicit_requirements:
         normalized_label = re.sub(r"[\s*_`#]", "", label.casefold())
+        section = requirement_section(label)
+        explicitly_missing = bool(
+            section
+            and re.search(
+                r"(?:確認|特定|発見|取得|判断)(?:することが)?できな(?:い|かった)|"
+                r"見つけられなかった|記載(?:を確認)?できなかった|"
+                r"(?:記録|情報|資料|根拠)(?:が|は)(?:ない|見当たらない)|不明だぽん",
+                section,
+            )
+        )
         add(
             label,
             bool(
                 normalized_label
                 and normalized_label in re.sub(r"[\s*_`#]", "", normalized_answer)
+                and not explicitly_missing
             ),
         )
 
