@@ -17,6 +17,7 @@ from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     AnswerStatus,
     CorpusManager,
+    RagAnswer,
     _filter_retrieval_plumbing_hits,
     _rank_extract_fallback_hits,
     _select_lexical_context_hits,
@@ -2713,6 +2714,35 @@ def test_evidence_confidence_never_labels_raw_extractive_dump_as_high():
     assert "抽出表示" in detail
 
 
+@pytest.mark.asyncio
+async def test_live_answer_is_not_graded_by_bullet_or_keyword_heuristics(corpus_manager):
+    natural_answer = (
+        "新歓Webでは、他局から掲載内容の追加と公開時期の調整を求められ、"
+        "外部向け案内との整合を取りながら反映したぽん。"
+    )
+    corpus_manager._query_single_facet = AsyncMock(
+        return_value=RagAnswer(
+            text=natural_answer,
+            citations=("[確認済み記録](https://example.com/source)",),
+            no_answer=False,
+            confidence_score=82,
+            confidence_label="高",
+            confidence_detail="根拠3件 / 2系統 / 未監査",
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "新歓Webで外部や他局から要求された内容を一覧で説明して",
+        "fileSearchStores/test",
+    )
+
+    assert result.text.startswith(natural_answer)
+    assert result.confidence_score == 82
+    assert result.confidence_label == "参照元あり"
+    assert "根拠3件 / 2系統" in (result.confidence_detail or "")
+    assert "要求充足度" not in (result.confidence_detail or "")
+
+
 def test_requirement_coverage_penalizes_grounded_but_incomplete_compound_answer():
     question = (
         "新歓Webで外部や他局から要求があった内容と、その後コードでどう対応したかを、"
@@ -3245,7 +3275,9 @@ async def test_detailed_exhaustive_notification_request_keeps_requested_body(cor
     assert result.text.count("カテゴリ:") == 3
     assert "指定に合わせて、取得できた本文も掲載" in result.text
     assert result.confidence_score == 65
-    assert "要求充足度 100" in (result.confidence_detail or "")
+    assert result.confidence_label == "参照元あり"
+    assert "根拠1件 / 1系統" in (result.confidence_detail or "")
+    assert "要求充足度" not in (result.confidence_detail or "")
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
