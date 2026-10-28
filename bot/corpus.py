@@ -3598,51 +3598,37 @@ class CorpusManager:
             no_answer = True
 
         confidence_results = [
-            result
-            for result in results
-            if result.confidence_score is not None
+            result for result in results if result.confidence_score is not None
         ]
         if sensitive_blocked or not confidence_results:
             confidence_score = None
             confidence_label = None
             confidence_detail = None
         else:
+            # Confidence is retrieval telemetry, not a second answer-quality
+            # gate.  The old path re-parsed the generated prose with keyword,
+            # heading and bullet-count heuristics, then combined that score
+            # with evidence quality.  Besides looking more precise than it
+            # was, this rewarded a rigid list format and penalized an equally
+            # complete natural explanation.  Preserve the evidence facts
+            # reported by the authorized retrieval lanes and never grade the
+            # wording of a live answer.
             scores = [int(result.confidence_score or 0) for result in confidence_results]
-            evidence_score = max(scores) if no_answer else min(scores)
-            if (
-                len(results) == 1
-                and results[0].requirement_coverage_score is not None
-            ):
-                coverage_score = int(results[0].requirement_coverage_score)
-                coverage_detail = (
-                    results[0].requirement_coverage_detail
-                    or "決定論的な回答経路で要求充足を確認"
+            confidence_score = max(scores) if no_answer else min(scores)
+            if no_answer:
+                confidence_label = (
+                    "根拠なし" if confidence_score == 0 else "候補のみ"
                 )
             else:
-                coverage_score, coverage_detail = answer_requirement_coverage(
-                    question,
-                    answer,
-                    citations=sources,
-                    no_answer=no_answer,
-                )
-            confidence_score, confidence_label = combined_answer_confidence(
-                evidence_score,
-                coverage_score,
-            )
+                confidence_label = "参照元あり"
             if len(confidence_results) == 1:
-                evidence_detail = confidence_results[0].confidence_detail
+                confidence_detail = confidence_results[0].confidence_detail
             else:
-                evidence_detail = (
-                    f"{len(confidence_results)}論点のうち最も弱い根拠を表示"
-                    if not no_answer
-                    else f"{len(confidence_results)}論点を検索したが回答可能な根拠なし"
+                confidence_detail = (
+                    f"根拠{len(sources)}件 / "
+                    f"{citation_source_family_count(sources)}系統 / "
+                    f"{len(confidence_results)}検索レーン"
                 )
-            confidence_detail = (
-                f"根拠品質 {evidence_score} / 要求充足度 {coverage_score}"
-                f"（{coverage_detail}）"
-            )
-            if evidence_detail:
-                confidence_detail += f" / {evidence_detail}"
         if sources and not no_answer:
             answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
         elif no_answer:
