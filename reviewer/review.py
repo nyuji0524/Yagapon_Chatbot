@@ -72,6 +72,8 @@ class ReviewResult(BaseModel):
 
 def bounded_excerpt(text: str, limit: int, label: str) -> str:
     """Return complete text when possible, otherwise a clearly marked head/tail excerpt."""
+    if limit <= 0:
+        raise ValueError("excerpt limit must be positive")
     if len(text) <= limit:
         return text
     omitted = len(text) - limit

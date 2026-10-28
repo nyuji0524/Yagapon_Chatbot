@@ -1,3 +1,5 @@
+import pytest
+
 from reviewer.review import (
     Finding,
     ReviewResult,
@@ -41,6 +43,11 @@ def test_bounded_excerpt_marks_omission_and_keeps_file_tail():
     assert "[REVIEW INPUT OMITTED:" in excerpt
     assert "Do not treat either excerpt boundary as the file boundary" in excerpt
     assert excerpt.endswith("SECTION-6\nSECTION-7")
+
+
+def test_bounded_excerpt_rejects_non_positive_limit():
+    with pytest.raises(ValueError, match="limit must be positive"):
+        bounded_excerpt("content", 0, "head file")
 
 
 class _FakeGitHub:
