@@ -100,6 +100,32 @@ def test_semantic_judge_is_an_independent_gate_and_scores_are_reported():
     assert result["scores"]["semantic"] == 3.4
 
 
+def test_rich_answer_case_requires_numbered_markdown_headings():
+    case = EvalCase(
+        id="rich-format",
+        question="複数論点を説明して",
+        must_cite=False,
+        min_numbered_headings=2,
+    )
+
+    passed = evaluate_answer(
+        case,
+        {
+            "response": "### 1. 全体像\n説明だぽん。\n\n### 2. 具体例\n例だぽん。",
+            "sources": [],
+            "no_answer": False,
+        },
+    )
+    failed = evaluate_answer(
+        case,
+        {"response": "断片1、断片2", "sources": [], "no_answer": False},
+    )
+
+    assert passed["passed"] is True
+    assert failed["passed"] is False
+    assert "numbered_headings" in failed["failures"]
+
+
 def test_production_result_excludes_answers_sources_and_judge_prose():
     case = EvalCase(
         id="private-evidence",

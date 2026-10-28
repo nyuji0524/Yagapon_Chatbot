@@ -159,3 +159,27 @@
   expected_source_any: ["矢上祭の年度区分"]
   must_cite: true
   min_sources: 1
+
+- id: it-lab-rich-overview
+  category: comprehensive
+  question: "ITラボについて、企画としての概要・担当局・27thで確認できる状態を整理して教えてください"
+  expected_all: ["ITラボ", "IT局", "27th"]
+  reference_facts:
+    - "ITラボの企画概要、担当局、27thで確認できる状態を論点ごとに分けて説明する"
+    - "確認できない論点があっても、確認済みの論点は残して未確認項目だけを明記する"
+  expected_festival: 27
+  must_cite: true
+  min_sources: 1
+  min_numbered_headings: 2
+
+- id: general-affairs-applications-rich-overview
+  category: comprehensive
+  question: "総務系申請とは何ですか。主な申請と、やがサポ上の仕様・運用上の工夫を整理して教えてください"
+  expected_all: ["総務系申請", "やがサポ"]
+  expected_any: ["机椅子", "レンタル", "電力"]
+  reference_facts:
+    - "総務系申請の目的、主な申請、やがサポ上の仕様や運用上の工夫を区別して説明する"
+    - "実装識別子が根拠にある場合は一般向け名称とともに示す"
+  must_cite: true
+  min_sources: 1
+  min_numbered_headings: 2
