@@ -1042,6 +1042,34 @@ def test_query_terms_keep_cross_team_and_data_contract_cues():
     )
 
 
+def test_query_terms_decompose_compound_request_and_implementation_question():
+    terms = RagStore.query_terms(
+        "新歓Webで外部や他局から要求があった内容と、その後コードでどう対応したかを、"
+        "時系列と根拠付きでまとめてください"
+    )
+
+    assert {"新歓web", "外部", "他局", "要求", "コード", "対応"}.issubset(
+        {term.casefold() for term in terms}
+    )
+    assert not {"時系列", "根拠付き", "外部や他局", "後コード"} & set(terms)
+
+
+def test_query_terms_decompose_connectors_and_predicates_without_domain_allowlist():
+    terms = RagStore.query_terms(
+        "スポンサーCRMで総務や渉外から要望が出たあと、実装でどのように反映したか"
+    )
+
+    assert {"スポンサーcrm", "総務", "渉外", "要望", "実装", "反映"}.issubset(
+        {term.casefold() for term in terms}
+    )
+
+
+def test_query_terms_do_not_split_product_name_containing_ya():
+    terms = RagStore.query_terms("やがサポについて教えてください")
+
+    assert "やがサポ" in terms
+
+
 def test_date_window_can_retrieve_activity_without_a_topic_term(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     for key, starts_at, body in (

@@ -45,6 +45,10 @@ _LOW_INFORMATION_QUERY_TERMS = {
     "問題",
     "問題点",
     "課題",
+    # Output-shape words describe how to answer, not what evidence to find.
+    "時系列",
+    "根拠付き",
+    "系列",
 }
 
 # Two-kanji subjects are common in short Discord questions, but accepting every
@@ -973,7 +977,7 @@ class RagStore:
         # specific for exact matching. Keep subjects such as ``ITラボ`` and
         # ``整理券管理者`` as lexical fallback terms.
         segments = re.split(
-            r"(?:について|として|では|には|から|まで|より|って|とは|の|は|が|を|に|で|(?<!こ)と|も|へ)",
+            r"(?:について|として|では|には|から|まで|より|って|とは|の|は|(?<!や)が|を|に|で|(?<!こ)と|も|へ)",
             stripped,
         )
         stop_terms = {
@@ -985,22 +989,64 @@ class RagStore:
             "お願い",
             "今回",
             "現在",
+            "今日",
+            "明日",
+            "昨日",
+            "今年",
+            "昨年",
+            "去年",
+            "今頃",
             "読み方",
             "施設概要",
             "概要",
             "意味",
             *_LOW_INFORMATION_QUERY_TERMS,
         }
+        connector_terms: list[str] = []
+        normalized_segments: list[str] = []
         for segment in segments:
+            # The ordinary particle splitter deliberately does not split the
+            # character ``や`` because it is also part of product names such
+            # as やがサポ.  Once a bounded phrase has a noun on both sides,
+            # however, ``AやB`` is a high-signal enumeration.  Preserve both
+            # nouns so one absent compound cannot zero out exact retrieval.
+            connector = re.fullmatch(
+                r"(.{2,16}?)(?:や|及び|および|ならびに)(.{2,16})",
+                segment,
+            )
+            if connector:
+                connector_terms.extend(connector.groups())
+                continue
+            # Temporal glue describes the relationship between records, not
+            # the subject.  ``その後コード`` should retrieve ``コード`` in
+            # exactly the same way as ``その後申請`` or ``以前の運用``.
+            normalized_segments.append(
+                re.sub(
+                    r"^(?:(?:その|それ)?(?:後|前)|以前|以後|当時)(?=.{2,})",
+                    "",
+                    segment,
+                )
+            )
+
+        for segment, from_connector in [
+            *((segment, False) for segment in normalized_segments),
+            *((segment, True) for segment in connector_terms),
+        ]:
             segment = re.sub(
                 r"(?:どんなこと|どこ|いつ|だれ|誰|なぜ|どう|何|教えて|ください|"
                 r"されていますか|していましたか|されますか|しますか|ですか|でしたか).*$",
                 "",
                 segment,
             )
+            segment = re.sub(
+                r"(?:したか|していた|している|して|する|された|出たあと?|あった内容?)$",
+                "",
+                segment,
+            )
             if (
                 3 <= len(segment) <= 24
                 or segment in _HIGH_INFORMATION_SHORT_QUERY_TERMS
+                or (from_connector and 2 <= len(segment) <= 16)
             ) and segment not in stop_terms:
                 terms.append(segment)
                 # Preserve a compound for precision, but also expose its
@@ -1016,6 +1062,28 @@ class RagStore:
                     # document and lets large source families crowd out the
                     # actual meeting/conversation evidence.
                     terms.append(compound.group(1))
+        # Japanese requests often turn the operation itself into a predicate
+        # (``どう反映したか``, ``どのように修正したか``).  Extract that verb
+        # stem generically instead of maintaining a domain-word allowlist.
+        terms.extend(
+            match.group(1)
+            for match in re.finditer(
+                r"(?:どう|どのように)([一-龠々ァ-ヴーA-Za-z0-9_.:/-]{2,16}?)(?:した|して|する|された)",
+                question,
+            )
+        )
+        # Two-kanji nouns immediately followed by a case particle are usually
+        # subjects or objects even when they are not in the product glossary.
+        # This recovers new bureau/project vocabulary without accepting every
+        # arbitrary two-character substring from the sentence.
+        terms.extend(
+            match.group(1)
+            for match in re.finditer(
+                r"([一-龠々]{2})(?:から|まで|では|には|で|を|に|へ|が|は|と)",
+                question,
+            )
+            if match.group(1) not in stop_terms
+        )
         # Preserve short, information-bearing domain cues that the generic
         # Japanese particle splitter would otherwise drop or glue together.
         # These are vocabulary classes rather than answers; they only improve
