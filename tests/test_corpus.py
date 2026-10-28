@@ -2742,7 +2742,16 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
     corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
     corpus_manager._client.aio.models.generate_content = AsyncMock(
-        side_effect=RuntimeError("source search unavailable")
+        return_value=SimpleNamespace(
+            text=(
+                "根拠が不足しているぽん。\n"
+                "[[YAGAPON_ANSWER_STATUS:no_evidence]]"
+            ),
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(finish_reason="STOP", grounding_metadata=None)
+            ],
+        )
     )
 
     result = await corpus_manager.query_with_trace(
