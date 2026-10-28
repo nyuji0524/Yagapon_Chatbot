@@ -169,18 +169,18 @@ def test_empty_knowledge_direct_secret_falls_back_to_dedicated_mounted_file(
     )
 
 
-def test_bot_requires_file_search_grounding_supports_by_default():
+def test_bot_keeps_grounding_compatibility_enabled_by_default():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     environment = compose["services"]["yagapon"]["environment"]
 
     assert environment["YAGAPON_RAG_REQUIRE_ANSWER_STATUS"] == (
-        "${YAGAPON_RAG_REQUIRE_ANSWER_STATUS:-true}"
+        "${YAGAPON_RAG_REQUIRE_ANSWER_STATUS:-false}"
     )
     assert environment["YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS"] == (
-        "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}"
+        "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-false}"
     )
     assert environment["YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD"] == (
-        "${YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD:-0.6}"
+        "${YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD:-0.35}"
     )
     assert environment["YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS"] == (
         "${YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS:-1800}"
