@@ -3022,22 +3022,14 @@ def _uploaded_remote_was_created(
 
 
 async def preflight_once(args) -> dict:
-    """Verify every read dependency without changing File Search or local state."""
+    """Validate local inputs and optionally probe remote read dependencies."""
     if os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() != "true":
         return {"disabled": True, "preflight": True}
 
     source_history_settings()
     state = load_state(args.state)
     repositories = load_repositories(args.manifest)
-    client = GitHubSourceClient(github_token_provider(repositories))
     resolved = {}
-    for repository in repositories:
-        resolved[repository.name] = await asyncio.to_thread(
-            client.resolve,
-            repository.name,
-            repository.ref,
-        )
-
     config = ConfigManager()
     store_name = os.environ.get("YAGAPON_CORPUS_STORE_NAME") or config.get_corpus(
         args.guild_id
@@ -3045,17 +3037,33 @@ async def preflight_once(args) -> dict:
     if not store_name:
         raise RuntimeError("No File Search store configured for the guild")
 
-    def sample_file_search_documents() -> int:
-        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-        documents = client.file_search_stores.documents.list(
-            parent=store_name,
-            config={"page_size": 20},
-        )
-        return int(next(iter(documents), None) is not None)
+    check_remote = (
+        os.environ.get("YAGAPON_SOURCE_PREFLIGHT_REMOTE", "false").lower()
+        == "true"
+    )
+    remote_document_sample = None
+    if check_remote:
+        client = GitHubSourceClient(github_token_provider(repositories))
+        for repository in repositories:
+            resolved[repository.name] = await asyncio.to_thread(
+                client.resolve,
+                repository.name,
+                repository.ref,
+            )
 
-    remote_document_sample = await asyncio.to_thread(sample_file_search_documents)
+        def sample_file_search_documents() -> int:
+            client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+            documents = client.file_search_stores.documents.list(
+                parent=store_name,
+                config={"page_size": 20},
+            )
+            return int(next(iter(documents), None) is not None)
+
+        remote_document_sample = await asyncio.to_thread(sample_file_search_documents)
     return {
         "preflight": True,
+        "remote_checks": check_remote,
+        "repositories_configured": len(repositories),
         "repositories_checked": len(resolved),
         "repositories": sorted(resolved),
         "file_search_store": store_name,
