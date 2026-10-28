@@ -784,6 +784,63 @@ class RagStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def backfill_inventory(self, guild_id: int) -> list[dict]:
+        """Build the trusted Discord replacement inventory from SQLite.
+
+        The scheduled six-hour refresh used to enumerate every remote File
+        Search document before reading a single Discord channel. The API is
+        capped at 20 documents per page, so a corpus with thousands of chunks
+        generated hundreds of HTTP calls and temporarily starved the bot.
+        Every upload is committed to this mirror before its cursor advances;
+        use that durable identity for routine incremental replacement. An
+        explicit rebuild still performs the remote reconciliation path.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_key, remote_name, guild_id, channel_id,
+                       channel_name, source_type, status, authority,
+                       access_scope, schema, start_at, end_at
+                FROM documents
+                WHERE guild_id = ?
+                  AND source_type = 'discord_conversation'
+                  AND channel_id IS NOT NULL
+                  AND remote_name IS NOT NULL
+                  AND remote_name != ''
+                ORDER BY document_key
+                """,
+                (guild_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            metadata = {
+                key: item[key]
+                for key in (
+                    "document_key",
+                    "guild_id",
+                    "channel_id",
+                    "channel_name",
+                    "source_type",
+                    "status",
+                    "authority",
+                    "access_scope",
+                    "schema",
+                    "start_at",
+                    "end_at",
+                )
+                if item.get(key) not in (None, "")
+            }
+            result.append(
+                {
+                    "name": item["remote_name"],
+                    "display_name": f"#{item.get('channel_name') or item['channel_id']}",
+                    "metadata": metadata,
+                    "state": "ACTIVE",
+                }
+            )
+        return result
+
     def list_curation_documents(self, *, limit: int = 1000) -> list[dict]:
         """Return raw, locally mirrored source documents eligible for draft curation."""
         with self._lock, self._connect() as connection:

@@ -145,7 +145,8 @@ def _multi_guild_bot():
         set_backfill_cursor=AsyncMock(),
     )
 
-    async def prepare_backfill(guild_id, target_ids, corpus_store):
+    async def prepare_backfill(guild_id, target_ids, corpus_store, **kwargs):
+        assert kwargs == {"prefer_local_inventory": True}
         session = BackfillSession(
             guild_id=guild_id,
             target_channel_ids=frozenset(target_ids),
@@ -277,7 +278,8 @@ def _forum_bot(
     )
     prepared_target_ids = []
 
-    async def prepare_backfill(guild_id, target_ids, corpus_store):
+    async def prepare_backfill(guild_id, target_ids, corpus_store, **kwargs):
+        assert kwargs == {"prefer_local_inventory": True}
         target_ids = frozenset(int(value) for value in target_ids)
         prepared_target_ids.append(target_ids)
         session = BackfillSession(
