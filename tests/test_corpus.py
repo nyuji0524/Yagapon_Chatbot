@@ -2428,9 +2428,9 @@ def test_entity_overview_fallback_is_generic_and_extracts_authorized_sources():
         [runtime],
     )
 
-    assert "Firebaseの企画データ" in rendered
+    assert "Firebaseの公開データでは「技術展示」と案内" in rendered
     assert "プロジェクトX" in rendered
-    assert "11-21" in rendered
+    assert "開催場所は**11-21**" in rendered
     assert "文書・コード上の記録" in rendered
 
 
@@ -2576,8 +2576,9 @@ async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
     )
 
     assert result.no_answer is False
-    assert "Firebaseの企画データ" in result.text
+    assert "Firebaseの公開データでは「AI鬼ごっこなどの体験企画」と案内" in result.text
     assert "AI鬼ごっこなどの体験企画" in result.text
+    assert "確認できた根拠を種類ごと" not in result.text
     assert "fields:" not in result.text
     corpus_manager.rag_store.search_exact.assert_not_called()
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
@@ -2648,9 +2649,9 @@ async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
     )
 
     assert result.no_answer is False
-    assert "Firebaseの企画データ" in result.text
+    assert "Firebaseの公開データでは" in result.text
     assert "ITラボ" in result.text
-    assert "場所: 11-21" in result.text
+    assert "開催場所は**11-21**" in result.text
     assert "fields:" not in result.text
     corpus_manager.rag_store.search_exact.assert_not_called()
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
