@@ -80,9 +80,18 @@ def test_admin_only_channel_can_use_guildwide_rag_scope():
         chunked=True,
         channels=[channel],
         members=[owner, administrator, bot_member],
+        me=bot_member,
     )
 
     assert channel_audience_has_guildwide_rag_access(guild, channel) is True
+    guild.members.append(
+        SimpleNamespace(
+            id=40,
+            bot=True,
+            guild_permissions=SimpleNamespace(administrator=False),
+        )
+    )
+    assert channel_audience_has_guildwide_rag_access(guild, channel) is False
 
 
 def test_public_or_incompletely_cached_channel_cannot_widen_rag_scope():
@@ -104,6 +113,7 @@ def test_public_or_incompletely_cached_channel_cannot_widen_rag_scope():
         chunked=True,
         channels=[channel],
         members=[administrator, regular_member],
+        me=SimpleNamespace(id=30),
     )
 
     assert channel_audience_has_guildwide_rag_access(guild, channel) is False

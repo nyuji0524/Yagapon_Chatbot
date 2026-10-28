@@ -116,9 +116,9 @@ def channel_audience_has_guildwide_rag_access(guild, channel) -> bool:
 
     A normal Discord answer is visible to the whole destination channel, not
     only to the requester.  Guild-wide retrieval is therefore safe only for a
-    fully cached, non-thread channel whose complete visible audience already
-    has Administrator access.  Missing cache or permission evidence fails
-    closed to current-channel retrieval.
+    fully cached, non-thread channel whose complete visible audience (including
+    other bots) already has Administrator access.  Missing cache or permission
+    evidence fails closed to current-channel retrieval.
     """
     if guild is None or channel is None or not bool(getattr(guild, "chunked", False)):
         return False
@@ -127,12 +127,13 @@ def channel_audience_has_guildwide_rag_access(guild, channel) -> bool:
     members = tuple(getattr(guild, "members", ()) or ())
     if not members:
         return False
-    human_viewers = []
+    viewers = []
+    self_id = int(getattr(getattr(guild, "me", None), "id", 0) or 0)
     permissions_for = getattr(channel, "permissions_for", None)
     if not callable(permissions_for):
         return False
     for member in members:
-        if bool(getattr(member, "bot", False)):
+        if self_id and int(getattr(member, "id", -1)) == self_id:
             continue
         try:
             permissions = permissions_for(member)
@@ -149,9 +150,9 @@ def channel_audience_has_guildwide_rag_access(guild, channel) -> bool:
         except Exception:
             return False
         if can_view and can_read_history:
-            human_viewers.append(member)
-    return bool(human_viewers) and all(
-        has_guildwide_rag_access(guild, member) for member in human_viewers
+            viewers.append(member)
+    return bool(viewers) and all(
+        has_guildwide_rag_access(guild, member) for member in viewers
     )
 
 

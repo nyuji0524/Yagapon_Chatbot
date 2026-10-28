@@ -211,6 +211,7 @@ def test_admin_only_channel_uses_all_admin_readable_channels_for_rag():
         channels=[destination, evidence_channel],
         threads=[],
         members=[administrator, bot_member],
+        me=bot_member,
     )
     destination.guild = guild
     evidence_channel.guild = guild
