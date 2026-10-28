@@ -2000,7 +2000,7 @@ async def test_source_preflight_skips_paid_remote_probes_by_default(
         "repositories": [],
         "file_search_store": "stores/configured",
         "remote_documents_sampled": None,
-        "state_documents": 0,
+        "state_documents": None,
     }
 
 
@@ -2034,6 +2034,7 @@ async def test_source_preflight_rejects_invalid_state_before_network(
     state = tmp_path / "state.json"
     state.write_text("[]", encoding="utf-8")
     monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_PREFLIGHT_FULL_STATE", "true")
     monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
     monkeypatch.setattr(
         source_index_module,
@@ -2088,6 +2089,7 @@ async def test_source_preflight_rejects_nested_corrupt_state_before_network(
     state = tmp_path / "state.json"
     state.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_PREFLIGHT_FULL_STATE", "true")
     monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
     monkeypatch.setattr(
         source_index_module,

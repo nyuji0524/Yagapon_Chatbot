@@ -3027,7 +3027,24 @@ async def preflight_once(args) -> dict:
         return {"disabled": True, "preflight": True}
 
     source_history_settings()
-    state = load_state(args.state)
+    check_remote = (
+        os.environ.get("YAGAPON_SOURCE_PREFLIGHT_REMOTE", "false").lower()
+        == "true"
+    )
+    check_full_state = check_remote or (
+        os.environ.get("YAGAPON_SOURCE_PREFLIGHT_FULL_STATE", "false").lower()
+        == "true"
+    )
+    if check_full_state:
+        state_documents = len(load_state(args.state)["documents"])
+    else:
+        # Full nested validation is retained for maintenance and watcher use.
+        # Normal deploys avoid reading the multi-megabyte state while the live
+        # Bot is competing for disk I/O on the small VM.
+        if args.state.exists():
+            if not args.state.is_file() or args.state.stat().st_size <= 0:
+                raise RuntimeError("source index state must be a non-empty regular file")
+        state_documents = None
     repositories = load_repositories(args.manifest)
     resolved = {}
     config = ConfigManager()
@@ -3036,11 +3053,6 @@ async def preflight_once(args) -> dict:
     )
     if not store_name:
         raise RuntimeError("No File Search store configured for the guild")
-
-    check_remote = (
-        os.environ.get("YAGAPON_SOURCE_PREFLIGHT_REMOTE", "false").lower()
-        == "true"
-    )
     remote_document_sample = None
     if check_remote:
         client = GitHubSourceClient(github_token_provider(repositories))
@@ -3068,7 +3080,7 @@ async def preflight_once(args) -> dict:
         "repositories": sorted(resolved),
         "file_search_store": store_name,
         "remote_documents_sampled": remote_document_sample,
-        "state_documents": len(state["documents"]),
+        "state_documents": state_documents,
     }
 
 
