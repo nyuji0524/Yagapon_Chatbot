@@ -3868,6 +3868,8 @@ class CorpusManager:
             else:
                 rendered = str(value)
             rendered = re.sub(r"\s+", " ", rendered).strip()
+            if not rendered:
+                continue
             if len(rendered) > 220:
                 rendered = rendered[:219].rstrip() + "…"
             details.append(f"{label}: {rendered}")
