@@ -603,6 +603,67 @@ def _select_lexical_context_hits(
     return selected
 
 
+_RETRIEVAL_PLUMBING_PATHS = (
+    ":bot/corpus.py",
+    ":bot/rag_store.py",
+    ":bot/knowledge_authority.py",
+    ":bot/firebase_knowledge.py",
+)
+
+
+def _question_is_about_retrieval_system(question: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:おしゃべり)?やがぽん|\bRAG\b|ナレッジ|File\s*Search|"
+            r"検索(?:処理|基盤|ロジック|実装|精度)|根拠(?:不足|判定)|retrieval|corpus",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _filter_retrieval_plumbing_hits(
+    question: str,
+    hits: list[LexicalHit],
+) -> list[LexicalHit]:
+    """Keep search implementation vocabulary from becoming topic evidence.
+
+    The retrieval source itself contains vocabulary regexes such as
+    ``新歓Web|外部|他局|要求``.  A topical question containing those words used
+    to rank that regex above the Discord records it was meant to find.  The
+    implementation remains searchable for questions about YagaPon/RAG itself;
+    only unrelated topic answers exclude these plumbing modules.
+    """
+    if _question_is_about_retrieval_system(question):
+        return hits
+    return [
+        hit
+        for hit in hits
+        if not (
+            hit.source_type in {"source_code", "source_code_history"}
+            and any(marker in hit.channel_name for marker in _RETRIEVAL_PLUMBING_PATHS)
+        )
+    ]
+
+
+def _rank_extract_fallback_hits(
+    hits: list[LexicalHit],
+    question_kind: QuestionKind,
+) -> list[LexicalHit]:
+    """Put explanatory records first when rendering a non-generative answer."""
+    if question_kind is not QuestionKind.HISTORY:
+        return hits
+    return sorted(
+        hits,
+        key=lambda hit: (
+            is_history_narrative_source(hit.source_type),
+            hit.score,
+            authority_score(question_kind, hit.authority, hit.status),
+        ),
+        reverse=True,
+    )
+
+
 def backfill_channel_concurrency() -> int:
     """Return a bounded channel worker count safe for Discord and File Search."""
     raw = os.environ.get("YAGAPON_BACKFILL_CONCURRENCY", str(BACKFILL_CHANNEL_CONCURRENCY_DEFAULT))
@@ -3191,6 +3252,7 @@ class CorpusManager:
             if guild_id
             else []
         )
+        lexical_hits = _filter_retrieval_plumbing_hits(question, lexical_hits)
         if not allows_unreviewed_evidence(question_kind):
             lexical_hits = [
                 hit
@@ -3682,16 +3744,23 @@ class CorpusManager:
                         # projection below.  Do not let the generic raw-record
                         # fallback pre-empt it merely because File Search's
                         # claim mapping was incomplete.
+                        fallback_search_hits = _rank_extract_fallback_hits(
+                            search_hits,
+                            question_kind,
+                        )
                         fallback_answer = (
                             ""
                             if overview_subject and (firebase_evidence or search_hits)
                             else self._render_retrieved_evidence_fallback(
-                                search_hits,
+                                fallback_search_hits,
                                 firebase_evidence,
                                 recovery_semantic_evidence,
                             )
                         )
-                        fallback_sources = self._lexical_sources(search_hits, [])
+                        fallback_sources = self._lexical_sources(
+                            fallback_search_hits,
+                            [],
+                        )
                         fallback_sources.extend(
                             self._firebase_sources(firebase_evidence, fallback_sources)
                         )
@@ -3711,7 +3780,7 @@ class CorpusManager:
                         ):
                             answer = fallback_answer
                             sources = fallback_sources
-                            used_lexical_hits = search_hits
+                            used_lexical_hits = fallback_search_hits
                             has_answer = True
                             extractive_fallback = True
                         else:
@@ -3831,6 +3900,10 @@ class CorpusManager:
                         or allows_unreviewed_evidence(question_kind)
                     )
                 ]
+                fallback_hits = _rank_extract_fallback_hits(
+                    fallback_hits,
+                    question_kind,
+                )
                 fallback_runtime = [
                     item
                     for item in firebase_evidence

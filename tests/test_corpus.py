@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -16,6 +17,8 @@ from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     AnswerStatus,
     CorpusManager,
+    _filter_retrieval_plumbing_hits,
+    _rank_extract_fallback_hits,
     _select_lexical_context_hits,
     answer_declares_missing_knowledge,
     backfill_channel_concurrency,
@@ -81,6 +84,58 @@ def lexical_hit(
         status=status,
         source_type=source_type,
     )
+
+
+def test_topic_query_excludes_rag_query_parser_as_evidence():
+    plumbing = lexical_hit(
+        "rag-store",
+        score=900,
+        authority="deployed_implementation",
+        source_type="source_code",
+        excerpt="新歓Web|外部|他局|要求",
+    )
+    plumbing = replace(
+        plumbing,
+        channel_name="nyuji0524/Yagapon_Chatbot:bot/rag_store.py",
+    )
+    discussion = lexical_hit(
+        "discord-request",
+        score=500,
+        authority="conversation",
+        source_type="discord_conversation",
+        excerpt="総務から新歓Webへの掲載依頼があった。",
+    )
+
+    assert _filter_retrieval_plumbing_hits(
+        "新歓webで外部や他局から要求があった内容をまとめて",
+        [plumbing, discussion],
+    ) == [discussion]
+    assert _filter_retrieval_plumbing_hits(
+        "やがぽんのRAG検索実装を教えて",
+        [plumbing, discussion],
+    ) == [plumbing, discussion]
+
+
+def test_history_extractive_fallback_puts_discussion_before_source_code():
+    implementation = lexical_hit(
+        "implementation",
+        score=900,
+        authority="repository_context",
+        source_type="source_code",
+    )
+    discussion = lexical_hit(
+        "discussion",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+    )
+
+    ranked = _rank_extract_fallback_hits(
+        [implementation, discussion],
+        QuestionKind.HISTORY,
+    )
+
+    assert [hit.document_key for hit in ranked] == ["discussion", "implementation"]
 
 
 def test_history_context_reserves_narrative_sources_after_authority_ranking():
