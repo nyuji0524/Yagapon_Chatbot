@@ -1272,14 +1272,17 @@ class RagStore:
         # Latin text while avoiding a full scan of every document body. Terms
         # shorter than three characters cannot be represented by the trigram
         # index; retain the legacy scan only when no indexed term is available.
+        base_conditions = list(conditions)
+        base_params = list(params)
         indexed_terms = [term for term in clean_terms if len(term) >= 3]
+        short_terms = [term for term in clean_terms if len(term) < 3]
         use_fts = bool(indexed_terms) and self._fts_ready.is_set()
         if use_fts:
             fts_query = " OR ".join(
                 f'"{term.replace(chr(34), chr(34) * 2)}"' for term in indexed_terms
             )
-            conditions.append("documents_fts MATCH ?")
             params.append(fts_query)
+            conditions.append("documents_fts MATCH ?")
         elif clean_terms:
             term_conditions = []
             for term in clean_terms:
@@ -1319,16 +1322,19 @@ class RagStore:
             extra_params: tuple[object, ...] = (),
             *,
             row_limit: int = candidate_limit,
+            where_override: list[str] | None = None,
+            params_override: list[object] | None = None,
+            documents_only: bool = False,
         ):
-            where = list(conditions)
+            where = list(conditions if where_override is None else where_override)
             if extra_condition:
                 where.append(extra_condition)
             source_sql = (
                 "documents AS d JOIN documents_fts ON documents_fts.rowid = d.rowid"
-                if use_fts
-                else "documents"
+                if use_fts and not documents_only
+                else "documents AS d"
             )
-            select_sql = "SELECT d.*" if use_fts else "SELECT *"
+            select_sql = "SELECT d.*"
             sql = (
                 select_sql
                 + " FROM "
@@ -1338,7 +1344,7 @@ class RagStore:
                 + order_sql
             )
             query_params = [
-                *params,
+                *(params if params_override is None else params_override),
                 *extra_params,
                 *relevance_params,
                 row_limit,
@@ -1347,6 +1353,26 @@ class RagStore:
 
         with self._lock, self._connect() as connection:
             rows = list(fetch_rows())
+            if use_fts and short_terms:
+                # FTS5 rejects MATCH on one side of an OR with ordinary
+                # predicates. Run a second bounded lane for two-character
+                # Japanese terms and merge it with the indexed candidates.
+                # This keeps the fast trigram path while ensuring records that
+                # say only ``他局``, ``依頼`` or ``削除`` remain discoverable.
+                short_condition = "(" + " OR ".join(
+                    "instr(lower(d.body), lower(?)) > 0" for _ in short_terms
+                ) + ")"
+                short_rows = fetch_rows(
+                    short_condition,
+                    tuple(short_terms),
+                    where_override=base_conditions,
+                    params_override=base_params,
+                    documents_only=True,
+                )
+                known_keys = {row["document_key"] for row in rows}
+                rows.extend(
+                    row for row in short_rows if row["document_key"] not in known_keys
+                )
             if is_history and limit >= 2:
                 # Keep this SQL equivalent to is_history_narrative_source().
                 # SQLite cannot call the Python predicate used after retrieval.

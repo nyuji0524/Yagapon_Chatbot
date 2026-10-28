@@ -6099,7 +6099,7 @@ async def test_mixed_allowed_and_rejected_supports_retry_with_only_allowed_evide
 
 
 @pytest.mark.asyncio
-async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(corpus_manager):
+async def test_incomplete_support_metadata_does_not_rewrite_the_answer(corpus_manager):
     corpus_manager.rag_store.query_terms = Mock(return_value=[])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
     context = SimpleNamespace(
@@ -6156,14 +6156,15 @@ async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(
     assert result.citations == (
         "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
     )
-    assert "9時" not in result.text
-    # The exact supported claim is retained locally; the unsupported time is
-    # removed without paying for a second model call.
+    # Provider support spans are incomplete metadata, not a trustworthy prose
+    # editor. The normal path keeps the single synthesized response and lowers
+    # confidence instead of deleting sentences or generating again.
+    assert "9時" in result.text
     assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_comprehensive_answer_keeps_locally_verified_partial_without_regeneration(
+async def test_comprehensive_answer_is_not_rewritten_by_requirement_scoring(
     corpus_manager,
 ):
     corpus_manager.rag_store.query_terms = Mock(return_value=[])
@@ -6223,11 +6224,10 @@ async def test_comprehensive_answer_keeps_locally_verified_partial_without_regen
 
     assert result.no_answer is False
     assert "西館" in result.text
-    assert "以下の3つ" not in result.text
-    assert "9時" not in result.text
-    # Unsupported claims are removed from the model-provided support mapping
-    # locally. A second paid generation used to make this path slower and
-    # could replace a good partial answer with a raw-record fallback.
+    assert "以下の3つ" in result.text
+    assert "9時" in result.text
+    # Question/answer wording and source-count heuristics must not turn one
+    # response into an evaluation/regeneration loop in production.
     assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 

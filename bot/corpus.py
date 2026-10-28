@@ -4368,15 +4368,30 @@ class CorpusManager:
                     local_first_context,
                     lexical_hits,
                 )
-                local_sources_too_narrow = recovered_locally and requires_comprehensive_recovery(
-                    comprehensive=comprehensive,
-                    source_count=len(sources),
-                    candidate_count=len(lexical_hits) + len(firebase_evidence),
+                # Source-count and wording heuristics are useful for an
+                # incident comparison, but they are not reliable quality
+                # gates. They previously rejected a coherent answer merely
+                # because it paraphrased the question or cited fewer records
+                # than were retrieved, causing another paid generation and
+                # often a worse fallback. The normal path accepts one answer
+                # synthesized from the already authorized evidence set.
+                local_sources_too_narrow = bool(
+                    RAG_STRICT_CLAIM_VERIFICATION
+                    and recovered_locally
+                    and requires_comprehensive_recovery(
+                        comprehensive=comprehensive,
+                        source_count=len(sources),
+                        candidate_count=len(lexical_hits) + len(firebase_evidence),
+                    )
                 )
-                local_requirements_incomplete = recovered_locally and requires_requirement_recovery(
-                    question,
-                    answer,
-                    citations=sources,
+                local_requirements_incomplete = bool(
+                    RAG_STRICT_CLAIM_VERIFICATION
+                    and recovered_locally
+                    and requires_requirement_recovery(
+                        question,
+                        answer,
+                        citations=sources,
+                    )
                 )
                 if recovered_locally and (
                     local_sources_too_narrow or local_requirements_incomplete
@@ -4636,7 +4651,8 @@ class CorpusManager:
                     # sensitive-data guard remain mandatory while incomplete
                     # grounding span metadata only lowers confidence.
                     if (
-                        semantic_audit.requires_recovery
+                        RAG_STRICT_CLAIM_VERIFICATION
+                        and semantic_audit.requires_recovery
                         and not semantic_audit.invalid_supports
                         and not semantic_audit.rejected_supported_chunks
                         and requires_exact_claim_verification(
