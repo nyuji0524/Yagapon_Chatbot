@@ -1886,6 +1886,31 @@ def answer_requirement_coverage(
     return score, detail
 
 
+def requires_requirement_recovery(
+    question: str,
+    answer: str,
+    *,
+    citations: list[str] | tuple[str, ...] = (),
+    minimum_coverage: int = 70,
+) -> bool:
+    """Retry broad answers that cite sources but still omit requested facets."""
+    # Broad vocabulary such as ``機能全体を管理できるロール`` can still ask
+    # for one fact. Only spend another model call when the user's wording
+    # yields an explicit multi-item checklist.
+    if (
+        not requires_comprehensive_answer(question)
+        or not answer.strip()
+        or len(answer_requirement_labels(question)) < 2
+    ):
+        return False
+    score, _detail = answer_requirement_coverage(
+        question,
+        answer,
+        citations=citations,
+    )
+    return score < minimum_coverage
+
+
 def combined_answer_confidence(
     evidence_score: int,
     coverage_score: int,
@@ -3792,6 +3817,11 @@ class CorpusManager:
             semantic_candidate_count = 0
             extractive_fallback = False
             remaining_output_tokens = max_output_tokens
+            best_partial_answer = ""
+            best_partial_sources: list[str] = []
+            best_partial_hits: list[LexicalHit] = []
+            best_partial_coverage = -1
+            best_partial_extractive = False
 
             def selected_lexical_hits(
                 hits: list[LexicalHit],
@@ -4045,19 +4075,37 @@ class CorpusManager:
                     local_first_context,
                     lexical_hits,
                 )
-                if recovered_locally and requires_comprehensive_recovery(
+                local_sources_too_narrow = recovered_locally and requires_comprehensive_recovery(
                     comprehensive=comprehensive,
                     source_count=len(sources),
                     candidate_count=len(lexical_hits) + len(firebase_evidence),
+                )
+                local_requirements_incomplete = recovered_locally and requires_requirement_recovery(
+                    question,
+                    answer,
+                    citations=sources,
+                )
+                if recovered_locally and (
+                    local_sources_too_narrow or local_requirements_incomplete
                 ):
+                    best_partial_coverage, _best_partial_detail = answer_requirement_coverage(
+                        question,
+                        answer,
+                        citations=sources,
+                    )
+                    best_partial_answer = answer
+                    best_partial_sources = list(sources)
+                    best_partial_hits = list(used_lexical_hits)
+                    best_partial_extractive = extractive_fallback
                     log.warning(
-                        "Local-first comprehensive answer used too few sources; "
+                        "Local-first comprehensive answer was incomplete; "
                         "continuing to File Search (kind=%s guild=%s sources=%s "
-                        "candidates=%s)",
+                        "candidates=%s coverage=%s)",
                         question_kind.value,
                         guild_id,
                         len(sources),
                         len(lexical_hits) + len(firebase_evidence),
+                        best_partial_coverage,
                     )
                     has_answer = False
                     sources = []
@@ -4312,6 +4360,14 @@ class CorpusManager:
                             + len(firebase_evidence)
                         ),
                     )
+                    comprehensive_requirements_incomplete = bool(
+                        has_answer
+                        and requires_requirement_recovery(
+                            question,
+                            answer,
+                            citations=sources,
+                        )
+                    )
                     if comprehensive_coverage_too_narrow:
                         log.warning(
                             "RAG comprehensive answer used too few sources; regenerating "
@@ -4329,6 +4385,7 @@ class CorpusManager:
                         or (semantic_audit.requires_recovery and not has_answer)
                         or comprehensive_coverage_too_narrow
                         or comprehensive_primary_was_reduced
+                        or comprehensive_requirements_incomplete
                     ):
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
@@ -4414,6 +4471,20 @@ class CorpusManager:
                                 used_lexical_hits = fallback_search_hits
                                 has_answer = True
                                 extractive_fallback = True
+            if best_partial_answer:
+                current_coverage = -1
+                if has_answer and sources:
+                    current_coverage, _current_detail = answer_requirement_coverage(
+                        question,
+                        answer,
+                        citations=sources,
+                    )
+                if current_coverage < best_partial_coverage:
+                    answer = best_partial_answer
+                    sources = best_partial_sources
+                    used_lexical_hits = best_partial_hits
+                    has_answer = True
+                    extractive_fallback = best_partial_extractive
             no_answer = not sources or not has_answer
             if (
                 no_answer
