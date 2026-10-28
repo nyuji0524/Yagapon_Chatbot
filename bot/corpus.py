@@ -1009,7 +1009,8 @@ def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
     )
     credential_pattern = (
         r"(?:(?:discord\s*bot|bot|api)[ _-]?(?:token|key)|トークン|api\s*キー|apiキー|"
-        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|secret|秘密情報|"
+        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|"
+        r"(?<![a-z0-9_])env(?![a-z0-9_])|secret|秘密情報|"
         r"\.env(?:ファイル)?|process\.env|os\.environ|"
         r"[a-z][a-z0-9_]{2,}(?:token|secret|password|api_key))"
     )
@@ -1256,7 +1257,8 @@ _INSTRUCTION_OVERRIDE_PATTERN = re.compile(
     r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
     r"(?:previous|prior|above|system|developer)\s+"
     r"(?:instructions?|rules?|prompts?|messages?)|"
-    r"(?:これまで|以前|前\s*の|上記|システム|開発者)\s*(?:の)?\s*"
+    r"(?:これまで|今まで|以前|前\s*の|上記|システム|開発者)\s*(?:の)?\s*"
+    r"(?:(?:すべて|全て|全部)\s*(?:の)?\s*)?"
     r"(?:指示|命令|ルール|プロンプト|メッセージ)\s*(?:を)?\s*"
     r"(?:無視|忘れ|破棄|上書き|解除|回避)",
     re.IGNORECASE,
