@@ -145,6 +145,38 @@ def test_trigram_index_tracks_document_replacements(tmp_path):
     assert store.search_exact(1, ["新歓Web"], festival=27)
 
 
+def test_fts_search_keeps_short_japanese_terms_alongside_long_terms(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "documents/long-term",
+        "新歓Webの一般的な実装記録",
+        metadata(27),
+    )
+    short_metadata = metadata(27)
+    short_metadata = [
+        (
+            {"key": "document_key", "string_value": "short-term"}
+            if item["key"] == "document_key"
+            else item
+        )
+        for item in short_metadata
+    ]
+    store.upsert_document(
+        "documents/short-term",
+        "新歓実から掲載規制の依頼があり、他局へ共有した",
+        short_metadata,
+    )
+
+    hits = store.search_exact(
+        1,
+        ["新歓Web", "他局", "依頼"],
+        festival=27,
+        limit=10,
+    )
+
+    assert {hit.document_key for hit in hits} == {"doc-27", "short-term"}
+
+
 def test_large_legacy_index_build_does_not_block_startup_or_search(
     tmp_path,
     monkeypatch,
