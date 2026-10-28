@@ -4230,15 +4230,12 @@ class CorpusManager:
                 QuestionKind.GENERAL,
             }
             direct_declared_no_evidence = False
-            # Use the cheaper local path only for explicitly broad questions
-            # with multiple independent candidates. A single history hit still
-            # goes through File Search so safety stops and semantic expansion
-            # keep their existing fail-closed behavior.
-            if (
-                RAG_STRICT_CLAIM_VERIFICATION
-                and comprehensive
-                and len(lexical_hits) >= 2
-            ):
+            # Use the cheaper local path first for explicitly broad questions
+            # with multiple independent authorized candidates.  File Search
+            # remains the fallback when those records cover only one source or
+            # miss a requested facet.  This avoids paying for hidden tool
+            # reasoning when the mirrored corpus already contains the answer.
+            if comprehensive and len(lexical_hits) >= 2:
                 local_first_context = with_lexical_context(
                     evidence_context,
                     lexical_hits,

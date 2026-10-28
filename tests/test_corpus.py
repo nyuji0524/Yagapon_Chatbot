@@ -3920,6 +3920,55 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
 
 
 @pytest.mark.asyncio
+async def test_comprehensive_query_prefers_sufficient_authorized_local_evidence(
+    corpus_manager,
+):
+    first = lexical_hit(
+        "it-lab-overview",
+        score=500,
+        authority="curated",
+        status="verified",
+        source_type="knowledge_repository",
+        excerpt="企画内容は体験型展示で、担当はIT局。",
+    )
+    second = lexical_hit(
+        "it-lab-operations",
+        score=480,
+        authority="curated",
+        status="verified",
+        source_type="knowledge_repository",
+        excerpt="運用上の課題は人員偏在。関連システムは整理券。",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ", "運用課題"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[first, second])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                "企画内容は体験型展示で、担当はIT局だぽん。"
+                "運用上の課題は人員偏在で、関連システムは整理券だぽん。"
+            ),
+            usage_metadata=None,
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボの企画内容、担当、運用上の課題、関連システムを詳しく教えてください",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "体験型展示" in result.text
+    assert "人員偏在" in result.text
+    assert len(result.citations) == 2
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    call = corpus_manager._client.aio.models.generate_content.await_args
+    assert call.kwargs["config"].tools is None
+
+
+@pytest.mark.asyncio
 async def test_compound_current_and_history_query_uses_separate_authority_filters(corpus_manager):
     corpus_manager.rag_store.query_terms = Mock(return_value=["新歓Web"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
