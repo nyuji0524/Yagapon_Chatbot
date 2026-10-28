@@ -2343,6 +2343,27 @@ def test_comprehensive_answer_retries_when_only_one_of_multiple_sources_was_used
     ) is False
 
 
+def test_requirement_recovery_rejects_headings_that_only_report_missing_evidence():
+    question = "ITラボの企画内容、担当、運用上の課題、関連システムを詳しく教えてください"
+    answer = """## 企画内容
+詳細な記載を確認できなかったぽん。
+
+## 担当
+具体的な担当は特定できなかったぽん。
+
+## 運用上の課題
+課題の記録は見つけられなかったぽん。
+
+## 関連システム
+公式Webと整理券に関連するぽん。"""
+
+    assert requires_requirement_recovery(
+        question,
+        answer,
+        citations=("source-a", "source-b"),
+    ) is True
+
+
 def test_entity_overview_fallback_is_generic_and_extracts_authorized_sources():
     hit = LexicalHit(
         document_key="knowledge:project",
