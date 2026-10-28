@@ -91,8 +91,16 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     if code is None:
         response = getattr(exc, "response", None) or getattr(exc, "raw_response", None)
         code = getattr(response, "status_code", None)
+    if code is not None:
+        try:
+            # Gemini also uses RESOURCE_EXHAUSTED for depleted prepaid credit
+            # (HTTP 402).  Retrying that permanent billing state only delays a
+            # deterministic local/Firebase fallback.
+            return int(code) == 429
+        except (TypeError, ValueError):
+            pass
     message = str(exc).lower()
-    return code == 429 or "too many requests" in message or "resource_exhausted" in message
+    return "too many requests" in message or "resource_exhausted" in message
 
 
 def _status_code(exc: BaseException) -> int | None:
@@ -110,6 +118,20 @@ def _status_code(exc: BaseException) -> int | None:
 def is_transient_api_error(exc: BaseException) -> bool:
     """Return whether an API error is safe to retry as a transient failure."""
     return _status_code(exc) in TRANSIENT_API_STATUS_CODES or is_rate_limit_error(exc)
+
+
+def is_ai_unavailable_error(exc: BaseException) -> bool:
+    """Return whether grounded local evidence may replace an unavailable AI.
+
+    Billing exhaustion is permanent until an operator adds credit, while
+    transient API failures and an exhausted 429 policy are temporary.  All of
+    them are availability failures rather than evidence or programming errors.
+    """
+    return (
+        _status_code(exc) == 402
+        or is_transient_api_error(exc)
+        or isinstance(exc, RateLimitExceeded)
+    )
 
 
 def _retry_after(exc: BaseException) -> float | None:

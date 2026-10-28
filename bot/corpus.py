@@ -26,6 +26,7 @@ from bot.ai_completion import IncompleteModelOutput, require_complete_model_outp
 from bot.ai_models import generation_config, log_usage, rag_model
 from bot.ai_retry import (
     RateLimitExceeded,
+    is_ai_unavailable_error,
     is_transient_api_error,
     retry_rate_limit,
     retry_transient_api,
@@ -3125,6 +3126,8 @@ class CorpusManager:
         schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
         schema_sources: list[str] = []
         schema_fallback_allowed = False
+        firebase_evidence: list[FirebaseEvidence] = []
+        overview_subject = entity_overview_subject(question)
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -3157,7 +3160,6 @@ class CorpusManager:
                 question_kind,
                 festival=festival,
             )
-            overview_subject = entity_overview_subject(question)
             if overview_subject and festival is None:
                 # Broad entity questions often refer to a recurring festival
                 # project before the current year's event document exists.
@@ -3710,7 +3712,7 @@ class CorpusManager:
                 confidence_label=confidence[1],
                 confidence_detail=confidence[2],
             )
-        except Exception:
+        except Exception as exc:
             log.exception("RAG query failed")
             if schema_fallback_allowed and schema_contracts and schema_sources:
                 confidence = evidence_confidence(
@@ -3731,6 +3733,57 @@ class CorpusManager:
                     confidence_label=confidence[1],
                     confidence_detail=confidence[2],
                 )
+            if is_ai_unavailable_error(exc):
+                fallback_hits = [
+                    hit
+                    for hit in authoritative_hits
+                    if can_answer_directly(question_kind, hit.authority, hit.status)
+                ]
+                fallback_runtime = [
+                    item
+                    for item in firebase_evidence
+                    if can_answer_directly(question_kind, item.authority, item.status)
+                    and (
+                        not item.document_key.startswith("firebase:schema:")
+                        or schema_fallback_allowed
+                    )
+                ]
+                if overview_subject:
+                    fallback_answer = self._render_entity_overview_fallback(
+                        overview_subject,
+                        fallback_hits,
+                        fallback_runtime,
+                    )
+                else:
+                    fallback_answer = self._render_retrieved_evidence_fallback(
+                        fallback_hits,
+                        fallback_runtime,
+                        (),
+                    )
+                fallback_sources = self._lexical_sources(fallback_hits, [])
+                fallback_sources.extend(
+                    self._firebase_sources(fallback_runtime, fallback_sources)
+                )
+                if fallback_answer and fallback_sources:
+                    confidence = evidence_confidence(
+                        answered=True,
+                        evidence_count=len(fallback_sources),
+                        source_family_count=citation_source_family_count(fallback_sources),
+                        candidate_count=len(fallback_hits) + len(fallback_runtime),
+                        locally_verified=True,
+                        extractive_fallback=True,
+                    )
+                    return RagAnswer(
+                        text=fallback_answer,
+                        citations=tuple(fallback_sources),
+                        festival=festival,
+                        no_answer=False,
+                        metadata_filter=metadata_filter,
+                        lexical_keys=tuple(hit.document_key for hit in fallback_hits),
+                        confidence_score=confidence[0],
+                        confidence_label=confidence[1],
+                        confidence_detail=confidence[2],
+                    )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,
