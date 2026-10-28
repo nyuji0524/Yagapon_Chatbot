@@ -1898,6 +1898,7 @@ async def test_source_preflight_resolves_every_repo_and_samples_one_document(
         ),
     )
     monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_SOURCE_PREFLIGHT_REMOTE", "true")
     monkeypatch.setenv("GOOGLE_API_KEY", "fixture-google-key")
     monkeypatch.delenv("YAGAPON_CORPUS_STORE_NAME", raising=False)
     monkeypatch.setattr(
@@ -1953,6 +1954,8 @@ async def test_source_preflight_resolves_every_repo_and_samples_one_document(
     ]
     assert result == {
         "preflight": True,
+        "remote_checks": True,
+        "repositories_configured": 2,
         "repositories_checked": 2,
         "repositories": ["example/one", "example/two"],
         "file_search_store": "stores/123",
@@ -1960,6 +1963,45 @@ async def test_source_preflight_resolves_every_repo_and_samples_one_document(
         "state_documents": 0,
     }
     assert not args.state.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_preflight_skips_paid_remote_probes_by_default(
+    tmp_path,
+    monkeypatch,
+):
+    repositories = [Repository("example/one", "main", ("src/",))]
+    monkeypatch.setenv("YAGAPON_SOURCE_INDEX_ENABLED", "true")
+    monkeypatch.delenv("YAGAPON_SOURCE_PREFLIGHT_REMOTE", raising=False)
+    monkeypatch.setenv("YAGAPON_CORPUS_STORE_NAME", "stores/configured")
+    monkeypatch.setattr(source_index_module, "source_history_settings", lambda: None)
+    monkeypatch.setattr(source_index_module, "load_repositories", lambda _path: repositories)
+    monkeypatch.setattr(
+        source_index_module,
+        "GitHubSourceClient",
+        lambda *_args: pytest.fail("normal deploy must not call GitHub"),
+    )
+    monkeypatch.setattr(
+        source_index_module.genai,
+        "Client",
+        lambda **_kwargs: pytest.fail("normal deploy must not call File Search"),
+    )
+    args = SimpleNamespace(
+        manifest=tmp_path / "repositories.yaml",
+        state=tmp_path / "state.json",
+        guild_id=123,
+    )
+
+    assert await preflight_once(args) == {
+        "preflight": True,
+        "remote_checks": False,
+        "repositories_configured": 1,
+        "repositories_checked": 0,
+        "repositories": [],
+        "file_search_store": "stores/configured",
+        "remote_documents_sampled": None,
+        "state_documents": 0,
+    }
 
 
 @pytest.mark.asyncio
