@@ -179,9 +179,20 @@ def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
 
 def test_rag_confidence_line_explains_server_side_search_audit():
     assert _rag_confidence_line(82, "高", "根拠3件 / 2系統 / 監査済み") == (
-        "**回答信頼度（根拠・充足度）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
+        "**検索状況: 参照元あり** — 3件 / 2系統"
     )
     assert _rag_confidence_line(None, None, None) == ""
+
+
+def test_rag_confidence_line_does_not_expose_false_precision():
+    assert _rag_confidence_line(
+        80,
+        "高",
+        "根拠品質 80 / 要求充足度 100 / 根拠12件 / 4系統 / 未監査",
+    ) == "**検索状況: 参照元あり** — 12件 / 4系統"
+    assert _rag_confidence_line(0, "根拠なし", "候補0件") == (
+        "**検索状況: 根拠なし**"
+    )
 
 
 def test_admin_only_channel_uses_all_admin_readable_channels_for_rag():

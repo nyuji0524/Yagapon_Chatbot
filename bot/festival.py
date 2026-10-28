@@ -179,10 +179,14 @@ def festival_from_query(query: str, now: datetime | None = None) -> int | None:
         return dated_festivals.pop()
 
     current = current_festival(now)
-    if re.search(r"今年度|今年|今期|現在|今の|今回", normalized):
-        return current
+    # Relative target wording must win over calendar-anchor prose.  A natural
+    # request such as ``去年の今頃を現在日を基準に`` contains ``現在`` only to
+    # explain how "今頃" should be resolved; treating that token as the target
+    # silently changes the requested festival from last year to this year.
     if re.search(r"昨年度|去年|昨年|前回", normalized):
         return current - 1
+    if re.search(r"今年度|今年|今期|現在|今の|今回", normalized):
+        return current
     target_date = calendar_date_from_query(normalized, now)
     if target_date:
         return festival_number(target_date)
