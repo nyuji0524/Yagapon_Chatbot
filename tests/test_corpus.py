@@ -6859,7 +6859,7 @@ async def test_lexical_recovery_ignores_blank_response_and_api_failure(corpus_ma
 
 
 @pytest.mark.asyncio
-async def test_recovery_prompt_requires_all_supported_evidence_key_families(corpus_manager):
+async def test_recovery_prompt_focuses_on_answer_instead_of_internal_contract(corpus_manager):
     corpus_manager._client.aio.models.generate_content = AsyncMock(
         return_value=SimpleNamespace(
             text="回答だぽん。\n[[YAGAPON_ANSWER_STATUS:complete]]",
@@ -6877,11 +6877,11 @@ async def test_recovery_prompt_requires_all_supported_evidence_key_families(corp
     instruction = corpus_manager._client.aio.models.generate_content.await_args.kwargs[
         "config"
     ].system_instruction
-    assert "exact:<document_key>" in instruction
-    assert "runtime:<document_key>" in instruction
-    assert "semantic:<index>" in instruction
-    assert "YAGAPON_EVIDENCE_KEYS" in instruction
-    assert "使っていないkey" in instruction
+    assert "firebase-runtime、semanticの資料だけを使い" in instruction
+    assert "自然な説明へ統合" in instruction
+    assert "証拠キー、回答状態、検証手順などの内部情報は出力しない" in instruction
+    assert "YAGAPON_EVIDENCE_KEYS" not in instruction
+    assert "YAGAPON_ANSWER_STATUS" not in instruction
 
 
 def test_incremental_boundary_includes_previous_jst_midnight():
