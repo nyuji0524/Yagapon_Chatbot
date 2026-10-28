@@ -639,6 +639,11 @@ class EmailCodeModal(discord.ui.Modal):
             return
         guild = interaction.client.get_guild(self.guild_id)
         member = guild.get_member(self.member_id) if guild else None
+        if member is None and guild is not None:
+            try:
+                member = await guild.fetch_member(self.member_id)
+            except (discord.NotFound, discord.HTTPException):
+                member = None
         if member is None:
             await interaction.followup.send("登録したサーバーに利用者が見つからないぽん。", ephemeral=True)
             return
@@ -814,7 +819,8 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
     else:
         embed.color = discord.Color.red()
         embed.add_field(name="結果", value=f"❌ {interaction.user.mention} が却下", inline=False)
-    await message.edit(embed=embed, view=None)
+    if interaction.message is not None:
+        await interaction.message.edit(embed=embed, view=None)
     try:
         await interaction.client.committee_backend.acknowledge_decision(
             guild_id=guild.id,
