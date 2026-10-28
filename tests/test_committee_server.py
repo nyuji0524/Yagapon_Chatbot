@@ -7,27 +7,26 @@ import pytest
 from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
-    LIAISON_CHANNELS,
     OFFICER_POSITIONS,
     POSITION_ROLES,
+    SERVER_ADMIN_ROLE,
     CommitteeGuideView,
     PostRegistrationRoleView,
+    ProjectOrganizationSelect,
     RegistrationModal,
     SelfRolePanelView,
+    _bot_can_run_committee_setup,
     _bot_guide_embed,
     _embed_field_id,
-    _ensure_category,
-    _ensure_forum,
-    _ensure_text,
-    _ensure_voice,
+    _ensure_setup_actor_is_server_admin,
+    _handle_position_request,
     _is_keio_email,
-    _liaison_guide_embed,
-    _overwrite_signature,
     _position_role_names,
     _position_role_summary,
     _post_once,
     _replace_role_group,
     _roles_after_position_approval,
+    _sync_role_decision,
 )
 
 
@@ -36,41 +35,47 @@ def test_role_groups_have_unique_names():
     assert len(names) == len(set(names))
 
 
-def test_liaison_channels_reference_known_bureaus_and_have_unique_names():
-    bureau_names = {item[0] for item in BUREAU_ROLES}
-    channel_names = []
-    for first_bureau, second_bureau, channel_name in LIAISON_CHANNELS:
-        assert first_bureau in bureau_names
-        assert second_bureau in bureau_names
-        assert first_bureau != second_bureau
-        channel_names.append(channel_name)
-    assert len(channel_names) == len(set(channel_names))
-    assert len(channel_names) == 28
+def test_registration_roles_use_only_bureau_grade_and_declared_positions():
+    assert GRADE_ROLES == ("１年生", "２年生", "３年生")
+    assert "一般委員" not in POSITION_ROLES
+    assert "28th委員" not in POSITION_ROLES
+    assert SERVER_ADMIN_ROLE == "サーバー管理者"
 
 
-def test_liaison_guide_explains_private_scope_and_pinned_location():
-    embed = _liaison_guide_embed("IT局", "総務局")
-    assert "IT局・総務局・執行部" in embed.description
-    assert "ほかの局からは表示されません" in embed.fields[1].value
-    assert "ピン留め" in embed.footer.text
+def test_committee_setup_requires_bot_administrator_permission():
+    administrator = SimpleNamespace(
+        guild_permissions=SimpleNamespace(administrator=True),
+    )
+    role_manager_only = SimpleNamespace(
+        guild_permissions=SimpleNamespace(administrator=False, manage_roles=True),
+    )
+
+    assert _bot_can_run_committee_setup(administrator) is True
+    assert _bot_can_run_committee_setup(role_manager_only) is False
+    assert _bot_can_run_committee_setup(None) is False
 
 
-def test_overwrite_signature_compares_ids_and_permission_bits():
-    first_target = discord.Object(id=10)
-    equivalent_target = discord.Object(id=10)
-    expected = {
-        first_target: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-    }
-    actual = {
-        equivalent_target: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-    }
-    extra = {
-        **actual,
-        discord.Object(id=20): discord.PermissionOverwrite(view_channel=True),
-    }
+@pytest.mark.asyncio
+async def test_setup_actor_receives_explicit_administrator_role():
+    role = SimpleNamespace(
+        id=30,
+        name=SERVER_ADMIN_ROLE,
+        permissions=discord.Permissions.none(),
+        edit=AsyncMock(),
+    )
+    guild = SimpleNamespace(roles=[role], create_role=AsyncMock())
+    member = SimpleNamespace(roles=[], add_roles=AsyncMock())
 
-    assert _overwrite_signature(actual) == _overwrite_signature(expected)
-    assert _overwrite_signature(extra) != _overwrite_signature(expected)
+    selected, created = await _ensure_setup_actor_is_server_admin(guild, member)
+
+    assert selected is role
+    assert created is False
+    updated_permissions = role.edit.await_args.kwargs["permissions"]
+    assert updated_permissions.administrator is True
+    member.add_roles.assert_awaited_once_with(
+        role,
+        reason="/committee_setup 実行者をサーバー管理者として登録",
+    )
 
 
 @pytest.mark.asyncio
@@ -138,7 +143,22 @@ def test_position_role_summary_is_stable_for_combined_roles_and_empty_input():
     assert _position_role_names(roles) == ["局長", "企画長", "役員"]
     assert _position_role_summary(roles) == "局長, 企画長, 役員"
     assert _position_role_names([]) == []
-    assert _position_role_summary([]) == "一般委員"
+    assert _position_role_summary([]) == "なし"
+
+
+def test_project_organizations_are_sorted_before_discord_option_limit():
+    select = ProjectOrganizationSelect(
+        [
+            {"id": "z", "name": "屋外企画"},
+            {"id": "a", "name": "ITラボ"},
+        ]
+    )
+
+    assert [option.label for option in select.options] == [
+        "ITラボ",
+        "屋外企画",
+        "この中にない",
+    ]
 
 
 @pytest.mark.asyncio
@@ -210,31 +230,6 @@ async def test_replace_role_group_removes_old_role_and_adds_selected():
 
 
 @pytest.mark.asyncio
-async def test_channel_creators_omit_none_overwrites():
-    category = object()
-    guild = SimpleNamespace(
-        categories=[],
-        text_channels=[],
-        forum_channels=[],
-        voice_channels=[],
-        create_category=AsyncMock(return_value=category),
-        create_text_channel=AsyncMock(return_value=object()),
-        create_forum_channel=AsyncMock(return_value=object()),
-        create_voice_channel=AsyncMock(return_value=object()),
-    )
-
-    await _ensure_category(guild, "category")
-    await _ensure_text(guild, "text", category, topic="topic")
-    await _ensure_forum(guild, "forum", category, topic="topic", tags=("tag",))
-    await _ensure_voice(guild, "voice", category)
-
-    assert "overwrites" not in guild.create_category.await_args.kwargs
-    assert "overwrites" not in guild.create_text_channel.await_args.kwargs
-    assert "overwrites" not in guild.create_forum_channel.await_args.kwargs
-    assert "overwrites" not in guild.create_voice_channel.await_args.kwargs
-
-
-@pytest.mark.asyncio
 async def test_post_once_repins_an_existing_guide():
     message = SimpleNamespace(
         id=30,
@@ -267,3 +262,66 @@ async def test_post_once_repins_an_existing_guide():
     message.edit.assert_awaited_once_with(content="updated guide", embed=None, view=None)
     message.pin.assert_awaited_once_with(reason="28thサーバー案内")
     channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_acknowledges_decision_for_member_who_left_guild():
+    response = SimpleNamespace(status=404, reason="Not Found")
+    guild = SimpleNamespace(
+        id=10,
+        get_member=lambda _member_id: None,
+        fetch_member=AsyncMock(side_effect=discord.NotFound(response, "missing")),
+    )
+    backend = SimpleNamespace(acknowledge_decision=AsyncMock())
+    bot = SimpleNamespace(committee_backend=backend)
+
+    await _sync_role_decision(
+        bot,
+        guild,
+        {
+            "id": "application-1",
+            "discordUserId": "20",
+            "status": "approved",
+            "role": "企画長",
+        },
+    )
+
+    backend.acknowledge_decision.assert_awaited_once_with(
+        guild_id=10,
+        application_id="application-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_officer_approval_requires_officer_role_before_backend_decision():
+    applicant = SimpleNamespace(id=20, roles=[])
+    director = SimpleNamespace(id=30, name="局長")
+    guild = SimpleNamespace(
+        id=10,
+        roles=[director],
+        get_member=lambda member_id: applicant if member_id == 20 else None,
+        get_role=lambda role_id: director if role_id == 30 else None,
+    )
+    embed = discord.Embed(title="役職申請")
+    embed.add_field(name="申請者ID", value="20")
+    embed.add_field(name="役職ロールID", value="30")
+    embed.add_field(name="申請ID", value="application-1")
+    backend = SimpleNamespace(decide_application=AsyncMock())
+    response = SimpleNamespace(is_done=lambda: False, send_message=AsyncMock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(
+            id=99,
+            guild_permissions=SimpleNamespace(manage_roles=True),
+        ),
+        guild=guild,
+        message=SimpleNamespace(embeds=[embed]),
+        response=response,
+        followup=SimpleNamespace(send=AsyncMock()),
+        client=SimpleNamespace(committee_backend=backend),
+    )
+
+    await _handle_position_request(interaction, approve=True)
+
+    backend.decide_application.assert_not_awaited()
+    response.send_message.assert_awaited_once()
+    assert "役員ロールが見つからない" in response.send_message.await_args.args[0]

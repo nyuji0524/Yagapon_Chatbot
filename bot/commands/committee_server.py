@@ -1,35 +1,27 @@
-"""28th committee Discord server bootstrap and persistent role controls."""
+"""28th committee registration and persistent role controls."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable
-from itertools import combinations
+import unicodedata
+from collections.abc import Iterable
 
 import discord
 
 from bot.authorization import require_guild_admin
+from bot.committee_backend import CommitteeBackendError
 from bot.key_management import (
     KEY_ACTION_CHANNEL,
-    KEY_CATEGORY,
     KEY_NAMES,
-    KEY_PANEL_MARKER,
-    KEY_REPORT_CHANNEL,
-    KEY_REQUEST_CHANNEL,
-    KEY_STATUS_MARKER,
     KeyPanelView,
     RestrictedKeyApprovalView,
-    key_panel_embed,
     key_status_embed,
 )
-from bot.support_directory import SupportIdentity
 
 log = logging.getLogger("yagapon.committee_server")
 
-MEMBER_ROLE = "28th委員"
-SERVER_ADMIN_ROLE = "サーバー管理者"
 BUREAU_ROLES = (
     ("IT局", 0x58A6FF, "🩵", "it"),
     ("総務局", 0x95A5A6, "🩶", "総務"),
@@ -40,21 +32,17 @@ BUREAU_ROLES = (
     ("広報局", 0xFF69B4, "🩷", "広報"),
     ("渉外局", 0x9B59B6, "💜", "渉外"),
 )
-LIAISON_CHANNELS = tuple(
-    (first[0], second[0], f"{first[3]}{second[3]}連絡チャット")
-    for first, second in combinations(BUREAU_ROLES, 2)
-)
-GRADE_ROLES = ("1年", "2年", "3年")
-POSITION_ROLES = ("一般委員", "企画長", "役員", "副局長", "局長", "執行部")
+GRADE_ROLES = ("１年生", "２年生", "３年生")
+POSITION_ROLES = ("企画長", "役員", "副局長", "局長", "執行部")
 DECLARABLE_POSITIONS = ("企画長", "副局長", "局長")
 OFFICER_POSITIONS = ("副局長", "局長")
-POSITION_ROLE_ORDER = ("執行部", "局長", "副局長", "企画長", "役員", "一般委員")
+POSITION_ROLE_ORDER = ("執行部", "局長", "副局長", "企画長", "役員")
+SERVER_ADMIN_ROLE = "サーバー管理者"
 ROLE_REQUEST_CHANNEL = "ロール申請🔑"
 ROLE_PANEL_CHANNEL = "ロール選択"
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
 COMMITTEE_COLOR = 0xF2A900
 YAGA_SUPPORT_URL = "https://yagasupport.yagamifes.com"
-ProgressReporter = Callable[[str], Awaitable[None]]
 
 
 def _role_names(entries: Iterable[tuple[str, int, str, str]]) -> tuple[str, ...]:
@@ -63,18 +51,6 @@ def _role_names(entries: Iterable[tuple[str, int, str, str]]) -> tuple[str, ...]
 
 def _find_named(items, name: str):
     return discord.utils.get(items, name=name)
-
-
-def _find_in_category(items, name: str, category):
-    """Find a channel by both name and category so duplicate names stay valid."""
-    return next(
-        (
-            item
-            for item in items
-            if item.name == name and getattr(item, "category_id", None) == category.id
-        ),
-        None,
-    )
 
 
 async def _replace_role_group(
@@ -104,19 +80,24 @@ def _position_role_names(roles: Iterable[discord.Role]) -> list[str]:
 
 
 def _position_role_summary(roles: Iterable[discord.Role]) -> str:
-    return ", ".join(_position_role_names(roles)) or "一般委員"
+    return ", ".join(_position_role_names(roles)) or "なし"
 
 
-def _has_completed_registration(config, guild_id: int, member, member_role) -> bool:
+def _has_completed_registration(config, guild_id: int, member) -> bool:
     registration = config.get_member(guild_id, member.id)
     return bool(
-        member_role
-        and member_role in member.roles
-        and registration
+        registration
+        and registration.get("email_verified") is True
         and registration.get("email")
         and registration.get("bureau")
         and registration.get("grade")
     )
+
+
+def _bot_can_run_committee_setup(member) -> bool:
+    """Whether the bot can create and grant an Administrator role."""
+    permissions = getattr(member, "guild_permissions", None)
+    return bool(permissions and permissions.administrator)
 
 
 def _roles_after_position_approval(
@@ -129,7 +110,8 @@ def _roles_after_position_approval(
     副局長と局長だけは同時に成立しないため、役員申告の承認時に相互置換する。
     企画長は役員と兼任できる。
     """
-    removable_names = {"一般委員"}
+    # Remove the two retired common roles when an existing member is approved.
+    removable_names = {"一般委員", "28th委員"}
     if approved_role.name in OFFICER_POSITIONS:
         removable_names.update(OFFICER_POSITIONS)
     desired = [
@@ -186,29 +168,6 @@ def _role_panel_embed() -> discord.Embed:
         inline=False,
     )
     embed.set_footer(text="登録完了DMには、現在のサーバー表示名も記載します")
-    return embed
-
-
-def _liaison_guide_embed(first_bureau: str, second_bureau: str) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"🔒 {first_bureau} × {second_bureau} 連絡チャット",
-        description=(
-            f"**{first_bureau}・{second_bureau}・執行部**だけが閲覧できる連絡場所です。\n"
-            "相談、途中経過、確定事項を同じ場所に残してください。"
-        ),
-        color=discord.Color(COMMITTEE_COLOR),
-    )
-    embed.add_field(
-        name="使い方",
-        value="話題が長くなる場合はスレッドを作り、最初の投稿に目的・担当・期限を書きます。",
-        inline=False,
-    )
-    embed.add_field(
-        name="共有範囲",
-        value="ほかの局からは表示されません。全体共有が必要になった内容は、適切な全体チャンネルにも転記してください。",
-        inline=False,
-    )
-    embed.set_footer(text="この案内はピン留めされています。チャンネル上部のトピックからも用途を確認できます")
     return embed
 
 
@@ -375,6 +334,9 @@ async def _submit_position_request(
     role_name: str,
     *,
     application_kind: str,
+    organization_id: str | None = None,
+    organization_name: str | None = None,
+    organization_not_listed: bool = False,
 ) -> None:
     guild = interaction.guild
     member = interaction.user
@@ -383,18 +345,39 @@ async def _submit_position_request(
     if not guild or not isinstance(member, discord.Member) or role is None or request_channel is None:
         await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
         return
-    member_role = _find_named(guild.roles, MEMBER_ROLE)
-    if not _has_completed_registration(
-        interaction.client.config,
-        guild.id,
-        member,
-        member_role,
-    ):
+    if not _has_completed_registration(interaction.client.config, guild.id, member):
         await _respond_ephemeral(interaction, "先に所属局・学年・慶應メールの登録を完了してほしいぽん。")
         return
     if role in member.roles:
         await _respond_ephemeral(interaction, f"**{role.name}** は既に付いているぽん！")
         return
+    await interaction.response.defer(ephemeral=True)
+    kind = "project_leader" if role_name == "企画長" else "officer"
+    try:
+        result = await interaction.client.committee_backend.create_application(
+            guildId=str(guild.id),
+            discordUserId=str(member.id),
+            applicantDisplayName=member.display_name,
+            kind=kind,
+            role=role_name,
+            organizationId=organization_id,
+            organizationNotListed=organization_not_listed,
+            manualReason="選択肢に企画がないため手動確認" if organization_not_listed else None,
+        )
+    except CommitteeBackendError as exc:
+        log.warning(
+            "Committee role application failed guild=%s member=%s status=%s",
+            guild.id,
+            member.id,
+            exc.status,
+        )
+        await interaction.followup.send(
+            "役職申請を保存できなかったぽん。メール認証が完了しているか確認し、"
+            "少し待ってからもう一度試してほしいぽん。",
+            ephemeral=True,
+        )
+        return
+    application_id = str(result["applicationId"])
     embed = discord.Embed(
         title=f"{application_kind}申請",
         description=f"{member.mention} が **{role.name}** を申請しています。",
@@ -403,9 +386,19 @@ async def _submit_position_request(
     embed.add_field(name="申請者ID", value=str(member.id), inline=True)
     embed.add_field(name="役職ロールID", value=str(role.id), inline=True)
     embed.add_field(name="申請種別", value=application_kind, inline=True)
+    embed.add_field(name="申請ID", value=application_id, inline=False)
+    if role_name == "企画長":
+        embed.add_field(
+            name="担当企画",
+            value=organization_name or "選択肢にない（手動確認）",
+            inline=False,
+        )
     embed.set_footer(text="企画長と役員は兼任できます。副局長と局長は選択した方へ置き換わります")
     await request_channel.send(embed=embed, view=RoleApprovalView(), silent=True)
-    await _respond_ephemeral(interaction, f"📨 **{role.name}** を申請したぽん。管理者の承認を待ってねぽん！")
+    await interaction.followup.send(
+        f"📨 **{role.name}** を申請したぽん。管理者の承認を待ってねぽん！",
+        ephemeral=True,
+    )
 
 
 class ProjectLeaderApplicationButton(discord.ui.Button):
@@ -419,7 +412,80 @@ class ProjectLeaderApplicationButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await _submit_position_request(interaction, "企画長", application_kind="企画長")
+        guild = interaction.guild
+        member = interaction.user
+        if not guild or not isinstance(member, discord.Member):
+            await _respond_ephemeral(interaction, "サーバー内で実行してほしいぽん。")
+            return
+        if not _has_completed_registration(interaction.client.config, guild.id, member):
+            await _respond_ephemeral(interaction, "先に慶應メール認証まで完了してほしいぽん。")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            organizations = await interaction.client.committee_backend.list_organizations(
+                guild_id=guild.id,
+                discord_user_id=member.id,
+            )
+        except CommitteeBackendError:
+            await interaction.followup.send(
+                "企画一覧を取得できなかったぽん。少し待ってからもう一度試してほしいぽん。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            "担当する企画を選んでほしいぽん。見つからない場合は最後の選択肢を選んでねぽん。",
+            view=ProjectOrganizationView(organizations),
+            ephemeral=True,
+        )
+
+
+class ProjectOrganizationSelect(discord.ui.Select):
+    def __init__(self, organizations):
+        organizations = sorted(
+            organizations,
+            key=lambda item: str(item.get("name") or ""),
+        )
+        self._organizations = {
+            str(item["id"]): str(item["name"])
+            for item in organizations[:24]
+            if item.get("id") and item.get("name")
+        }
+        options = [
+            discord.SelectOption(label=name[:100], value=organization_id)
+            for organization_id, name in self._organizations.items()
+        ]
+        options.append(
+            discord.SelectOption(
+                label="この中にない",
+                value="__not_listed__",
+                description="新企画・登録漏れ・誤りを手動で確認します",
+                emoji="🔑",
+            )
+        )
+        super().__init__(
+            placeholder="担当企画を選択",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        not_listed = selected == "__not_listed__"
+        await _submit_position_request(
+            interaction,
+            "企画長",
+            application_kind="企画長",
+            organization_id=None if not_listed else selected,
+            organization_name=None if not_listed else self._organizations[selected],
+            organization_not_listed=not_listed,
+        )
+
+
+class ProjectOrganizationView(discord.ui.View):
+    def __init__(self, organizations):
+        super().__init__(timeout=10 * 60)
+        self.add_item(ProjectOrganizationSelect(organizations))
 
 
 class OfficerSelect(discord.ui.Select):
@@ -450,25 +516,6 @@ class PostRegistrationRoleView(discord.ui.View):
 def _is_keio_email(value: str) -> bool:
     value = value.strip().lower()
     return bool(re.fullmatch(r"[^@\s]+@(?:[^@\s]+\.)*keio\.jp", value))
-
-
-def _support_status_message(identity: SupportIdentity) -> str:
-    if identity.status == "disabled":
-        return "現在はテスト設定のため、やがサポ照合を無効にしています。Discord登録だけ完了しました。"
-    if identity.status == "directory_match":
-        return "やがサポの登録候補を確認しました。UIDの確定とロール同期は管理者承認待ちです。"
-    if identity.status == "verified":
-        role_status = (
-            "「矢上祭実行委員」ロールも確認済みです。"
-            if identity.role_synced
-            else "UIDを紐付けました。サーバー設定により、やがサポ側のロールは変更していません。"
-        )
-        return f"やがサポの登録を確認しました（UID: `{identity.uid}`）。{role_status}"
-    if identity.status == "not_found":
-        return f"やがサポの利用者がまだ見つかりません。{YAGA_SUPPORT_URL} からサインインしてください。"
-    if identity.status == "profile_mismatch":
-        return "やがサポの登録は見つかりましたが、局または学年が一致しません。ロール申請チャンネルで確認を依頼してください。"
-    return "やがサポとの照合は保留です。Discord登録には影響しません。後から自動または管理者操作で再確認します。"
 
 
 class RegistrationModal(discord.ui.Modal):
@@ -504,124 +551,171 @@ class RegistrationModal(discord.ui.Modal):
             await _respond_ephemeral(interaction, "先に所属局と学年の両方を選んでほしいぽん。")
             return
 
-        member_role = _find_named(guild.roles, MEMBER_ROLE)
-        general_role = _find_named(guild.roles, "一般委員")
-        if member_role is None or general_role is None:
-            await _respond_ephemeral(interaction, "委員ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
-            return
         await interaction.response.defer(ephemeral=True)
-        identity = await interaction.client.support_directory.verify(email, bureau, grade)
         try:
-            roles_to_add = [member_role]
-            member_role_names = {role.name for role in member.roles}
-            if not member_role_names.intersection(POSITION_ROLES):
-                roles_to_add.append(general_role)
-            await member.add_roles(*roles_to_add, reason="本人による28th委員登録完了")
-            effective_roles = [*member.roles, *roles_to_add]
-            position_roles = _position_role_names(effective_roles)
-            position_summary = _position_role_summary(effective_roles)
-        except discord.Forbidden:
-            await _respond_ephemeral(interaction, "委員ロールを付ける権限が足りないぽん。管理者に連絡してほしいぽん。")
-            return
-        except discord.HTTPException:
-            log.exception("Committee registration role update failed guild=%s member=%s", guild.id, member.id)
-            await _respond_ephemeral(interaction, "Discord APIとの通信に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
+            await interaction.client.committee_backend.request_code(
+                guild_id=guild.id,
+                discord_user_id=member.id,
+                email=email,
+                bureau=bureau,
+                grade=grade,
+            )
+        except CommitteeBackendError as exc:
+            log.warning(
+                "Committee email code request failed guild=%s member=%s status=%s",
+                guild.id,
+                member.id,
+                exc.status,
+            )
+            message = (
+                "確認コードは直前にも送信されているぽん。1分ほど待ってメールを確認してほしいぽん。"
+                if exc.status == 429
+                else "確認コードを送信できなかったぽん。少し待ってからもう一度試してほしいぽん。"
+            )
+            await interaction.followup.send(message, ephemeral=True)
             return
 
         config = interaction.client.config
         members = config.get_members(guild.id)
         existing_record = members.get(str(member.id), {})
-        preserve_verified_link = bool(
-            existing_record.get("support_status") == "verified"
-            and existing_record.get("support_uid")
-            and existing_record.get("email") == email
-            and existing_record.get("bureau") == bureau
-            and existing_record.get("grade") == grade
-        )
-        effective_identity = identity
-        if preserve_verified_link:
-            effective_identity = SupportIdentity(
-                status="verified",
-                uid=existing_record["support_uid"],
-                departments=tuple(existing_record.get("support_departments", ())),
-                grade=existing_record.get("support_grade"),
-                role_synced=bool(existing_record.get("support_role_synced")),
-            )
         members[str(member.id)] = {
             **existing_record,
             "name": member.display_name,
             "email": email,
             "bureau": bureau,
             "grade": grade,
-            "role": position_summary,
-            "roles": position_roles,
-            "support_uid": effective_identity.uid if preserve_verified_link else None,
-            "support_candidate_uid": None if preserve_verified_link else identity.uid,
-            "support_status": effective_identity.status,
-            "support_departments": list(effective_identity.departments),
-            "support_grade": effective_identity.grade,
-            "support_role_synced": effective_identity.role_synced,
+            "email_verified": False,
+            "role": _position_role_summary(member.roles),
+            "roles": _position_role_names(member.roles),
         }
         await config.set_members(guild.id, members)
-
-        if not preserve_verified_link and identity.status == "directory_match" and identity.uid:
-            request_channel = _find_named(guild.text_channels, ROLE_REQUEST_CHANNEL)
-            if request_channel:
-                request_embed = discord.Embed(
-                    title="やがサポUID紐付け申請",
-                    description=(
-                        f"{member.mention} の自己申告と、やがサポの保存値が一致しました。"
-                        "本人確認後に承認してください。"
-                    ),
-                    color=discord.Color.gold(),
-                )
-                request_embed.add_field(name="申請者ID", value=str(member.id), inline=True)
-                request_embed.add_field(name="候補UID", value=identity.uid, inline=True)
-                request_embed.add_field(name="慶應メール", value=email, inline=False)
-                request_embed.add_field(name="所属局", value=bureau, inline=True)
-                request_embed.add_field(name="学年", value=grade, inline=True)
-                request_embed.set_footer(text="入力メールだけでは確定せず、承認時にFirestoreを再照合します")
-                await request_channel.send(
-                    embed=request_embed,
-                    view=SupportLinkApprovalView(),
-                    silent=True,
-                )
-
-        embed = discord.Embed(
-            title="✅ Discordの委員登録が完了しました",
-            description=f"現在のサーバー表示名は **{member.display_name}** です。",
-            color=discord.Color.green(),
-        )
-        embed.add_field(name="所属", value=f"{bureau} / {grade}", inline=True)
-        embed.add_field(name="慶應メール", value=email, inline=True)
-        embed.add_field(name="やがサポ", value=_support_status_message(effective_identity), inline=False)
-        embed.set_footer(text="表示名の変更はDiscordのサーバープロフィールから行ってください")
-        embed.add_field(
-            name="該当する人だけ次へ",
-            value=(
-                "下の操作から **企画長申告** または **役員申告（副局長・局長）** を行えます。"
-                "企画長と役員は両方申請できます。"
-            ),
-            inline=False,
-        )
-        await interaction.followup.send(
-            embed=embed,
-            view=PostRegistrationRoleView(),
-            ephemeral=True,
+        verify_view = EmailVerificationView(
+            guild_id=guild.id,
+            member_id=member.id,
+            email=email,
         )
         try:
             await member.send(
-                "✅ 28th矢上祭実行委員会のDiscord登録が完了しました。\n"
-                f"**サーバー表示名:** {member.display_name}\n"
-                f"**所属:** {bureau} / {grade}\n"
-                f"**慶應メール:** {email}\n\n"
-                "表示名を変える場合は、Discordのサーバープロフィールから自分で変更してください。\n"
-                f"**やがサポ:** {_support_status_message(effective_identity)}\n\n"
-                "企画長・副局長・局長に該当する場合は、登録完了画面または "
-                "`/committee_roles` から申請してください。企画長と役員は兼任できます。"
+                "📨 慶應メールへ6桁の確認コードを送信したぽん。"
+                "10分以内に下のボタンから入力してほしいぽん。",
+                view=verify_view,
+            )
+            await interaction.followup.send(
+                "📨 確認コードを送信したぽん。DMを確認してほしいぽん。",
+                ephemeral=True,
             )
         except discord.HTTPException:
-            log.info("Could not send committee registration DM guild=%s member=%s", guild.id, member.id)
+            await interaction.followup.send(
+                "DMを送れなかったため、ここから確認コードを入力してほしいぽん。",
+                view=verify_view,
+                ephemeral=True,
+            )
+
+
+class EmailCodeModal(discord.ui.Modal):
+    def __init__(self, *, guild_id: int, member_id: int, email: str):
+        super().__init__(title="慶應メールを確認", timeout=10 * 60)
+        self.guild_id = guild_id
+        self.member_id = member_id
+        self.email = email
+        self.add_item(
+            discord.ui.InputText(
+                label="6桁の確認コード",
+                placeholder="123456",
+                min_length=6,
+                max_length=6,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.member_id:
+            await _respond_ephemeral(interaction, "この確認コードは登録した本人だけが入力できるぽん。")
+            return
+        code = unicodedata.normalize("NFKC", self.children[0].value).strip()
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await interaction.client.committee_backend.verify_code(
+                guild_id=self.guild_id,
+                discord_user_id=self.member_id,
+                code=code,
+            )
+        except CommitteeBackendError as exc:
+            message = {
+                400: "確認コードが違うぽん。メールを確認してもう一度入力してほしいぽん。",
+                410: "確認コードの有効期限が切れたぽん。サーバーで登録をやり直してほしいぽん。",
+                429: "入力回数が上限に達したぽん。登録をやり直してほしいぽん。",
+            }.get(exc.status, "メール認証に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        guild = interaction.client.get_guild(self.guild_id)
+        member = guild.get_member(self.member_id) if guild else None
+        if member is None and guild is not None:
+            try:
+                member = await guild.fetch_member(self.member_id)
+            except (discord.NotFound, discord.HTTPException):
+                member = None
+        if member is None:
+            await interaction.followup.send("登録したサーバーに利用者が見つからないぽん。", ephemeral=True)
+            return
+        members = interaction.client.config.get_members(self.guild_id)
+        existing = members.get(str(self.member_id), {})
+        existing.update(
+            {
+                "name": member.display_name,
+                "email": result["email"],
+                "bureau": result["bureau"],
+                "grade": result["grade"],
+                "email_verified": True,
+                "support_user_exists": result.get("userExists") is True,
+                "support_staff_info_exists": result.get("staffInfoExists") is True,
+                "support_uid": result.get("userUid"),
+                "support_departments": result.get("userDepartments") or [],
+                "support_status": "verified" if result.get("userExists") else "not_found",
+                "role": _position_role_summary(member.roles),
+                "roles": _position_role_names(member.roles),
+            }
+        )
+        members[str(self.member_id)] = existing
+        await interaction.client.config.set_members(self.guild_id, members)
+        support_line = (
+            f"✅ users登録あり（UID: `{result.get('userUid')}`）"
+            if result.get("userExists")
+            else f"⚠️ users登録なし。先に {YAGA_SUPPORT_URL} へサインインしてほしいぽん。"
+        )
+        await interaction.followup.send(
+            "\n".join(
+                [
+                    "✅ 委員プロフィールの登録が完了したぽん！",
+                    f"表示名: **{member.display_name}**",
+                    f"所属: **{result['bureau']} / {result['grade']}**",
+                    f"やがサポ: {support_line}",
+                    "表示名はDiscordのサーバープロフィールから本人が変更してねぽん。",
+                    "企画長・副局長・局長に該当する場合は、サーバーで `/committee_roles` を実行してほしいぽん。",
+                ]
+            ),
+            ephemeral=True,
+        )
+
+
+class EmailVerificationView(discord.ui.View):
+    def __init__(self, *, guild_id: int, member_id: int, email: str):
+        super().__init__(timeout=10 * 60)
+        self.guild_id = guild_id
+        self.member_id = member_id
+        self.email = email
+
+    @discord.ui.button(label="確認コードを入力", emoji="✉️", style=discord.ButtonStyle.primary)
+    async def verify(self, _button: discord.ui.Button, interaction: discord.Interaction):
+        if interaction.user.id != self.member_id:
+            await _respond_ephemeral(interaction, "登録した本人だけが入力できるぽん。")
+            return
+        await interaction.response.send_modal(
+            EmailCodeModal(
+                guild_id=self.guild_id,
+                member_id=self.member_id,
+                email=self.email,
+            )
+        )
 
 
 class SelfRolePanelView(discord.ui.View):
@@ -668,6 +762,7 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
     guild = interaction.guild
     member_id = _embed_field_id(embed, "申請者ID") if embed else None
     role_id = _embed_field_id(embed, "役職ロールID") if embed else None
+    application_id = _embed_field_value(embed, "申請ID") if embed else None
     member = guild.get_member(member_id) if guild and member_id else None
     if member is None and guild and member_id:
         try:
@@ -675,17 +770,40 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
         except (discord.NotFound, discord.HTTPException):
             member = None
     role = guild.get_role(role_id) if guild and role_id else None
-    if not embed or member is None or role is None or role.name not in DECLARABLE_POSITIONS:
+    if (
+        not embed
+        or member is None
+        or role is None
+        or role.name not in DECLARABLE_POSITIONS
+        or not application_id
+    ):
         await _respond_ephemeral(interaction, "申請データを確認できなかったぽん。")
+        return
+    officer_role = None
+    if approve and role.name in OFFICER_POSITIONS:
+        officer_role = _find_named(guild.roles, "役員")
+        if officer_role is None:
+            await _respond_ephemeral(
+                interaction,
+                "役員ロールが見つからないぽん。管理者がロールを作成してから再度承認してほしいぽん。",
+            )
+            return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.client.committee_backend.decide_application(
+            application_id=application_id,
+            approved=approve,
+            actor_discord_id=interaction.user.id,
+        )
+    except CommitteeBackendError as exc:
+        await interaction.followup.send(
+            "申請状態を更新できなかったぽん。すでに処理済みか、通信に失敗した可能性があるぽん。",
+            ephemeral=True,
+        )
+        log.warning("Committee decision failed id=%s status=%s", application_id, exc.status)
         return
     if approve:
         try:
-            officer_role = None
-            if role.name in ("副局長", "局長"):
-                officer_role = _find_named(guild.roles, "役員")
-                if officer_role is None:
-                    await _respond_ephemeral(interaction, "役員ロールが見つからないぽん。再セットアップしてほしいぽん。")
-                    return
             desired_roles = _roles_after_position_approval(
                 member.roles,
                 role,
@@ -700,14 +818,27 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
             members[str(member.id)] = record
             await interaction.client.config.set_members(guild.id, members)
         except discord.Forbidden:
-            await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロール順を確認してほしいぽん。")
+            await interaction.followup.send(
+                "申請は承認済みだけれどDiscordロールを付けられなかったぽん。"
+                "やがぽんのロール順を直すと自動同期で再試行するぽん。",
+                ephemeral=True,
+            )
             return
         embed.color = discord.Color.green()
         embed.add_field(name="結果", value=f"✅ {interaction.user.mention} が承認", inline=False)
     else:
         embed.color = discord.Color.red()
         embed.add_field(name="結果", value=f"❌ {interaction.user.mention} が却下", inline=False)
-    await interaction.response.edit_message(embed=embed, view=None)
+    if interaction.message is not None:
+        await interaction.message.edit(embed=embed, view=None)
+    try:
+        await interaction.client.committee_backend.acknowledge_decision(
+            guild_id=guild.id,
+            application_id=application_id,
+        )
+    except CommitteeBackendError:
+        log.warning("Could not acknowledge Discord role decision id=%s", application_id)
+    await interaction.followup.send("申請を処理したぽん。", ephemeral=True)
     try:
         result = "承認" if approve else "却下"
         await member.send(f"28th矢上祭実行委員会で申請した **{role.name}** ロールは{result}されました。")
@@ -734,6 +865,96 @@ class RoleApprovalView(discord.ui.View):
     )
     async def reject(self, _button: discord.ui.Button, interaction: discord.Interaction):
         await _handle_position_request(interaction, approve=False)
+
+
+async def _sync_role_decision(bot, guild: discord.Guild, application: dict) -> None:
+    application_id = str(application.get("id") or "")
+    try:
+        member_id = int(application.get("discordUserId") or 0)
+    except (TypeError, ValueError):
+        member_id = 0
+    status = application.get("status")
+    role_name = str(application.get("role") or "")
+    if not application_id or member_id <= 0 or status not in {"approved", "rejected"}:
+        log.error("Ignoring malformed committee role decision id=%s", application_id)
+        if application_id:
+            await bot.committee_backend.acknowledge_decision(
+                guild_id=guild.id,
+                application_id=application_id,
+            )
+        return
+    member = guild.get_member(member_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(member_id)
+        except discord.NotFound:
+            log.warning(
+                "Committee applicant left guild=%s member=%s application=%s",
+                guild.id,
+                member_id,
+                application_id,
+            )
+            await bot.committee_backend.acknowledge_decision(
+                guild_id=guild.id,
+                application_id=application_id,
+            )
+            return
+    if status == "approved":
+        role = _find_named(guild.roles, role_name)
+        if role is None or role.name not in DECLARABLE_POSITIONS:
+            raise RuntimeError(f"Discord role is missing: {role_name}")
+        officer_role = _find_named(guild.roles, "役員") if role_name in OFFICER_POSITIONS else None
+        if role_name in OFFICER_POSITIONS and officer_role is None:
+            raise RuntimeError("Discord role is missing: 役員")
+        desired_roles = _roles_after_position_approval(member.roles, role, officer_role)
+        await member.edit(roles=desired_roles, reason="やがサポで承認された役職を同期")
+        members = bot.config.get_members(guild.id)
+        record = members.get(str(member.id), {})
+        record["role"] = _position_role_summary(desired_roles)
+        record["roles"] = _position_role_names(desired_roles)
+        members[str(member.id)] = record
+        await bot.config.set_members(guild.id, members)
+    await bot.committee_backend.acknowledge_decision(
+        guild_id=guild.id,
+        application_id=application_id,
+    )
+    try:
+        result = "承認" if status == "approved" else "却下"
+        await member.send(f"申請した **{role_name}** ロールは{result}されました。")
+    except discord.HTTPException:
+        pass
+
+
+async def committee_role_sync_loop(bot) -> None:
+    """Apply Yaga Support decisions to Discord with idempotent acknowledgement."""
+    while not bot.is_closed():
+        for guild in bot.guilds:
+            # The bot also serves IT and test guilds.  Only a server prepared
+            # for committee registration has both the role panel and managed
+            # committee roles, so avoid a paid Functions poll everywhere else.
+            if (
+                _find_named(guild.text_channels, ROLE_PANEL_CHANNEL) is None
+                or not any(_find_named(guild.roles, name) for name in GRADE_ROLES)
+            ):
+                continue
+            try:
+                decisions = await bot.committee_backend.list_decisions(guild.id)
+                for application in decisions:
+                    try:
+                        await _sync_role_decision(bot, guild, application)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.exception(
+                            "Committee decision sync failed guild=%s application=%s",
+                            guild.id,
+                            application.get("id"),
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Committee role sync failed guild=%s", guild.id)
+        await asyncio.sleep(45)
 
 
 async def _handle_support_link_request(interaction: discord.Interaction, *, approve: bool) -> None:
@@ -855,164 +1076,36 @@ async def _ensure_role(
     return role, True
 
 
-async def _ensure_category(guild: discord.Guild, name: str, *, overwrites=None):
-    category = _find_named(guild.categories, name)
-    if category:
-        return category, False
-    kwargs = {"reason": "28thサーバー初期構築"}
-    if overwrites is not None:
-        kwargs["overwrites"] = overwrites
-    return await guild.create_category(name, **kwargs), True
+async def _ensure_setup_actor_is_server_admin(
+    guild: discord.Guild,
+    member: discord.Member,
+) -> tuple[discord.Role, bool]:
+    """Give the already-authorized setup operator an explicit admin role.
 
-
-async def _ensure_text(guild, name: str, category, *, topic: str, overwrites=None, read_only=False):
-    channel = _find_in_category(guild.text_channels, name, category)
-    if channel:
-        return channel, False
-    if read_only:
-        overwrites = dict(overwrites or {})
-        overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
-        overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True)
-    kwargs = {
-        "category": category,
-        "topic": topic,
-        "default_auto_archive_duration": 10080,
-        "reason": "28thサーバー初期構築",
-    }
-    if overwrites is not None:
-        kwargs["overwrites"] = overwrites
-    channel = await guild.create_text_channel(name, **kwargs)
-    return channel, True
-
-
-async def _ensure_forum(guild, name: str, category, *, topic: str, tags, overwrites=None):
-    channel = _find_in_category(guild.forum_channels, name, category) or _find_in_category(
-        guild.text_channels, name, category
+    ``/committee_setup`` itself is administrator-only. This therefore does not
+    create a privilege-escalation path; it makes the operator selected for the
+    initial setup visible and keeps their access stable when account-specific
+    Discord permissions are later cleaned up.
+    """
+    permissions = discord.Permissions.none()
+    permissions.administrator = True
+    role, created = await _ensure_role(
+        guild,
+        SERVER_ADMIN_ROLE,
+        color=0x2B2D31,
+        permissions=permissions,
     )
-    if channel:
-        return channel, False
-    try:
-        kwargs = {
-            "category": category,
-            "topic": topic,
-            "available_tags": [discord.ForumTag(name=tag) for tag in tags],
-            "default_auto_archive_duration": 10080,
-            "reason": "28thサーバー初期構築",
-        }
-        if overwrites is not None:
-            kwargs["overwrites"] = overwrites
-        channel = await guild.create_forum_channel(name, **kwargs)
-    except discord.HTTPException as exc:
-        if getattr(exc, "code", None) != 50024:
-            raise
-        log.warning("Forum unavailable; using thread-first text channel guild=%s name=%s", guild.id, name)
-        kwargs = {
-            "category": category,
-            "topic": f"【スレッド専用】{topic}",
-            "default_auto_archive_duration": 10080,
-            "reason": "コミュニティ機能未有効のためスレッド専用チャンネルとして作成",
-        }
-        if overwrites is not None:
-            kwargs["overwrites"] = overwrites
-        channel = await guild.create_text_channel(name, **kwargs)
-    return channel, True
-
-
-async def _ensure_thread_only(guild, name: str, category, *, topic: str, overwrites=None):
-    channel = _find_in_category(guild.text_channels, name, category)
-    thread_overwrites = dict(overwrites or {})
-    existing_default = thread_overwrites.get(guild.default_role, discord.PermissionOverwrite())
-    default_view = existing_default.view_channel
-    if default_view is None:
-        default_view = True
-    thread_overwrites[guild.default_role] = discord.PermissionOverwrite(
-        view_channel=default_view,
-        send_messages=False,
-        create_public_threads=default_view,
-        send_messages_in_threads=default_view,
-        read_message_history=default_view,
-    )
-    for target, existing in tuple(thread_overwrites.items()):
-        if target in (guild.default_role, guild.me) or existing.view_channel is not True:
-            continue
-        thread_overwrites[target] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=False,
-            create_public_threads=True,
-            send_messages_in_threads=True,
-            read_message_history=True,
+    if not role.permissions.administrator:
+        await role.edit(
+            permissions=permissions,
+            reason="28thサーバー管理者権限を整備",
         )
-    thread_overwrites[guild.me] = discord.PermissionOverwrite(
-        view_channel=True,
-        send_messages=True,
-        create_public_threads=True,
-        send_messages_in_threads=True,
-        read_message_history=True,
-        manage_messages=True,
-        manage_threads=True,
-    )
-    full_topic = f"【スレッド専用】{topic}"
-    if channel:
-        if (
-            channel.topic != full_topic
-            or _overwrite_signature(channel.overwrites) != _overwrite_signature(thread_overwrites)
-        ):
-            await channel.edit(
-                category=category,
-                topic=full_topic,
-                overwrites=thread_overwrites,
-                reason="スレッド専用チャンネル設定を同期",
-            )
-        return channel, False
-    return await guild.create_text_channel(
-        name,
-        category=category,
-        topic=full_topic,
-        overwrites=thread_overwrites,
-        default_auto_archive_duration=10080,
-        reason="28thサーバー初期構築",
-    ), True
-
-
-async def _ensure_voice(guild, name: str, category, *, overwrites=None):
-    channel = _find_in_category(guild.voice_channels, name, category)
-    if channel:
-        return channel, False
-    kwargs = {"category": category, "reason": "28thサーバー初期構築"}
-    if overwrites is not None:
-        kwargs["overwrites"] = overwrites
-    return await guild.create_voice_channel(name, **kwargs), True
-
-
-def _private_overwrites(guild: discord.Guild, allowed_roles: Iterable[discord.Role]):
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        guild.me: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            connect=True,
-            speak=True,
-        ),
-    }
-    for role in allowed_roles:
-        overwrites[role] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            connect=True,
-            speak=True,
+    if all(current.id != role.id for current in member.roles):
+        await member.add_roles(
+            role,
+            reason="/committee_setup 実行者をサーバー管理者として登録",
         )
-    return overwrites
-
-
-def _overwrite_signature(overwrites) -> dict[int, tuple[int, int]]:
-    """Compare Discord overwrites by target and permission bits, not object identity."""
-    signature = {}
-    for target, overwrite in overwrites.items():
-        allow, deny = overwrite.pair()
-        signature[target.id] = (allow.value, deny.value)
-    return signature
+    return role, created
 
 
 async def _post_once(channel: discord.TextChannel, marker: str, *, content=None, embed=None, view=None):
@@ -1046,334 +1139,6 @@ async def _post_once(channel: discord.TextChannel, marker: str, *, content=None,
     return message, True
 
 
-async def bootstrap_committee_server(
-    guild: discord.Guild,
-    *,
-    key_store,
-    setup_actor: discord.Member | None = None,
-    report_progress: ProgressReporter | None = None,
-) -> dict[str, int]:
-    """Create or reconcile the approved 28th server layout without deleting data."""
-    counts = {"roles": 0, "categories": 0, "channels": 0, "messages": 0}
-
-    async def report(stage: str) -> None:
-        log.info("Committee setup v2 progress guild=%s stage=%s", guild.id, stage)
-        if report_progress is not None:
-            await report_progress(stage)
-
-    async def ensure_category(name: str, *, overwrites=None):
-        category, created = await _ensure_category(guild, name, overwrites=overwrites)
-        counts["categories"] += int(created)
-        if not created and overwrites is not None and _overwrite_signature(category.overwrites) != _overwrite_signature(overwrites):
-            await category.edit(overwrites=overwrites, reason="28thカテゴリ権限を同期")
-        return category
-
-    async def ensure_text(name: str, category, *, topic: str, overwrites=None, read_only=False):
-        if read_only:
-            overwrites = dict(overwrites or {})
-            overwrites[guild.default_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=False,
-            )
-            overwrites[guild.me] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                manage_messages=True,
-            )
-        channel, created = await _ensure_text(
-            guild,
-            name,
-            category,
-            topic=topic,
-            overwrites=overwrites,
-            read_only=read_only,
-        )
-        counts["channels"] += int(created)
-        if not created:
-            edit_kwargs = {}
-            if channel.topic != topic:
-                edit_kwargs["topic"] = topic
-            if overwrites is not None and _overwrite_signature(channel.overwrites) != _overwrite_signature(overwrites):
-                edit_kwargs["overwrites"] = overwrites
-            if edit_kwargs:
-                await channel.edit(**edit_kwargs, reason="28thチャンネル設定を同期")
-        return channel
-
-    async def ensure_forum(name: str, category, *, topic: str, tags, overwrites=None):
-        channel, created = await _ensure_forum(
-            guild,
-            name,
-            category,
-            topic=topic,
-            tags=tags,
-            overwrites=overwrites,
-        )
-        counts["channels"] += int(created)
-        return channel
-
-    async def ensure_voice(name: str, category, *, overwrites=None):
-        channel, created = await _ensure_voice(guild, name, category, overwrites=overwrites)
-        counts["channels"] += int(created)
-        return channel
-
-    await report("ロールを準備中")
-    _member_role, created = await _ensure_role(guild, MEMBER_ROLE, color=0x2ECC71)
-    counts["roles"] += int(created)
-    administrator_permissions = discord.Permissions(administrator=True)
-    server_admin_role, created = await _ensure_role(
-        guild,
-        SERVER_ADMIN_ROLE,
-        color=0xE74C3C,
-        permissions=administrator_permissions,
-    )
-    counts["roles"] += int(created)
-    if not server_admin_role.permissions.administrator:
-        await server_admin_role.edit(
-            permissions=administrator_permissions,
-            reason="サーバー管理者ロールを最上位権限へ同期",
-        )
-    if setup_actor is not None and server_admin_role not in setup_actor.roles:
-        await setup_actor.add_roles(
-            server_admin_role,
-            reason="/committee_setup 実行者をサーバー管理者に登録",
-        )
-    bureau_roles = {}
-    for name, color, _emoji, _slug in BUREAU_ROLES:
-        bureau_roles[name], created = await _ensure_role(guild, name, color=color)
-        counts["roles"] += int(created)
-    for name in GRADE_ROLES:
-        _role, created = await _ensure_role(guild, name, color=0x7289DA)
-        counts["roles"] += int(created)
-    position_roles = {}
-    for name in POSITION_ROLES:
-        position_roles[name], created = await _ensure_role(guild, name, color=0xF39C12)
-        counts["roles"] += int(created)
-
-    await report("00｜はじめに を準備中")
-    start = await ensure_category("00｜はじめに")
-    intro = await ensure_text(
-        "はじめに",
-        start,
-        topic="最初に読む案内。サーバープロフィールの表示名を自分で設定してから登録を進めます。",
-        read_only=True,
-    )
-    panel = await ensure_text(
-        ROLE_PANEL_CHANNEL,
-        start,
-        topic="所属局・学年・慶應メールを登録し、該当者だけ役職を申告します。",
-        read_only=True,
-    )
-    request_overwrites = _private_overwrites(
-        guild,
-        [server_admin_role, position_roles["執行部"]],
-    )
-    await ensure_text(
-        ROLE_REQUEST_CHANNEL,
-        start,
-        topic="企画長・副局長・局長の申告と例外対応。サーバー管理者と執行部のみ閲覧できます。",
-        overwrites=request_overwrites,
-    )
-
-    await report("01｜全体 を準備中")
-    general = await ensure_category("01｜全体")
-    await ensure_text(
-        "全体チャット",
-        general,
-        topic="全委員が利用する通常の連絡・相談。長い話題はスレッドへまとめます。",
-    )
-    announcement_overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True),
-        position_roles["執行部"]: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-    }
-    await ensure_text(
-        "おしらせ（全体）",
-        general,
-        topic="全委員向けの確定事項・締切・緊急連絡。",
-        overwrites=announcement_overwrites,
-    )
-    await ensure_forum(
-        "財務に相談",
-        general,
-        topic="財務に関する相談を1件1投稿で管理します。",
-        tags=("相談", "確認待ち", "回答済み"),
-    )
-    external_overwrites = dict(announcement_overwrites)
-    external_overwrites[bureau_roles["渉外局"]] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-    await ensure_text(
-        "渉外案件ex",
-        general,
-        topic="協賛条件に基づく企業からの告知・お知らせ・勧誘などを一斉配信します。",
-        overwrites=external_overwrites,
-    )
-
-    await report("02｜鍵管理 を準備中")
-    key_category = await ensure_category(KEY_CATEGORY)
-    key_action = await ensure_text(
-        KEY_ACTION_CHANNEL,
-        key_category,
-        topic="鍵を選び、あけ・しめ・さしかえをボタンで報告します。",
-        read_only=True,
-    )
-    key_report = await ensure_text(
-        KEY_REPORT_CHANNEL,
-        key_category,
-        topic="現在の貸出状況だけを固定表示し、操作のたびに内容を更新します。",
-        read_only=True,
-    )
-    key_request_overwrites = _private_overwrites(
-        guild,
-        [server_admin_role, bureau_roles["渉外局"], position_roles["執行部"]],
-    )
-    await ensure_text(
-        KEY_REQUEST_CHANNEL,
-        key_category,
-        topic="矢上部室（209）の利用理由を確認し、承認・却下します。",
-        overwrites=key_request_overwrites,
-    )
-
-    await report("03｜会議 を準備中")
-    meetings = await ensure_category("03｜会議")
-    await ensure_text("会議案内", meetings, topic="全体会議の日時・場所・資料を掲載します。", read_only=True)
-    await ensure_forum(
-        "タスク・議題",
-        meetings,
-        topic="全体会議の議題・決定事項・担当・期限を1件1投稿で管理します。",
-        tags=("議題", "タスク", "決定", "完了"),
-    )
-    minutes_channel = await ensure_text(
-        "議事録",
-        meetings,
-        topic="全体会議の生文字起こし・要約・Google Docsリンクを集約します。",
-    )
-    await ensure_voice("会議用🎙️", meetings)
-
-    await report("04｜やがぽんBOT を準備中")
-    bot_category = await ensure_category("04｜やがぽんBOT")
-    bot_guide = await ensure_text(
-        "やがぽん使い方",
-        bot_category,
-        topic="おしゃべりやがぽんのコマンドと運用ルール。",
-        read_only=True,
-    )
-    await ensure_forum(
-        "おしゃべりやがぽん",
-        bot_category,
-        topic="質問・検索・Bot活用の話題を1件1投稿で管理します。",
-        tags=("質問", "検索", "使い方", "解決済み"),
-    )
-
-    leadership_overwrites = _private_overwrites(
-        guild,
-        [server_admin_role, position_roles["役員"], position_roles["企画長"], position_roles["執行部"]],
-    )
-    await report("05｜役員・企画長 を準備中")
-    leadership = await ensure_category("05｜役員・企画長", overwrites=leadership_overwrites)
-    officers_only = _private_overwrites(
-        guild,
-        [server_admin_role, position_roles["役員"], position_roles["執行部"]],
-    )
-    await ensure_text("役員", leadership, topic="役員向けの連絡・相談。", overwrites=officers_only)
-    await ensure_text("企画長", leadership, topic="企画長向けの連絡・相談。", overwrites=leadership_overwrites)
-    await ensure_text("新歓", leadership, topic="新歓に関する調整と共有。", overwrites=leadership_overwrites)
-    await ensure_text("教室予約報告", leadership, topic="教室予約の申請・結果・変更を報告します。", overwrites=leadership_overwrites)
-
-    await report("06｜役員会 を準備中")
-    officers = await ensure_category("06｜役員会", overwrites=officers_only)
-    await ensure_text("役員会", officers, topic="役員会の連絡・会話。", overwrites=officers_only)
-    channel, created = await _ensure_thread_only(
-        guild,
-        "欠席連絡",
-        officers,
-        topic="会議ごとにスレッドを作り、欠席・遅刻をその中へ投稿します。",
-        overwrites=officers_only,
-    )
-    counts["channels"] += int(created)
-    await ensure_forum(
-        "タスク・議題",
-        officers,
-        topic="役員会の議題・決定・タスクを1件1投稿で管理します。",
-        tags=("議題", "タスク", "決定", "完了"),
-        overwrites=officers_only,
-    )
-    await ensure_text("議事録", officers, topic="役員会の議事録を集約します。", overwrites=officers_only)
-    await ensure_voice("会議用🎙️", officers, overwrites=officers_only)
-
-    await report("07｜執行部 を準備中")
-    executive_overwrites = _private_overwrites(guild, [server_admin_role, position_roles["執行部"]])
-    executive = await ensure_category("07｜執行部", overwrites=executive_overwrites)
-    for bureau_name, _color, _emoji, slug in BUREAU_ROLES:
-        bureau_exec_overwrites = _private_overwrites(
-            guild,
-            [server_admin_role, position_roles["執行部"], bureau_roles[bureau_name]],
-        )
-        await ensure_text(
-            f"{slug}＋執行部",
-            executive,
-            topic=f"{bureau_name}と執行部だけが閲覧できる連絡チャットです。",
-            overwrites=bureau_exec_overwrites,
-        )
-
-    await report("08｜局間連携 を準備中")
-    coordination = await ensure_category("08｜局間連携")
-    await ensure_voice("会議用🎙️", coordination)
-
-    await report("09｜連絡チャット（28通り）を準備中")
-    liaison_category = await ensure_category("09｜連絡チャット")
-    liaison_channels = []
-    for first_bureau, second_bureau, channel_name in LIAISON_CHANNELS:
-        liaison_overwrites = _private_overwrites(
-            guild,
-            [server_admin_role, position_roles["執行部"], bureau_roles[first_bureau], bureau_roles[second_bureau]],
-        )
-        liaison_channel = await ensure_text(
-            channel_name,
-            liaison_category,
-            topic=f"{first_bureau}・{second_bureau}・執行部だけが閲覧できる連絡チャットです。",
-            overwrites=liaison_overwrites,
-        )
-        liaison_channels.append((liaison_channel, first_bureau, second_bureau))
-
-    await report("その他・アーカイブを準備中")
-    await ensure_category("10｜その他")
-    await ensure_category("11｜アーカイブ", overwrites=executive_overwrites)
-
-    await report("固定案内を掲示中")
-    for liaison_channel, first_bureau, second_bureau in liaison_channels:
-        marker = f"yagapon-liaison-guide-v2:{first_bureau}-{second_bureau}"
-        _message, created = await _post_once(
-            liaison_channel,
-            marker,
-            content=f"`{marker}`",
-            embed=_liaison_guide_embed(first_bureau, second_bureau),
-        )
-        counts["messages"] += int(created)
-    for channel, marker, embed, view in (
-        (intro, "yagapon-committee-intro-v2", _intro_embed(guild), CommitteeGuideView(guild)),
-        (panel, ROLE_PANEL_MARKER, _role_panel_embed(), SelfRolePanelView()),
-        (bot_guide, "yagapon-bot-guide-v2", _bot_guide_embed(guild), CommitteeGuideView(guild)),
-        (key_action, KEY_PANEL_MARKER, key_panel_embed(), KeyPanelView()),
-    ):
-        _message, created = await _post_once(
-            channel,
-            marker,
-            content=f"`{marker}`",
-            embed=embed,
-            view=view,
-        )
-        counts["messages"] += int(created)
-    status_message, created = await _post_once(
-        key_report,
-        KEY_STATUS_MARKER,
-        content=f"`{KEY_STATUS_MARKER}`",
-        embed=key_status_embed(guild, key_store),
-    )
-    await asyncio.to_thread(key_store.set_status_message_id, guild.id, status_message.id)
-    counts["messages"] += int(created)
-    counts["minutes_channel_id"] = minutes_channel.id
-    return counts
-
-
 def register_persistent_views(bot) -> None:
     bot.add_view(SelfRolePanelView())
     bot.add_view(PostRegistrationRoleView())
@@ -1384,36 +1149,24 @@ def register_persistent_views(bot) -> None:
 
 
 def register(bot):
-    @bot.slash_command(name="committee_setup", description="委員会サーバーを一括構築するぽん")
+    @bot.slash_command(name="committee_setup", description="委員登録に必要なロールとパネルを整備するぽん")
     @discord.default_permissions(administrator=True)
     async def committee_setup(ctx: discord.ApplicationContext):
         if not await require_guild_admin(ctx):
             return
         me = ctx.guild.me
-        permissions = me.guild_permissions
-        missing = [
-            name
-            for name, allowed in (
-                ("管理者", permissions.administrator),
-                ("ロール管理", permissions.manage_roles),
-                ("チャンネル管理", permissions.manage_channels),
-                ("メッセージ管理", permissions.manage_messages),
-                (
-                    "メッセージのピン留め",
-                    getattr(permissions, "pin_messages", permissions.manage_messages),
-                ),
+        if not _bot_can_run_committee_setup(me):
+            await ctx.respond(
+                "セットアップには、やがぽん自身のAdministrator権限が必要だぽん。"
+                "権限を付けてからもう一度実行してほしいぽん。",
+                ephemeral=True,
             )
-            if not allowed
-        ]
-        if missing:
-            await ctx.respond(f"権限が足りないぽん: {', '.join(missing)}", ephemeral=True)
             return
         managed_role_names = {
-            MEMBER_ROLE,
-            SERVER_ADMIN_ROLE,
             *GRADE_ROLES,
             *POSITION_ROLES,
             *_role_names(BUREAU_ROLES),
+            SERVER_ADMIN_ROLE,
         }
         hierarchy_conflicts = list(
             dict.fromkeys(
@@ -1432,79 +1185,71 @@ def register(bot):
             )
             return
         await ctx.defer(ephemeral=True)
-        progress_message = await ctx.followup.send(
-            "⏳ 委員会サーバーの整備を開始したぽん…",
-            ephemeral=True,
-            wait=True,
-        )
-        current_stage = "開始準備"
-
-        async def report_progress(stage: str) -> None:
-            nonlocal current_stage
-            current_stage = stage
-            try:
-                await progress_message.edit(content=f"⏳ {stage}だぽん…")
-            except discord.HTTPException:
-                log.warning("Could not update committee setup progress guild=%s", ctx.guild_id)
-
+        created_count = 0
         try:
-            counts = await bootstrap_committee_server(
+            for name, color, _emoji, _slug in BUREAU_ROLES:
+                _role, created = await _ensure_role(ctx.guild, name, color=color)
+                created_count += int(created)
+            for name in GRADE_ROLES:
+                _role, created = await _ensure_role(ctx.guild, name, color=0x7289DA)
+                created_count += int(created)
+            for name in POSITION_ROLES:
+                _role, created = await _ensure_role(ctx.guild, name, color=0xF39C12)
+                created_count += int(created)
+            _admin_role, created = await _ensure_setup_actor_is_server_admin(
                 ctx.guild,
-                key_store=bot.key_management.store,
-                setup_actor=ctx.author,
-                report_progress=report_progress,
+                ctx.author,
             )
-        except discord.Forbidden as exc:
-            log.exception("Committee setup permission error guild=%s", ctx.guild_id)
-            await progress_message.edit(
-                content=(
-                    f"❌ **{current_stage}**で権限エラーになったぽん。"
-                    "やがぽんに管理者権限を付け、ロールをすべての管理対象ロールより上にしてほしいぽん。"
-                    f" status={exc.status} / code={exc.code}"
-                )
+            created_count += int(created)
+        except discord.Forbidden:
+            await ctx.followup.send(
+                "ロールを作成できなかったぽん。やがぽんの権限とロール順を確認してほしいぽん。",
+                ephemeral=True,
             )
             return
-        except discord.HTTPException as exc:
-            log.exception("Committee setup Discord API error guild=%s", ctx.guild_id)
-            await progress_message.edit(
-                content=(
-                    "❌ Discord APIエラーで停止したぽん。"
-                    f" status={exc.status} / code={exc.code}。再実行しても既存設定は重複しないぽん。"
-                )
+        panel = _find_named(ctx.guild.text_channels, ROLE_PANEL_CHANNEL)
+        panel_message = ""
+        if panel is not None:
+            _message, posted = await _post_once(
+                panel,
+                ROLE_PANEL_MARKER,
+                content=f"`{ROLE_PANEL_MARKER}`",
+                embed=_role_panel_embed(),
+                view=SelfRolePanelView(),
             )
-            return
-        except Exception as exc:
-            log.exception("Unexpected committee setup error guild=%s", ctx.guild_id)
-            detail = " ".join(str(exc).split())[:240] or "詳細なし"
-            await progress_message.edit(
-                content=(
-                    "❌ 予期しないエラーで停止したぽん。"
-                    f" `{type(exc).__name__}: {detail}`\n"
-                    "既存設定は保持されているぽん。"
-                )
+            panel_message = "ロール選択パネルも設置したぽん。" if posted else "既存のロール選択パネルを維持したぽん。"
+        else:
+            panel_message = (
+                "`#ロール選択` がないため、チャンネルを作成してから"
+                "もう一度 `/committee_setup` を実行してほしいぽん。"
             )
-            return
-        minutes_channel = ctx.guild.get_channel(counts["minutes_channel_id"])
-        if minutes_channel:
-            await bot.config.set_minutes_channel(ctx.guild.id, minutes_channel.id)
-        await progress_message.edit(
-            content=(
-                "✅ 委員会サーバーを整備したぽん！\n"
-                f"新規: ロール {counts['roles']} / カテゴリ {counts['categories']} / "
-                f"チャンネル {counts['channels']} / 案内 {counts['messages']}\n"
-                "既存のものは削除・重複作成していないぽん。"
-            )
+        request_channel = _find_named(ctx.guild.text_channels, ROLE_REQUEST_CHANNEL)
+        request_message = (
+            "役職申請の承認先は `#ロール申請🔑` だぽん。"
+            if request_channel is not None
+            else "`#ロール申請🔑` がないため、企画長・役員申請を始める前に作成してほしいぽん。"
+        )
+        await ctx.followup.send(
+            "\n".join(
+                [
+                    f"✅ 委員登録基盤を整備したぽん（新規ロール {created_count}件）。",
+                    panel_message,
+                    request_message,
+                    "カテゴリやチャンネルの一括作成・変更は行っていないぽん。",
+                    "このコマンドの実行者には「サーバー管理者」ロールを付与したぽん。",
+                ]
+            ),
+            ephemeral=True,
         )
 
     @bot.slash_command(name="committee_roles", description="登録後に企画長・役員を申告するぽん")
     async def committee_roles(ctx: discord.ApplicationContext):
         guild = ctx.guild
         member = ctx.author
-        member_role = _find_named(guild.roles, MEMBER_ROLE) if guild else None
         if not guild or not isinstance(member, discord.Member):
             await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
             return
-        if not _has_completed_registration(bot.config, guild.id, member, member_role):
+        if not _has_completed_registration(bot.config, guild.id, member):
             await ctx.respond(
                 "先にロール選択パネルから所属局・学年・慶應メールの登録を完了してほしいぽん。",
                 ephemeral=True,
