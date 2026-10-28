@@ -468,7 +468,7 @@ async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus
     call = corpus_manager._client.aio.models.generate_content.await_args
     assert call.kwargs["config"].tools is not None
     assert call.kwargs["model"] == "gemini-3.5-flash-lite"
-    assert call.kwargs["config"].thinking_config.thinking_level == "LOW"
+    assert call.kwargs["config"].thinking_config.thinking_level == "MINIMAL"
     assert "implementation" in call.kwargs["contents"]
     assert "on-site-report" in call.kwargs["contents"]
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["question_kind"] is (
@@ -2312,11 +2312,12 @@ def test_answer_requirement_labels_removes_trailing_particle_before_evidence_cla
 
 def test_system_instruction_preserves_rich_structure_without_forcing_it_on_simple_answers():
     instruction = corpus_module.SYSTEM_INSTRUCTION
-    assert "単純な質問は結論を先に1〜3段落で簡潔に" in instruction
-    assert "回答形式は質問に合わせて選ぶ" in instruction
-    assert "経緯や概要は自然な段落" in instruction
+    assert "質問への結論や概要を自然な文章で説明" in instruction
+    assert "列挙が有効な部分だけ" in instruction
     assert "見出しや箇条書きを機械的に作らない" in instruction
-    assert "検索結果の断片、メタデータ、diffをそのまま回答として貼らず" in instruction
+    assert "検索断片を貼り付けず" in instruction
+    assert "YAGAPON_ANSWER_STATUS" not in instruction
+    assert len(instruction) < 3000
 
 
 def test_comprehensive_answer_retries_when_only_one_of_multiple_sources_was_used():
@@ -3914,7 +3915,7 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
     assert corpus_manager._client.aio.models.generate_content.await_count == 2
     assert call.kwargs["config"].max_output_tokens == 3072
     assert call.kwargs["config"].tools[0].file_search.top_k == 12
-    assert "短さより完全性" in call.kwargs["config"].system_instruction
+    assert "必要な内容を無理に省略しない" in call.kwargs["config"].system_instruction
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["limit"] == 32
 
 
