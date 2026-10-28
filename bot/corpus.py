@@ -1590,8 +1590,10 @@ def evidence_confidence(
         score += 15
     if extractive_fallback:
         # Extractive output avoids unsupported synthesis, but it may be less
-        # complete than a fully grounded answer.
-        score += 5
+        # relevant or complete than a fully grounded answer. Evidence volume
+        # must not turn an un-synthesized record dump into a high-confidence
+        # answer to the user's actual question.
+        score = min(score, 69)
     score = min(95, score)
     label = "高" if score >= 80 else "中" if score >= 55 else "低"
     method = "監査済み" if locally_verified else "未監査"

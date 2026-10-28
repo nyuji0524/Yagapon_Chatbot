@@ -2351,6 +2351,21 @@ def test_evidence_confidence_rewards_verified_cross_source_answers():
     ) == 2
 
 
+def test_evidence_confidence_never_labels_raw_extractive_dump_as_high():
+    score, label, detail = evidence_confidence(
+        answered=True,
+        evidence_count=20,
+        source_family_count=4,
+        candidate_count=30,
+        locally_verified=True,
+        extractive_fallback=True,
+    )
+
+    assert score == 69
+    assert label == "中"
+    assert "抽出表示" in detail
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
