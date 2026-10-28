@@ -2351,6 +2351,21 @@ def test_evidence_confidence_rewards_verified_cross_source_answers():
     ) == 2
 
 
+def test_evidence_confidence_never_labels_raw_extractive_dump_as_high():
+    score, label, detail = evidence_confidence(
+        answered=True,
+        evidence_count=20,
+        source_family_count=4,
+        candidate_count=30,
+        locally_verified=True,
+        extractive_fallback=True,
+    )
+
+    assert score == 69
+    assert label == "中"
+    assert "抽出表示" in detail
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
@@ -4247,8 +4262,10 @@ async def test_missing_grounding_supports_recovers_from_only_locally_allowed_chu
     assert result.citations == (
         "[確定仕様: 公開手順 [active]](https://knowledge.example/procedure)",
     )
-    assert corpus_manager._client.aio.models.generate_content.await_count == 1
-    assert "ALLOWED-BODY" in result.text
+    # The unsafe primary answer is regenerated from only the locally allowed
+    # excerpt before falling back to raw records.
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    assert "ALLOWED-BODY" not in result.text
     assert "DENIED-BODY" not in result.text
 
 
@@ -5336,8 +5353,9 @@ async def test_mixed_allowed_and_rejected_supports_retry_with_only_allowed_evide
     assert result.citations == (
         "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
     )
-    assert corpus_manager._client.aio.models.generate_content.await_count == 1
-    assert "ALLOWED-CURRENT-YEAR" in result.text
+    # Recovery gets a second call containing only the allowed-year evidence.
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    assert "ALLOWED-CURRENT-YEAR" not in result.text
     assert "REJECTED-WRONG-YEAR" not in result.text
 
 
@@ -5400,7 +5418,9 @@ async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(
         "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
     )
     assert "9時" not in result.text
-    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    # A verified regeneration is attempted first; its no-evidence result then
+    # falls back to the locally supported partial record.
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
 
 
 def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):
@@ -5940,7 +5960,7 @@ async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpu
     assert "AI鬼ごっこ" in result.text
     assert result.citations == ("[完全一致: #ITラボ](https://discord.example/it-lab)",)
     calls = corpus_manager._client.aio.models.generate_content.await_args_list
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio

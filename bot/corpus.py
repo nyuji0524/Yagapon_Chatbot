@@ -1590,8 +1590,10 @@ def evidence_confidence(
         score += 15
     if extractive_fallback:
         # Extractive output avoids unsupported synthesis, but it may be less
-        # complete than a fully grounded answer.
-        score += 5
+        # relevant or complete than a fully grounded answer. Evidence volume
+        # must not turn an un-synthesized record dump into a high-confidence
+        # answer to the user's actual question.
+        score = min(score, 69)
     score = min(95, score)
     label = "高" if score >= 80 else "中" if score >= 55 else "低"
     method = "監査済み" if locally_verified else "未監査"
@@ -3743,55 +3745,62 @@ class CorpusManager:
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
                             recovery_context += self._untrusted_evidence(item.key, item.text)
-                        # Broad entity questions have a safer structured
-                        # projection below.  Do not let the generic raw-record
-                        # fallback pre-empt it merely because File Search's
-                        # claim mapping was incomplete.
-                        fallback_search_hits = _rank_extract_fallback_hits(
+                        # A failed File Search support mapping does not mean the
+                        # retrieved records are unusable. First regenerate from
+                        # the locally authorized excerpts and verify every
+                        # resulting claim against the exact evidence selected by
+                        # the model. Only expose raw records when that safer,
+                        # readable recovery also fails (for example while the AI
+                        # provider is unavailable).
+                        recovered = await recover_verified_evidence(
+                            recovery_context,
                             search_hits,
-                            question_kind,
+                            recovery_semantic_evidence,
                         )
-                        fallback_answer = (
-                            ""
-                            if overview_subject and (firebase_evidence or search_hits)
-                            else self._render_retrieved_evidence_fallback(
-                                fallback_search_hits,
-                                firebase_evidence,
-                                recovery_semantic_evidence,
-                            )
-                        )
-                        fallback_sources = self._lexical_sources(
-                            fallback_search_hits,
-                            [],
-                        )
-                        fallback_sources.extend(
-                            self._firebase_sources(firebase_evidence, fallback_sources)
-                        )
-                        fallback_sources.extend(
-                            item.citation
-                            for item in recovery_semantic_evidence
-                            if item.citation and item.citation not in fallback_sources
-                        )
-                        if (
-                            fallback_answer
-                            and fallback_sources
-                            and not (
-                                schema_fallback_allowed
-                                and schema_contracts
-                                and schema_sources
-                            )
-                        ):
-                            answer = fallback_answer
-                            sources = fallback_sources
-                            used_lexical_hits = fallback_search_hits
-                            has_answer = True
-                            extractive_fallback = True
-                        else:
-                            await recover_verified_evidence(
-                                recovery_context,
+                        if not recovered:
+                            # Broad entity questions have a safer structured
+                            # projection below. Do not let the generic raw-record
+                            # fallback pre-empt it merely because File Search's
+                            # claim mapping was incomplete.
+                            fallback_search_hits = _rank_extract_fallback_hits(
                                 search_hits,
-                                recovery_semantic_evidence,
+                                question_kind,
                             )
+                            fallback_answer = (
+                                ""
+                                if overview_subject and (firebase_evidence or search_hits)
+                                else self._render_retrieved_evidence_fallback(
+                                    fallback_search_hits,
+                                    firebase_evidence,
+                                    recovery_semantic_evidence,
+                                )
+                            )
+                            fallback_sources = self._lexical_sources(
+                                fallback_search_hits,
+                                [],
+                            )
+                            fallback_sources.extend(
+                                self._firebase_sources(firebase_evidence, fallback_sources)
+                            )
+                            fallback_sources.extend(
+                                item.citation
+                                for item in recovery_semantic_evidence
+                                if item.citation and item.citation not in fallback_sources
+                            )
+                            if (
+                                fallback_answer
+                                and fallback_sources
+                                and not (
+                                    schema_fallback_allowed
+                                    and schema_contracts
+                                    and schema_sources
+                                )
+                            ):
+                                answer = fallback_answer
+                                sources = fallback_sources
+                                used_lexical_hits = fallback_search_hits
+                                has_answer = True
+                                extractive_fallback = True
             no_answer = not sources or not has_answer
             if (
                 no_answer
