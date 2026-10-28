@@ -79,6 +79,7 @@ def test_admin_only_channel_can_use_guildwide_rag_scope():
         owner_id=owner.id,
         chunked=True,
         channels=[channel],
+        members=[owner, administrator, bot_member],
     )
 
     assert channel_audience_has_guildwide_rag_access(guild, channel) is True
@@ -95,16 +96,19 @@ def test_public_or_incompletely_cached_channel_cannot_widen_rag_scope():
         bot=False,
         guild_permissions=SimpleNamespace(administrator=False),
     )
-    channel = FakeChannel(1, members=[administrator, regular_member])
+    # VoiceChannel.members may contain only the connected administrator even
+    # though a regular guild member can read its built-in chat.
+    channel = FakeChannel(1, members=[administrator])
     guild = SimpleNamespace(
         owner_id=999,
         chunked=True,
         channels=[channel],
+        members=[administrator, regular_member],
     )
 
     assert channel_audience_has_guildwide_rag_access(guild, channel) is False
     guild.chunked = False
-    channel.members = [administrator]
+    guild.members = [administrator]
     assert channel_audience_has_guildwide_rag_access(guild, channel) is False
 
 

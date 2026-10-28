@@ -124,10 +124,34 @@ def channel_audience_has_guildwide_rag_access(guild, channel) -> bool:
         return False
     if channel not in (getattr(guild, "channels", ()) or ()):
         return False
-    members = tuple(getattr(channel, "members", ()) or ())
-    human_members = [member for member in members if not bool(getattr(member, "bot", False))]
-    return bool(human_members) and all(
-        has_guildwide_rag_access(guild, member) for member in human_members
+    members = tuple(getattr(guild, "members", ()) or ())
+    if not members:
+        return False
+    human_viewers = []
+    permissions_for = getattr(channel, "permissions_for", None)
+    if not callable(permissions_for):
+        return False
+    for member in members:
+        if bool(getattr(member, "bot", False)):
+            continue
+        try:
+            permissions = permissions_for(member)
+            can_view = bool(
+                getattr(
+                    permissions,
+                    "view_channel",
+                    getattr(permissions, "read_messages", False),
+                )
+            )
+            can_read_history = bool(
+                getattr(permissions, "read_message_history", False)
+            )
+        except Exception:
+            return False
+        if can_view and can_read_history:
+            human_viewers.append(member)
+    return bool(human_viewers) and all(
+        has_guildwide_rag_access(guild, member) for member in human_viewers
     )
 
 
