@@ -4356,7 +4356,6 @@ class CorpusManager:
             if (
                 comprehensive
                 and not schema_projection_preferred
-                and not cross_source_history
                 and len(lexical_hits) >= 2
                 and local_narrative_ready
             ):

@@ -4055,6 +4055,56 @@ async def test_comprehensive_query_prefers_sufficient_authorized_local_evidence(
 
 
 @pytest.mark.asyncio
+async def test_cross_source_history_uses_one_local_synthesis_call(corpus_manager):
+    conversation = lexical_hit(
+        "shinkan-request",
+        score=800,
+        authority="conversation",
+        status="raw",
+        source_type="discord_conversation",
+        excerpt="新歓実から公開規制がなくなり、日程を掲載してよいと連絡された。",
+    )
+    implementation = lexical_hit(
+        "shinkan-change",
+        score=700,
+        authority="repository_history",
+        status="historical",
+        source_type="source_code_history",
+        excerpt="公開制限を外し、新歓日程を表示する変更を行った。",
+    )
+    corpus_manager.rag_store.query_terms = Mock(
+        return_value=["新歓Web", "新歓", "外部", "他局", "要求", "対応"]
+    )
+    corpus_manager.rag_store.search_exact = Mock(
+        return_value=[conversation, implementation]
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                "新歓実から公開規制解除の連絡があり、Webでは公開制限を外して"
+                "日程を掲載する対応を行ったぽん。"
+            ),
+            usage_metadata=None,
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thの新歓Webで、外部や他局から要求された内容と対応をまとめてください",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "公開規制解除" in result.text
+    assert len(result.citations) == 2
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    call = corpus_manager._client.aio.models.generate_content.await_args
+    assert call.kwargs["config"].tools is None
+
+
+@pytest.mark.asyncio
 async def test_operational_question_skips_local_generation_without_narrative_evidence(
     corpus_manager,
 ):
