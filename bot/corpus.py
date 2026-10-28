@@ -483,6 +483,16 @@ def requires_comprehensive_answer(question: str) -> bool:
     )
 
 
+def requires_comprehensive_recovery(
+    *,
+    comprehensive: bool,
+    source_count: int,
+    candidate_count: int,
+) -> bool:
+    """Do not finalize a broad answer from one source when alternatives exist."""
+    return comprehensive and candidate_count >= 2 and source_count < 2
+
+
 def _select_lexical_context_hits(
     hits: list[LexicalHit],
     *,
@@ -3753,10 +3763,31 @@ class CorpusManager:
                         item for item in semantic_audit.evidence if item.text
                     )
                     semantic_candidate_count = len(recovery_semantic_evidence)
+                    comprehensive_coverage_too_narrow = requires_comprehensive_recovery(
+                        comprehensive=comprehensive,
+                        source_count=len(sources),
+                        candidate_count=(
+                            len(search_hits)
+                            + len(recovery_semantic_evidence)
+                            + len(firebase_evidence)
+                        ),
+                    )
+                    if comprehensive_coverage_too_narrow:
+                        log.warning(
+                            "RAG comprehensive answer used too few sources; regenerating "
+                            "(kind=%s guild=%s sources=%s candidates=%s)",
+                            question_kind.value,
+                            guild_id,
+                            len(sources),
+                            len(search_hits)
+                            + len(recovery_semantic_evidence)
+                            + len(firebase_evidence),
+                        )
                     if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                         not has_answer
                         or not (semantic_sources or used_lexical_hits or used_firebase)
                         or semantic_audit.requires_recovery
+                        or comprehensive_coverage_too_narrow
                     ):
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
