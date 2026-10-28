@@ -2212,6 +2212,46 @@ async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
     assert "fields:" not in result.text
 
 
+@pytest.mark.asyncio
+async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    evidence = FirebaseEvidence(
+        document_key="firebase:festival/27/events/it-lab",
+        title="27th 企画",
+        body=(
+            "Firestore現在値（27th / events）\n"
+            'fields: {"eventName": "ITラボ", "place": "11-21", '
+            '"shortDescription": "AI鬼ごっこなどの体験企画"}'
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(
+        side_effect=[[evidence], []]
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted(
+            "RESOURCE_EXHAUSTED: prepayment credits are depleted"
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボについて教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "Firebaseの企画データ" in result.text
+    assert "ITラボ" in result.text
+    assert "場所: 11-21" in result.text
+    assert "fields:" not in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
 def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():
     assert evidence_confidence(
         answered=False,
