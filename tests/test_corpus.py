@@ -2183,6 +2183,7 @@ def test_retrieved_evidence_fallback_preserves_useful_search_results():
     assert "ITラボでは技術展示" in rendered
     assert "来場者向け" in rendered
     assert "fields:" not in rendered
+    assert rendered.index("来場者向け") < rendered.index("ITラボでは技術展示")
 
 
 @pytest.mark.asyncio
@@ -4342,6 +4343,25 @@ def test_recovered_claims_accept_natural_wording_within_selected_authority(
         "「神」または「整理券管理者」だぽん。",
         ["27thの" + access_contract],
     ) is True
+
+
+def test_recovered_narrative_summary_allows_bounded_natural_paraphrase(
+    corpus_manager,
+):
+    evidence = (
+        "Webチャンネルで、新歓用の素材について、各局の局長紹介と局自体の紹介が欲しい。"
+        "局長紹介には本人から一言と紹介文を含める。"
+    )
+
+    assert corpus_manager._recovered_claims_supported(
+        "新歓Webには、各局の局長紹介と局紹介を載せてほしいという依頼があったぽん。",
+        [evidence],
+    ) is True
+    # A shared topic word alone must not authorize an unrelated conclusion.
+    assert corpus_manager._recovered_claims_supported(
+        "新歓Webは公開中で、受付を終了したぽん。",
+        [evidence],
+    ) is False
 
 
 @pytest.mark.parametrize(
