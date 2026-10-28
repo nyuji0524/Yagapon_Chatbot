@@ -36,6 +36,7 @@ POSITION_ROLES = ("企画長", "役員", "副局長", "局長", "執行部")
 DECLARABLE_POSITIONS = ("企画長", "副局長", "局長")
 OFFICER_POSITIONS = ("副局長", "局長")
 POSITION_ROLE_ORDER = ("執行部", "局長", "副局長", "企画長", "役員")
+SERVER_ADMIN_ROLE = "サーバー管理者"
 ROLE_REQUEST_CHANNEL = "ロール申請🔑"
 ROLE_PANEL_CHANNEL = "ロール選択"
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
@@ -1066,6 +1067,38 @@ async def _ensure_role(
     return role, True
 
 
+async def _ensure_setup_actor_is_server_admin(
+    guild: discord.Guild,
+    member: discord.Member,
+) -> tuple[discord.Role, bool]:
+    """Give the already-authorized setup operator an explicit admin role.
+
+    ``/committee_setup`` itself is administrator-only. This therefore does not
+    create a privilege-escalation path; it makes the operator selected for the
+    initial setup visible and keeps their access stable when account-specific
+    Discord permissions are later cleaned up.
+    """
+    permissions = discord.Permissions.none()
+    permissions.administrator = True
+    role, created = await _ensure_role(
+        guild,
+        SERVER_ADMIN_ROLE,
+        color=0x2B2D31,
+        permissions=permissions,
+    )
+    if not role.permissions.administrator:
+        await role.edit(
+            permissions=permissions,
+            reason="28thサーバー管理者権限を整備",
+        )
+    if all(current.id != role.id for current in member.roles):
+        await member.add_roles(
+            role,
+            reason="/committee_setup 実行者をサーバー管理者として登録",
+        )
+    return role, created
+
+
 async def _post_once(channel: discord.TextChannel, marker: str, *, content=None, embed=None, view=None):
     async for message in channel.history(limit=50):
         if message.author.id == channel.guild.me.id and marker in (message.content or ""):
@@ -1120,6 +1153,7 @@ def register(bot):
             *GRADE_ROLES,
             *POSITION_ROLES,
             *_role_names(BUREAU_ROLES),
+            SERVER_ADMIN_ROLE,
         }
         hierarchy_conflicts = list(
             dict.fromkeys(
@@ -1149,6 +1183,11 @@ def register(bot):
             for name in POSITION_ROLES:
                 _role, created = await _ensure_role(ctx.guild, name, color=0xF39C12)
                 created_count += int(created)
+            _admin_role, created = await _ensure_setup_actor_is_server_admin(
+                ctx.guild,
+                ctx.author,
+            )
+            created_count += int(created)
         except discord.Forbidden:
             await ctx.followup.send(
                 "ロールを作成できなかったぽん。やがぽんの権限とロール順を確認してほしいぽん。",
@@ -1174,7 +1213,7 @@ def register(bot):
                     f"✅ 委員登録基盤を整備したぽん（新規ロール {created_count}件）。",
                     panel_message,
                     "カテゴリやチャンネルの一括作成・変更は行っていないぽん。",
-                    "このコマンドの実行者へ管理者ロールを付与する処理も行わないぽん。",
+                    "このコマンドの実行者には「サーバー管理者」ロールを付与したぽん。",
                 ]
             ),
             ephemeral=True,

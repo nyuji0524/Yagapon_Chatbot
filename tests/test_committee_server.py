@@ -9,12 +9,14 @@ from bot.commands.committee_server import (
     GRADE_ROLES,
     OFFICER_POSITIONS,
     POSITION_ROLES,
+    SERVER_ADMIN_ROLE,
     CommitteeGuideView,
     PostRegistrationRoleView,
     RegistrationModal,
     SelfRolePanelView,
     _bot_guide_embed,
     _embed_field_id,
+    _ensure_setup_actor_is_server_admin,
     _is_keio_email,
     _position_role_names,
     _position_role_summary,
@@ -34,6 +36,30 @@ def test_registration_roles_use_only_bureau_grade_and_declared_positions():
     assert GRADE_ROLES == ("１年生", "２年生", "３年生")
     assert "一般委員" not in POSITION_ROLES
     assert "28th委員" not in POSITION_ROLES
+    assert SERVER_ADMIN_ROLE == "サーバー管理者"
+
+
+@pytest.mark.asyncio
+async def test_setup_actor_receives_explicit_administrator_role():
+    role = SimpleNamespace(
+        id=30,
+        name=SERVER_ADMIN_ROLE,
+        permissions=discord.Permissions.none(),
+        edit=AsyncMock(),
+    )
+    guild = SimpleNamespace(roles=[role], create_role=AsyncMock())
+    member = SimpleNamespace(roles=[], add_roles=AsyncMock())
+
+    selected, created = await _ensure_setup_actor_is_server_admin(guild, member)
+
+    assert selected is role
+    assert created is False
+    updated_permissions = role.edit.await_args.kwargs["permissions"]
+    assert updated_permissions.administrator is True
+    member.add_roles.assert_awaited_once_with(
+        role,
+        reason="/committee_setup 実行者をサーバー管理者として登録",
+    )
 
 
 @pytest.mark.asyncio
