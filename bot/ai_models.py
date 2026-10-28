@@ -11,7 +11,10 @@ from google.genai import types
 
 _PROFILE_MODELS = {
     "budget": {
-        "rag": "gemini-3.1-flash-lite",
+        # RAG must synthesize several evidence families and follow the
+        # evidence-key contract.  3.5 keeps the low-cost tier while improving
+        # instruction following for compound questions.
+        "rag": "gemini-3.5-flash-lite",
         "response": "gemini-3.1-flash-lite",
         "minutes": "gemini-3.5-flash-lite",
         "fast": "gemini-3.1-flash-lite",

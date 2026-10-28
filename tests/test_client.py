@@ -179,7 +179,7 @@ def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
 
 def test_rag_confidence_line_explains_server_side_search_audit():
     assert _rag_confidence_line(82, "高", "根拠3件 / 2系統 / 監査済み") == (
-        "**根拠信頼度（検索・監査）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
+        "**回答信頼度（根拠・充足度）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
     )
     assert _rag_confidence_line(None, None, None) == ""
 

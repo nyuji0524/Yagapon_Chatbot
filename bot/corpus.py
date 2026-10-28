@@ -1711,6 +1711,167 @@ def evidence_confidence(
     )
 
 
+def answer_requirement_coverage(
+    question: str,
+    answer: str,
+    *,
+    citations: list[str] | tuple[str, ...] = (),
+    no_answer: bool = False,
+) -> tuple[int, str]:
+    """Estimate whether the answer actually covers the user's deliverables.
+
+    Evidence quality and answer completeness are independent. A perfectly
+    grounded sentence can still answer only one item of a compound request.
+    This verifier is deterministic so it adds no model cost and cannot be
+    persuaded by a model-generated self-rating.
+    """
+    if no_answer or not answer.strip():
+        return 0, "質問へ回答できた項目が0件"
+
+    normalized_question = question.casefold()
+    normalized_answer = answer.casefold()
+    checks: list[tuple[str, bool]] = []
+
+    def add(label: str, passed: bool) -> None:
+        if label not in {item[0] for item in checks}:
+            checks.append((label, bool(passed)))
+
+    bullet_count = len(
+        re.findall(r"(?m)^\s*(?:[-*・]|\d+[.)、])\s+", answer)
+    )
+    heading_count = len(re.findall(r"(?m)^#{2,4}\s+", answer))
+    dates = re.findall(
+        r"(?:20\d{2}[-/年]\d{1,2}(?:[-/月]\d{1,2}日?)?|\d{1,2}月\d{1,2}日)",
+        answer,
+    )
+
+    if re.search(
+        r"(?:すべて|全て|全部|一覧|主な|内訳|洗い出)",
+        normalized_question,
+    ):
+        add("複数項目", bullet_count >= 2 or heading_count >= 2)
+    if re.search(r"(?:時系列|経緯|変遷|その後|以前と現在)", normalized_question):
+        add(
+            "時系列",
+            len(dates) >= 2
+            or bool(
+                re.search(
+                    r"(?:まず|次に|その後|続いて|最終的|現在)",
+                    normalized_answer,
+                )
+            ),
+        )
+    if re.search(
+        r"(?:コード|ソース|実装).{0,30}(?:対応|変更|反映|どう)",
+        normalized_question,
+    ):
+        add(
+            "実装上の対応",
+            bool(
+                re.search(
+                    r"(?:実装|コード|ファイル|コミット|commit|pr|変更|修正|反映)",
+                    normalized_answer,
+                )
+            ),
+        )
+    if re.search(
+        r"(?:外部|他局).{0,40}(?:要求|要望|依頼|指摘|フィードバック)",
+        normalized_question,
+    ):
+        add(
+            "要求・フィードバック内容",
+            bool(
+                re.search(
+                    r"(?:要求|要望|依頼|指摘|フィードバック)",
+                    normalized_answer,
+                )
+                and re.search(
+                    r"(?:外部|他局|総務|広報|渉外|執行部)",
+                    normalized_answer,
+                )
+            ),
+        )
+    if re.search(r"(?:票数|得票)", normalized_question):
+        add("票数", bool(re.search(r"\d[\d,，]*\s*票", answer)))
+    if re.search(r"(?:順位|ランキング|ranking)", normalized_question):
+        add(
+            "順位",
+            bool(
+                re.search(
+                    r"(?:第?\s*\d+\s*位|順位|ランキング)",
+                    answer,
+                    re.IGNORECASE,
+                )
+            ),
+        )
+    if re.search(
+        r"(?:firestore|スキーマ|データ構造|保存先|フィールド|コレクション)",
+        normalized_question,
+    ):
+        add(
+            "データ構造",
+            bool(
+                re.search(
+                    r"(?:コレクション|ドキュメント|フィールド|パス|`[^`]+`)",
+                    answer,
+                )
+            ),
+        )
+    if re.search(r"(?:根拠|出典|引用元|参照)", normalized_question):
+        add("根拠・出典", bool(citations))
+    if re.search(r"(?:問題点|課題|改善点|修正点)", normalized_question):
+        add(
+            "課題と改善",
+            bool(re.search(r"(?:問題|課題|改善|修正|対策)", normalized_answer)),
+        )
+    if re.search(
+        r"(?:未決|未定|要検討|決まっていない|検討段階)",
+        normalized_question,
+    ):
+        add(
+            "未決・要検討事項",
+            bool(
+                re.search(
+                    r"(?:未決|未定|要検討|検討中|未確認|決まっていない)",
+                    normalized_answer,
+                )
+            ),
+        )
+
+    if requires_comprehensive_answer(question) and not checks:
+        add("複数の観点", bullet_count >= 2 or heading_count >= 2)
+        add("複数の根拠", len(citations) >= 2)
+
+    if not checks:
+        return 100, "単一の依頼へ直接回答"
+    completed = sum(passed for _, passed in checks)
+    # A non-empty but incomplete answer is low coverage, not "no evidence".
+    score = max(20, round(100 * completed / len(checks)))
+    missing = [label for label, passed in checks if not passed]
+    detail = f"要求{completed}/{len(checks)}項目を確認"
+    if missing:
+        detail += "（不足: " + "、".join(missing) + "）"
+    return score, detail
+
+
+def combined_answer_confidence(
+    evidence_score: int,
+    coverage_score: int,
+) -> tuple[int, str]:
+    """Use the weaker dimension so a partial answer cannot look reliable."""
+    score = min(max(0, evidence_score), max(0, coverage_score))
+    label = (
+        "高"
+        if score >= 80
+        else "中"
+        if score >= 55
+        else "根拠なし"
+        if score == 0
+        else "低"
+    )
+    return score, label
+
+
 def citation_source_family_count(citations: list[str] | tuple[str, ...]) -> int:
     """Count broad evidence families without trusting citation title text."""
     families: set[str] = set()
@@ -3220,24 +3381,31 @@ class CorpusManager:
             confidence_detail = None
         else:
             scores = [int(result.confidence_score or 0) for result in confidence_results]
-            confidence_score = max(scores) if no_answer else min(scores)
-            confidence_label = (
-                "高"
-                if confidence_score >= 80
-                else "中"
-                if confidence_score >= 55
-                else "根拠なし"
-                if confidence_score == 0
-                else "低"
+            evidence_score = max(scores) if no_answer else min(scores)
+            coverage_score, coverage_detail = answer_requirement_coverage(
+                question,
+                answer,
+                citations=sources,
+                no_answer=no_answer,
+            )
+            confidence_score, confidence_label = combined_answer_confidence(
+                evidence_score,
+                coverage_score,
             )
             if len(confidence_results) == 1:
-                confidence_detail = confidence_results[0].confidence_detail
+                evidence_detail = confidence_results[0].confidence_detail
             else:
-                confidence_detail = (
+                evidence_detail = (
                     f"{len(confidence_results)}論点のうち最も弱い根拠を表示"
                     if not no_answer
                     else f"{len(confidence_results)}論点を検索したが回答可能な根拠なし"
                 )
+            confidence_detail = (
+                f"根拠品質 {evidence_score} / 要求充足度 {coverage_score}"
+                f"（{coverage_detail}）"
+            )
+            if evidence_detail:
+                confidence_detail += f" / {evidence_detail}"
         if sources and not no_answer:
             answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
         elif no_answer:
@@ -3928,10 +4096,10 @@ class CorpusManager:
                         config=generation_config(
                             model,
                             thinking_level=(
-                                "minimal"
-                                if ai_profile() == "budget"
-                                else "medium"
+                                "low"
                                 if comprehensive or cross_source_history
+                                else "minimal"
+                                if ai_profile() == "budget"
                                 else "low"
                             ),
                             max_output_tokens=primary_budget,
@@ -4355,7 +4523,11 @@ class CorpusManager:
                     config=generation_config(
                         model,
                         thinking_level=(
-                            "minimal" if ai_profile() == "budget" else "low"
+                            "low"
+                            if requires_comprehensive_answer(question)
+                            else "minimal"
+                            if ai_profile() == "budget"
+                            else "low"
                         ),
                         max_output_tokens=max_output_tokens,
                         system_instruction=recovery_instruction,

@@ -179,12 +179,12 @@ def _rag_confidence_line(
     label: str | None,
     detail: str | None,
 ) -> str:
-    """Render server-calculated retrieval confidence, never model self-rating."""
+    """Render server-calculated evidence and requirement coverage confidence."""
     if score is None or label is None:
         return ""
     bounded_score = max(0, min(100, int(score)))
     suffix = f" — {detail}" if detail else ""
-    return f"**根拠信頼度（検索・監査）: {bounded_score}/100（{label}）**{suffix}"
+    return f"**回答信頼度（根拠・充足度）: {bounded_score}/100（{label}）**{suffix}"
 
 
 def _rag_visibility_scope(guild, member, channel) -> tuple[tuple[int, ...], bool]:
