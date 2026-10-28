@@ -8,6 +8,7 @@ from bot.firebase_knowledge import (
     FirebaseDocumentBatch,
     FirebaseKnowledgeReader,
     entity_overview_subject,
+    is_explicit_firebase_list_query,
 )
 from bot.firestore_readonly import FirestoreListPage
 from bot.knowledge_authority import QuestionKind
@@ -58,6 +59,13 @@ def _ranking_document(
             "voterIds": {"arrayValue": {"values": [{"stringValue": "private-user"}]}},
         },
     }
+
+
+def test_detailed_notification_columns_still_select_deterministic_list_path():
+    assert is_explicit_firebase_list_query(
+        "27thに発行された公開通知を省略せず、総件数と各通知のタイトル・"
+        "公開日時・カテゴリ・本文・リンクまで一覧にして"
+    )
 def test_allowlist_never_contains_personal_collections():
     rendered = " ".join(str(config["path"]) for config in COLLECTIONS.values())
 
