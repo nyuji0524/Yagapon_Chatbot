@@ -41,7 +41,7 @@ def test_default_models(monkeypatch):
     assert knowledge_curation_model() == "gemini-3.1-flash-lite"
     assert knowledge_model() == "gemini-3.1-flash-lite"
     assert transcribe_model() == "gemini-3.5-transcribe"
-    assert transcribe_fallback_model() == "gemini-3.1-flash-lite"
+    assert transcribe_fallback_model() == "gemini-3.5-flash-lite"
     assert audio_analysis_model() == "gemini-3.1-flash-lite"
 
 

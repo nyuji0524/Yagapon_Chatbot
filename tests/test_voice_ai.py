@@ -2354,10 +2354,22 @@ async def test_final_reprocess_replaces_incremental_transcript_only_after_full_s
     assert session._last_audio_len == {10: 5, 20: 6}
     assert session._transcription_failed is False
     assert all(
-        call.kwargs["prefer_dedicated"] is True and call.kwargs["diarization"] is True
+        call.kwargs["prefer_dedicated"] is False and call.kwargs["diarization"] is True
         for call in session._transcribe_audio.await_args_list
     )
     assert session.recording_sink.checkpoint.call_args.kwargs["final_reprocess_strategy"] == "legacy-per-user"
+
+
+def test_final_transcription_quality_can_opt_into_dedicated_model(monkeypatch):
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    assert session._prefer_dedicated_final_transcription() is False
+
+    session.prefer_dedicated_transcription = True
+    assert session._prefer_dedicated_final_transcription() is True
+
+    session.prefer_dedicated_transcription = None
+    monkeypatch.setenv("YAGAPON_TRANSCRIPTION_QUALITY", "high_accuracy")
+    assert session._prefer_dedicated_final_transcription() is True
 
 
 @pytest.mark.asyncio

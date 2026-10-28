@@ -250,6 +250,7 @@ class ReplayJob:
     target_guild_id: int
     target_channel_id: int
     retranscribe: bool
+    transcription_quality: str = "standard"
     review_only: bool = False
     status: str = "queued"
     stage: str = "queued"
@@ -742,6 +743,7 @@ class RecordingReplayManager:
         artifact: RecordingArtifact,
         target_channel,
         retranscribe: bool,
+        transcription_quality: str = "standard",
         review_only: bool = False,
         review_actor=None,
     ) -> ReplayJob:
@@ -749,6 +751,8 @@ class RecordingReplayManager:
             raise RuntimeError("recording replay manager is shutting down")
         if self.active():
             raise RuntimeError("another recording replay is already running")
+        if transcription_quality not in {"standard", "high_accuracy"}:
+            raise ValueError("invalid transcription quality")
         if review_only:
             if not retranscribe:
                 raise ValueError("review_only requires retranscribe=true")
@@ -772,6 +776,7 @@ class RecordingReplayManager:
             target_guild_id=target_channel.guild.id,
             target_channel_id=target_channel.id,
             retranscribe=retranscribe,
+            transcription_quality=transcription_quality,
             review_only=review_only,
             created_at=now,
             updated_at=now,
@@ -926,6 +931,9 @@ class RecordingReplayManager:
                         guild=SimpleNamespace(id=artifact.source_guild_id),
                     ),
                     VoiceMode.LISTEN,
+                )
+                session.prefer_dedicated_transcription = (
+                    job.transcription_quality == "high_accuracy"
                 )
                 replay_sink = ReadOnlyReplaySink(
                     artifact,
