@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from bot.discord_visibility import readable_channel_ids, resolve_minutes_notification_channel
+from bot.discord_visibility import (
+    channel_audience_has_guildwide_rag_access,
+    readable_channel_ids,
+    resolve_minutes_notification_channel,
+)
 
 
 class FakeChannel:
@@ -56,6 +60,52 @@ def test_current_channel_without_history_permission_is_not_allowed():
         current_channel=channel,
         limit=1,
     ) == ()
+
+
+def test_admin_only_channel_can_use_guildwide_rag_scope():
+    owner = SimpleNamespace(
+        id=10,
+        bot=False,
+        guild_permissions=SimpleNamespace(administrator=True),
+    )
+    administrator = SimpleNamespace(
+        id=20,
+        bot=False,
+        guild_permissions=SimpleNamespace(administrator=True),
+    )
+    bot_member = SimpleNamespace(id=30, bot=True)
+    channel = FakeChannel(1, members=[owner, administrator, bot_member])
+    guild = SimpleNamespace(
+        owner_id=owner.id,
+        chunked=True,
+        channels=[channel],
+    )
+
+    assert channel_audience_has_guildwide_rag_access(guild, channel) is True
+
+
+def test_public_or_incompletely_cached_channel_cannot_widen_rag_scope():
+    administrator = SimpleNamespace(
+        id=10,
+        bot=False,
+        guild_permissions=SimpleNamespace(administrator=True),
+    )
+    regular_member = SimpleNamespace(
+        id=20,
+        bot=False,
+        guild_permissions=SimpleNamespace(administrator=False),
+    )
+    channel = FakeChannel(1, members=[administrator, regular_member])
+    guild = SimpleNamespace(
+        owner_id=999,
+        chunked=True,
+        channels=[channel],
+    )
+
+    assert channel_audience_has_guildwide_rag_access(guild, channel) is False
+    guild.chunked = False
+    channel.members = [administrator]
+    assert channel_audience_has_guildwide_rag_access(guild, channel) is False
 
 
 def test_minutes_destination_never_falls_back_to_unrelated_public_channel():

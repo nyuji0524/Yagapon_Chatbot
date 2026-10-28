@@ -14,6 +14,7 @@ from bot.client import (
     _is_voice_reference_channel,
     _mentioned_bot_role_ids,
     _rag_confidence_line,
+    _rag_visibility_scope,
     _split_discord_text,
 )
 
@@ -181,6 +182,46 @@ def test_rag_confidence_line_explains_server_side_search_audit():
         "**根拠信頼度（検索・監査）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
     )
     assert _rag_confidence_line(None, None, None) == ""
+
+
+def test_admin_only_channel_uses_all_admin_readable_channels_for_rag():
+    administrator = SimpleNamespace(
+        id=10,
+        bot=False,
+        guild_permissions=SimpleNamespace(administrator=True),
+    )
+    bot_member = SimpleNamespace(id=20, bot=True)
+
+    def channel(channel_id, members):
+        return SimpleNamespace(
+            id=channel_id,
+            guild=None,
+            members=members,
+            permissions_for=lambda _member: SimpleNamespace(
+                view_channel=True,
+                read_message_history=True,
+            ),
+        )
+
+    destination = channel(1, [administrator, bot_member])
+    evidence_channel = channel(2, [administrator, bot_member])
+    guild = SimpleNamespace(
+        owner_id=999,
+        chunked=True,
+        channels=[destination, evidence_channel],
+        threads=[],
+    )
+    destination.guild = guild
+    evidence_channel.guild = guild
+
+    visible_channels, unrestricted = _rag_visibility_scope(
+        guild,
+        administrator,
+        destination,
+    )
+
+    assert visible_channels == (1, 2)
+    assert unrestricted is True
 
 
 def test_split_discord_text_hard_splits_a_single_oversized_line_without_loss():

@@ -111,6 +111,26 @@ def has_guildwide_rag_access(guild, member) -> bool:
     return bool(getattr(permissions, "administrator", False))
 
 
+def channel_audience_has_guildwide_rag_access(guild, channel) -> bool:
+    """Return true only when every cached human viewer is an administrator.
+
+    A normal Discord answer is visible to the whole destination channel, not
+    only to the requester.  Guild-wide retrieval is therefore safe only for a
+    fully cached, non-thread channel whose complete visible audience already
+    has Administrator access.  Missing cache or permission evidence fails
+    closed to current-channel retrieval.
+    """
+    if guild is None or channel is None or not bool(getattr(guild, "chunked", False)):
+        return False
+    if channel not in (getattr(guild, "channels", ()) or ()):
+        return False
+    members = tuple(getattr(channel, "members", ()) or ())
+    human_members = [member for member in members if not bool(getattr(member, "bot", False))]
+    return bool(human_members) and all(
+        has_guildwide_rag_access(guild, member) for member in human_members
+    )
+
+
 def resolve_minutes_notification_channel(config, guild, source_channel):
     """Choose a writable destination without widening the meeting audience.
 
