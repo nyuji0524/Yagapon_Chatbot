@@ -6619,6 +6619,56 @@ async def test_upload_reconciles_ambiguous_start_from_remote_identity(corpus_man
 
 
 @pytest.mark.asyncio
+async def test_upload_retires_stale_ambiguous_start_and_retries_after_reconciliation(
+    corpus_manager,
+):
+    metadata, document_key = corpus_manager._upload_metadata_with_identity(
+        "本文",
+        [{"key": "document_key", "string_value": "stale-ambiguous-start"}],
+    )
+    corpus_manager.rag_store.claim_upload_operation(
+        document_key=document_key,
+        store_name="fileSearchStores/test",
+        display_name="document",
+        text="本文",
+        metadata=metadata,
+    )
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+    def make_stale(connection):
+        connection.execute(
+            """
+            UPDATE pending_upload_operations
+            SET created_at = ?, updated_at = ?
+            WHERE document_key = ?
+            """,
+            (stale_at, stale_at, document_key),
+        )
+
+    corpus_manager.rag_store._write(make_stale)
+    corpus_manager._file_search_ambiguous_start_grace_seconds = 300
+    corpus_manager._client.file_search_stores.documents.list.return_value = []
+    complete = SimpleNamespace(
+        done=True,
+        error=None,
+        response=SimpleNamespace(document_name="documents/retried-after-grace"),
+    )
+    upload = corpus_manager._client.file_search_stores.upload_to_file_search_store
+    upload.return_value = complete
+
+    result = await corpus_manager._upload_document(
+        "fileSearchStores/test",
+        "document",
+        "本文",
+        [{"key": "document_key", "string_value": "stale-ambiguous-start"}],
+    )
+
+    assert result == "documents/retried-after-grace"
+    assert upload.call_count == 1
+    assert corpus_manager.rag_store.get_upload_operation(document_key) is None
+
+
+@pytest.mark.asyncio
 async def test_upload_does_not_reconcile_same_content_with_different_acl(
     corpus_manager,
 ):
@@ -6790,6 +6840,22 @@ def test_file_search_upload_start_timeout_environment_is_safely_bounded(
 
     monkeypatch.setenv("YAGAPON_FILE_SEARCH_UPLOAD_START_TIMEOUT_SECONDS", "invalid")
     assert corpus_module.file_search_upload_start_timeout_seconds() == 180
+
+
+def test_file_search_ambiguous_start_grace_environment_is_safely_bounded(
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_AMBIGUOUS_START_GRACE_SECONDS", "7200")
+    assert corpus_module.file_search_ambiguous_start_grace_seconds() == 7200
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_AMBIGUOUS_START_GRACE_SECONDS", "30")
+    assert corpus_module.file_search_ambiguous_start_grace_seconds() == 300
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_AMBIGUOUS_START_GRACE_SECONDS", "999999")
+    assert corpus_module.file_search_ambiguous_start_grace_seconds() == 86400
+
+    monkeypatch.setenv("YAGAPON_FILE_SEARCH_AMBIGUOUS_START_GRACE_SECONDS", "invalid")
+    assert corpus_module.file_search_ambiguous_start_grace_seconds() == 3600
 
 
 @pytest.mark.asyncio
