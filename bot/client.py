@@ -1024,12 +1024,18 @@ class YagaPon(discord.Bot):
             )
             sent_messages = await self.send_split_message(message.channel, discord_answer)
             if result.query_id and sent_messages:
-                self.corpus.rag_store.bind_response_message(
-                    result.query_id,
-                    guild_id,
-                    message.channel.id,
-                    sent_messages[-1].id,
-                )
+                try:
+                    self.corpus.rag_store.bind_response_message(
+                        result.query_id,
+                        guild_id,
+                        message.channel.id,
+                        sent_messages[-1].id,
+                    )
+                except Exception as exc:
+                    # The answer is already visible. Feedback correlation is
+                    # auxiliary and must not make Discord report the command as
+                    # failed when SQLite is temporarily busy.
+                    log.warning("Failed to bind optional RAG feedback telemetry: %s", exc)
 
             # Text-channel RAG answers are deliberately not relayed into a VC.
             # The two audiences can differ (for example an officer-only text
