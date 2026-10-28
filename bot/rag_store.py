@@ -1098,6 +1098,26 @@ class RagStore:
             re.IGNORECASE,
         )
         terms.extend(match.group(0) for match in cue_pattern.finditer(question))
+        # Requests and their eventual handling are often recorded with
+        # different verbs.  A question may say ``要求と対応`` while the
+        # original record says ``削除依頼`` or ``掲載を変更``. Expand the
+        # intent generically so cross-team history retrieval can find both
+        # the request and the resulting action without a project-name
+        # allowlist.
+        if re.search(r"要求|要望|依頼", question):
+            terms.extend(("依頼", "要望", "規制"))
+        if re.search(r"対応|反映|修正|変更|削除|掲載", question):
+            terms.extend(("削除", "修正", "変更", "掲載", "反映"))
+        terms = [
+            term
+            for term in terms
+            if not re.fullmatch(r"(?:要求|要望|依頼)された内容", term)
+        ]
+        # The compound is the useful subject; the bare English suffix occurs
+        # in almost every web repository document and crowds out relevant
+        # Discord records.
+        if re.search(r"新歓web", question, re.IGNORECASE):
+            terms = [term for term in terms if term.casefold() != "web"]
         # The festival number already drives the metadata filter in the RAG
         # pipeline.  Treating ``27th`` itself as an exact-search subject makes
         # the operating-year reference appear beside unrelated 27th topics.

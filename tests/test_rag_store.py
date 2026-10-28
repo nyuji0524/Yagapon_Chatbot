@@ -1076,6 +1076,27 @@ def test_query_terms_decompose_compound_request_and_implementation_question():
     assert not {"時系列", "根拠付き", "外部や他局", "後コード"} & set(terms)
 
 
+def test_query_terms_expand_request_and_response_history_vocabulary():
+    terms = RagStore.query_terms(
+        "新歓Webで外部や他局から要求された内容と対応をまとめて"
+    )
+
+    assert "Web" not in terms
+    assert "要求された内容" not in terms
+    assert {
+        "新歓web",
+        "外部",
+        "他局",
+        "要求",
+        "依頼",
+        "要望",
+        "規制",
+        "削除",
+        "修正",
+        "変更",
+    }.issubset({term.casefold() for term in terms})
+
+
 def test_query_terms_decompose_connectors_and_predicates_without_domain_allowlist():
     terms = RagStore.query_terms(
         "スポンサーCRMで総務や渉外から要望が出たあと、実装でどのように反映したか"
