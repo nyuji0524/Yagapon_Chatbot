@@ -3938,6 +3938,15 @@ def test_grounding_coverage_threshold_is_configurable_and_safely_bounded(monkeyp
         ) == pytest.approx(0.8)
 
 
+def test_default_grounding_threshold_keeps_paraphrases_without_weakening_facts():
+    assert corpus_module.RAG_GROUNDING_COVERAGE_THRESHOLD == pytest.approx(0.35)
+    assert CorpusManager._grounding_claims_covered("abcdefghij", ["abcd"]) is True
+    assert CorpusManager._grounding_claims_covered(
+        "申請フォームを開くぽん。受付は9時開始だぽん。",
+        ["申請フォームを開くぽん。"],
+    ) is False
+
+
 def test_grounding_coverage_allows_small_noncritical_gap(corpus_manager, monkeypatch):
     monkeypatch.setattr("bot.corpus.RAG_GROUNDING_COVERAGE_THRESHOLD", 0.8)
     answer = "申請フォームを開いて必要事項を入力し内容を確認して送信して控えを残すぽん。"

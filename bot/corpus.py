@@ -232,13 +232,16 @@ RAG_LEXICAL_CONTEXT_HITS = 6
 RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS = 12
 RAG_GROUNDING_COVERAGE_THRESHOLD = _bounded_float_env(
     "YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD",
-    0.6,
-    0.5,
+    0.35,
+    0.25,
     1.0,
 )
 GLOBAL_NO_EVIDENCE_MARKER = "[[YAGAPON_NO_RELEVANT_EVIDENCE]]"
 
-# A modest coverage allowance is for connective/style text, not factual values.
+# Natural summaries paraphrase discussion records heavily, so ordinary
+# explanatory claims only need partial character coverage from the model's
+# authorized grounding segments. This allowance is for connective/style text,
+# not factual values.
 # Claims containing these high-impact facts must remain completely covered by a
 # locally authorized grounding segment even when the aggregate threshold passes.
 _CRITICAL_GROUNDING_CLAIM_RE = re.compile(
