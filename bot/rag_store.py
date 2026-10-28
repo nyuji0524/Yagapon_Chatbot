@@ -1356,10 +1356,7 @@ class RagStore:
         hits = []
         for row in rows:
             body = row["body"]
-            positions = [body.casefold().find(term.casefold()) for term in clean_terms]
-            positions = [position for position in positions if position >= 0]
-            start = max(0, (min(positions) if positions else 0) - 220)
-            excerpt = body[start:start + 900].strip()
+            excerpt = self._best_matching_excerpt(body, clean_terms)
             matched_terms = sum(
                 100 + min(len(term), 24) * 4
                 for term in clean_terms
@@ -1472,6 +1469,68 @@ class RagStore:
             if hit.document_key not in selected_keys
         )
         return sorted(selected[:limit], key=lambda hit: hit.score, reverse=True)
+
+    @staticmethod
+    def _best_matching_excerpt(
+        body: str,
+        terms: list[str],
+        *,
+        width: int = 900,
+        leading_context: int = 220,
+    ) -> str:
+        """Choose the window with the densest useful query evidence.
+
+        Long source files commonly mention a broad term such as ``Firestore``
+        in their imports or introduction and the actual feature much later.
+        Anchoring on the first match hid the relevant implementation from the
+        model.  Score bounded windows around every match by distinct-term
+        coverage and capped repetition so the excerpt follows the feature,
+        without trusting a domain-specific filename or vocabulary list.
+        """
+        if not body:
+            return ""
+        normalized_body = body.casefold()
+        normalized_terms = tuple(
+            dict.fromkeys(
+                term.casefold().strip()
+                for term in terms
+                if term and term.strip()
+            )
+        )
+        candidate_positions: set[int] = {0}
+        for term in normalized_terms:
+            position = normalized_body.find(term)
+            matches = 0
+            while position >= 0 and matches < 64:
+                candidate_positions.add(position)
+                matches += 1
+                position = normalized_body.find(term, position + max(1, len(term)))
+
+        best_start = 0
+        best_score = (-1, -1, -1, 0)
+        for position in candidate_positions:
+            start = max(0, min(position - leading_context, max(0, len(body) - width)))
+            window = normalized_body[start:start + width]
+            distinct = 0
+            weighted = 0
+            repeated = 0
+            for index, term in enumerate(normalized_terms):
+                count = window.count(term)
+                if not count:
+                    continue
+                distinct += 1
+                weight = 100 + min(len(term), 24) * 4
+                # query_terms() keeps the concrete subject first and appends
+                # broader cues later.  Prefer that subject over a generic word
+                # repeated throughout a large file (for example Firestore in
+                # every service method). Repetition is only the final tie-break.
+                weighted += weight + (len(normalized_terms) - index) * 50
+                repeated += min(count, 4)
+            score = (distinct, weighted, repeated, -start)
+            if score > best_score:
+                best_score = score
+                best_start = start
+        return body[best_start:best_start + width].strip()
 
     def find_approved_topic(self, topic_id: str, *, festival: int) -> dict | None:
         """Find a reviewed Knowledge article that reconciles an open topic draft."""

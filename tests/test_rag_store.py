@@ -374,6 +374,28 @@ def test_exact_search_honors_festival_filter(tmp_path):
     assert "担当を確認" in hits[0].excerpt
 
 
+def test_exact_search_excerpt_prefers_dense_feature_section_in_long_source(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    body = (
+        "Firestore import and general setup. "
+        + ("unrelated preface " * 100)
+        + "ranking implementation reads Firestore ranking documents. "
+        + ("ranking score category eventName " * 20)
+    )
+    store.upsert_document("documents/ranking", body, metadata(27))
+
+    hits = store.search_exact(
+        1,
+        ["ranking", "Firestore"],
+        festival=27,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert len(hits) == 1
+    assert "ranking implementation reads Firestore" in hits[0].excerpt
+    assert "ranking score category eventName" in hits[0].excerpt
+
+
 def test_exact_search_enforces_channel_visibility(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     for channel_id in (10, 20):
