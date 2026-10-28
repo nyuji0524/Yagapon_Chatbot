@@ -92,6 +92,9 @@ UPLOAD_POLL_SECONDS = 2
 FILE_SEARCH_UPLOAD_START_TIMEOUT_DEFAULT_SECONDS = 3 * 60
 FILE_SEARCH_UPLOAD_START_TIMEOUT_MIN_SECONDS = 30
 FILE_SEARCH_UPLOAD_START_TIMEOUT_MAX_SECONDS = 15 * 60
+FILE_SEARCH_AMBIGUOUS_START_GRACE_DEFAULT_SECONDS = 60 * 60
+FILE_SEARCH_AMBIGUOUS_START_GRACE_MIN_SECONDS = 5 * 60
+FILE_SEARCH_AMBIGUOUS_START_GRACE_MAX_SECONDS = 24 * 60 * 60
 FILE_SEARCH_INDEX_TIMEOUT_DEFAULT_SECONDS = 30 * 60
 FILE_SEARCH_INDEX_TIMEOUT_MIN_SECONDS = 5 * 60
 FILE_SEARCH_INDEX_TIMEOUT_MAX_SECONDS = 2 * 60 * 60
@@ -215,6 +218,23 @@ def file_search_upload_start_timeout_seconds() -> int:
         FILE_SEARCH_UPLOAD_START_TIMEOUT_DEFAULT_SECONDS,
         FILE_SEARCH_UPLOAD_START_TIMEOUT_MIN_SECONDS,
         FILE_SEARCH_UPLOAD_START_TIMEOUT_MAX_SECONDS,
+    )
+
+
+def file_search_ambiguous_start_grace_seconds() -> int:
+    """Return how long an unconfirmed upload start remains quarantined.
+
+    Upload creation has no idempotency token.  A timed-out request therefore
+    stays fail-closed while an accepted document may still become visible.
+    After a bounded grace period and an exact remote-identity reconciliation,
+    the stale local intent may be retired and retried.  Any very-late duplicate
+    has the same payload and ACL metadata and is removed by reconciliation.
+    """
+    return _bounded_int_env(
+        "YAGAPON_FILE_SEARCH_AMBIGUOUS_START_GRACE_SECONDS",
+        FILE_SEARCH_AMBIGUOUS_START_GRACE_DEFAULT_SECONDS,
+        FILE_SEARCH_AMBIGUOUS_START_GRACE_MIN_SECONDS,
+        FILE_SEARCH_AMBIGUOUS_START_GRACE_MAX_SECONDS,
     )
 
 
@@ -1720,6 +1740,9 @@ class CorpusManager:
         self._file_search_upload_start_timeout_seconds = (
             file_search_upload_start_timeout_seconds()
         )
+        self._file_search_ambiguous_start_grace_seconds = (
+            file_search_ambiguous_start_grace_seconds()
+        )
         self._file_search_index_timeout_seconds = file_search_index_timeout_seconds()
         self._flush_task: asyncio.Task | None = None
         self._inflight_flushes: set[asyncio.Task] = set()
@@ -2450,7 +2473,7 @@ class CorpusManager:
         self,
         pending: dict,
         operation=None,
-    ) -> str:
+    ) -> str | None:
         """Resume a durable operation or reconcile its remotely active result."""
         document_key = str(pending["document_key"])
         payload_sha256 = str(pending["payload_sha256"])
@@ -2493,6 +2516,43 @@ class CorpusManager:
                 refreshed.get("operation_name") or refreshed.get("remote_name")
             ):
                 return await self._resume_pending_upload(refreshed)
+            timestamp_raw = str(
+                pending.get("updated_at") or pending.get("created_at") or ""
+            )
+            try:
+                pending_since = datetime.fromisoformat(
+                    timestamp_raw.replace("Z", "+00:00")
+                )
+            except ValueError:
+                pending_since = None
+            if pending_since is not None:
+                if pending_since.tzinfo is None:
+                    pending_since = pending_since.replace(tzinfo=timezone.utc)
+                age_seconds = (
+                    datetime.now(timezone.utc)
+                    - pending_since.astimezone(timezone.utc)
+                ).total_seconds()
+                if age_seconds >= self._file_search_ambiguous_start_grace_seconds:
+                    retired = await asyncio.to_thread(
+                        self.rag_store.resolve_upload_operation,
+                        document_key,
+                        payload_sha256,
+                    )
+                    if retired:
+                        log.warning(
+                            "Retired stale ambiguous File Search upload intent "
+                            "after exact remote reconciliation document_key=%s "
+                            "age_seconds=%d",
+                            document_key,
+                            int(age_seconds),
+                        )
+                        return None
+                    refreshed = await asyncio.to_thread(
+                        self.rag_store.get_upload_operation,
+                        document_key,
+                    )
+                    if refreshed is not None:
+                        return await self._resume_pending_upload(refreshed)
             raise TimeoutError(
                 "File Search upload initiation outcome is still unknown; "
                 f"refusing to resend document_key={document_key}"
@@ -2647,12 +2707,13 @@ class CorpusManager:
                         superseded_remote_names=superseded_remote_names,
                     )
                     recovered = await self._resume_pending_upload(pending)
-                    if str(pending["payload_sha256"]) != payload_sha256:
-                        raise RuntimeError(
-                            "A previous upload for this document key was recovered; "
-                            "retry once to publish the newer payload"
-                        )
-                    return recovered
+                    if recovered is not None:
+                        if str(pending["payload_sha256"]) != payload_sha256:
+                            raise RuntimeError(
+                                "A previous upload for this document key was recovered; "
+                                "retry once to publish the newer payload"
+                            )
+                        return recovered
                 existing = await asyncio.to_thread(
                     self.rag_store.get_document,
                     document_key,
@@ -2697,12 +2758,35 @@ class CorpusManager:
                 )
                 if not claimed:
                     recovered = await self._resume_pending_upload(pending)
-                    if not requested_matches_pending:
-                        raise RuntimeError(
-                            "A previous upload for this document key was recovered; "
-                            "retry once to publish the newer payload"
-                        )
-                    return recovered
+                    if recovered is not None:
+                        if not requested_matches_pending:
+                            raise RuntimeError(
+                                "A previous upload for this document key was recovered; "
+                                "retry once to publish the newer payload"
+                            )
+                        return recovered
+                    pending, claimed = await asyncio.to_thread(
+                        self.rag_store.claim_upload_operation,
+                        document_key=document_key,
+                        store_name=store_name,
+                        display_name=display_name,
+                        text=text,
+                        metadata=metadata,
+                        superseded_remote_names=superseded_remote_names,
+                    )
+                    if not claimed:
+                        recovered = await self._resume_pending_upload(pending)
+                        if recovered is None:
+                            raise RuntimeError(
+                                "File Search upload intent changed repeatedly while "
+                                "recovering a stale initiation"
+                            )
+                        if str(pending["payload_sha256"]) != payload_sha256:
+                            raise RuntimeError(
+                                "A previous upload for this document key was recovered; "
+                                "retry once to publish the newer payload"
+                            )
+                        return recovered
 
                 start_timeout_seconds = self._file_search_upload_start_timeout_seconds
 
