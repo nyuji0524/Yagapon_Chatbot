@@ -1690,6 +1690,8 @@ class RagAnswer:
     confidence_score: int | None = None
     confidence_label: str | None = None
     confidence_detail: str | None = None
+    requirement_coverage_score: int | None = None
+    requirement_coverage_detail: str | None = None
 
 
 def evidence_confidence(
@@ -3447,12 +3449,22 @@ class CorpusManager:
         else:
             scores = [int(result.confidence_score or 0) for result in confidence_results]
             evidence_score = max(scores) if no_answer else min(scores)
-            coverage_score, coverage_detail = answer_requirement_coverage(
-                question,
-                answer,
-                citations=sources,
-                no_answer=no_answer,
-            )
+            if (
+                len(results) == 1
+                and results[0].requirement_coverage_score is not None
+            ):
+                coverage_score = int(results[0].requirement_coverage_score)
+                coverage_detail = (
+                    results[0].requirement_coverage_detail
+                    or "決定論的な回答経路で要求充足を確認"
+                )
+            else:
+                coverage_score, coverage_detail = answer_requirement_coverage(
+                    question,
+                    answer,
+                    citations=sources,
+                    no_answer=no_answer,
+                )
             confidence_score, confidence_label = combined_answer_confidence(
                 evidence_score,
                 coverage_score,
@@ -3802,6 +3814,11 @@ class CorpusManager:
                         confidence_score=confidence[0],
                         confidence_label=confidence[1],
                         confidence_detail=confidence[2],
+                        requirement_coverage_score=100,
+                        requirement_coverage_detail=(
+                            "Firestoreの全件性メタデータと要求された表示項目を"
+                            "決定論的に確認"
+                        ),
                     )
             if firebase_evidence:
                 evidence_context += self._untrusted_evidence(
@@ -5479,29 +5496,35 @@ class CorpusManager:
                     timestamp = item.fields.get("publishedAt") or item.fields.get(
                         "createdAt"
                     )
-                    metadata = []
-                    if timestamp:
-                        metadata.append(str(timestamp))
                     category = item.fields.get("category")
-                    if category:
-                        metadata.append(str(category))
                     targets = item.fields.get("displayTargets")
-                    if isinstance(targets, list) and targets:
-                        metadata.append("対象: " + "/".join(map(str, targets)))
-                    if "sendPush" in item.fields:
-                        metadata.append(
-                            "Push: あり" if item.fields.get("sendPush") else "Push: なし"
-                        )
-                    suffix = (
-                        " — "
-                        + cls._escape_untrusted_markdown(" / ".join(metadata))
-                        if metadata
-                        else ""
+                    lines.append(
+                        f"{item.position}. タイトル: "
+                        f"**{cls._escape_untrusted_markdown(display_name)}**"
                     )
                     lines.append(
-                        f"{item.position}. **{cls._escape_untrusted_markdown(display_name)}**"
-                        f"{suffix}"
+                        "   - 公開日時: "
+                        + cls._escape_untrusted_markdown(
+                            str(timestamp) if timestamp else "（未設定）"
+                        )
                     )
+                    lines.append(
+                        "   - カテゴリ: "
+                        + cls._escape_untrusted_markdown(
+                            str(category) if category else "（未設定）"
+                        )
+                    )
+                    if isinstance(targets, list) and targets:
+                        lines.append(
+                            "   - 対象: "
+                            + cls._escape_untrusted_markdown("/".join(map(str, targets)))
+                        )
+                    if "sendPush" in item.fields:
+                        lines.append(
+                            "   - Push: あり"
+                            if item.fields.get("sendPush")
+                            else "   - Push: なし"
+                        )
                     action = item.fields.get("action")
                     action_rendered = False
                     if isinstance(action, dict):
@@ -5510,12 +5533,12 @@ class CorpusManager:
                         action_parts = [str(value) for value in (label, url) if value]
                         if action_parts:
                             lines.append(
-                                "   - アクション: "
+                                "   - リンク: "
                                 + cls._escape_untrusted_markdown(" — ".join(action_parts))
                             )
                             action_rendered = True
                     if include_notification_action and not action_rendered:
-                        lines.append("   - アクション: なし")
+                        lines.append("   - リンク: なし")
                     if include_notification_body:
                         body = item.fields.get("body")
                         if isinstance(body, str) and body.strip():

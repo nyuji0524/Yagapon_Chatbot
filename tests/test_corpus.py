@@ -3011,8 +3011,13 @@ async def test_detailed_exhaustive_notification_request_keeps_requested_body(cor
         assert f"2026-09-{index:02d}T00:00:00Z" in result.text
         assert "important" in result.text
     assert "本文: 1行目\n     2行目" in result.text
-    assert result.text.count("アクション: なし") == 3
+    assert result.text.count("リンク: なし") == 3
+    assert result.text.count("タイトル:") == 3
+    assert result.text.count("公開日時:") == 3
+    assert result.text.count("カテゴリ:") == 3
     assert "指定に合わせて、取得できた本文も掲載" in result.text
+    assert result.confidence_score == 65
+    assert "要求充足度 100" in (result.confidence_detail or "")
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
