@@ -724,6 +724,35 @@ _RETRIEVAL_PLUMBING_PATHS = (
     ":bot/firebase_knowledge.py",
 )
 
+_ILLUSTRATIVE_SOURCE_PATH_RE = re.compile(
+    r"(?:^|[/._-])(?:mocks?|mockups?|fixtures?|examples?|samples?|tests?)"
+    r"(?:[/._-]|$)",
+    re.IGNORECASE,
+)
+
+
+def _question_is_about_illustrative_material(question: str) -> bool:
+    return bool(
+        re.search(
+            r"モック|mockup?|サンプル|sample|例示|example|fixture|"
+            r"テスト(?:コード|データ|ケース|用)?|tests?",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _source_reference_is_illustrative(*values: object) -> bool:
+    for value in values:
+        normalized = str(value or "").replace("\\", "/")
+        parsed = urlsplit(normalized)
+        # A test host such as ``example.com`` is not a repository example
+        # directory. Only inspect the URL path when the value is a URL.
+        candidate = parsed.path if parsed.scheme or parsed.netloc else normalized
+        if _ILLUSTRATIVE_SOURCE_PATH_RE.search(candidate):
+            return True
+    return False
+
 
 def _question_is_about_retrieval_system(question: str) -> bool:
     return bool(
@@ -750,12 +779,22 @@ def _filter_retrieval_plumbing_hits(
     """
     if _question_is_about_retrieval_system(question):
         return hits
+    allow_illustrative = _question_is_about_illustrative_material(question)
     return [
         hit
         for hit in hits
         if not (
             hit.source_type in {"source_code", "source_code_history"}
             and any(marker in hit.channel_name for marker in _RETRIEVAL_PLUMBING_PATHS)
+        )
+        and not (
+            not allow_illustrative
+            and hit.source_type in {"source_code", "source_code_history"}
+            and _source_reference_is_illustrative(
+                hit.channel_name,
+                hit.source_url,
+                hit.document_key,
+            )
         )
     ]
 
@@ -3675,6 +3714,35 @@ class CorpusManager:
             if guild_id
             else []
         )
+        if (
+            guild_id
+            and question_kind is QuestionKind.HISTORY
+            and target_window is not None
+        ):
+            # A natural activity question such as ``去年の今頃何してた？``
+            # often has no topical noun in the messages themselves. The
+            # guild/channel already supplies the organizational scope, so a
+            # second, bounded date-only lane is required; otherwise FTS terms
+            # such as ``IT局`` can incorrectly turn a month with thousands of
+            # messages into zero candidates.
+            window_hits = await asyncio.to_thread(
+                self.rag_store.search_exact,
+                guild_id,
+                [],
+                festival=festival,
+                date_from=target_date_from,
+                date_to=target_date_to,
+                allowed_channel_ids=allowed_channel_ids,
+                allow_unrestricted_conversations=allow_unrestricted_conversations,
+                question_kind=question_kind,
+                limit=lexical_candidate_limit,
+            )
+            lexical_hits = list(
+                {
+                    hit.document_key: hit
+                    for hit in [*lexical_hits, *window_hits]
+                }.values()
+            )
         lexical_hits = _filter_retrieval_plumbing_hits(question, lexical_hits)
         if not allows_unreviewed_evidence(question_kind):
             lexical_hits = [
@@ -3701,6 +3769,13 @@ class CorpusManager:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
                 question_kind
+            )
+            system += (
+                "\n【資料の役割】Firebase現在値・正式文書・確認済み記録は、実在する企画や"
+                "運用の事実を説明する根拠にできるぽん。ソースコードや技術仕様は実装の仕組みを"
+                "説明する根拠であり、そこに登場するサンプル名・例示値だけで実際の企画内容、担当、"
+                "開催場所、運用実績を断定してはいけないぽん。mock・example・fixture・test配下の"
+                "資料は、利用者がそれ自体を質問した場合を除き、実データの根拠に使わないぽん。"
             )
             system += (
                 f"\n【今回の担当論点】{question_kind.value} の論点だけに回答するぽん。"
@@ -4348,6 +4423,9 @@ class CorpusManager:
                         question_kind=question_kind,
                         allowed_channel_ids=allowed_channel_ids,
                         allow_unrestricted_conversations=allow_unrestricted_conversations,
+                        allow_illustrative_sources=_question_is_about_illustrative_material(
+                            question
+                        ),
                     )
                     semantic_sources = semantic_audit.sources
                     used_lexical_hits = selected_lexical_hits(search_hits, parsed)
@@ -5193,6 +5271,7 @@ class CorpusManager:
             return False
         if re.search(
             r"書き込|書込|更新|作成|削除|write|create|update|delete|"
+            r"読み書き|コード|実装|API|Functions?|クライアント|サーバー|"
             r"security|セキュリティ|rules?|ルール|権限|permission|"
             r"必須|required|型|types?|サブコレクション|nested|"
             r"features?|geometry|calibrations?|完全な",
@@ -6459,6 +6538,7 @@ class CorpusManager:
         question_kind: QuestionKind | None = None,
         allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
         allow_unrestricted_conversations: bool = False,
+        allow_illustrative_sources: bool = False,
     ) -> _GroundingAudit:
         """Validate every chunk the model says it used, plus claim coverage."""
         candidates = getattr(response, "candidates", None) or []
@@ -6523,6 +6603,20 @@ class CorpusManager:
             status = str(metadata.get("status") or "")
             authority = str(metadata.get("authority") or "")
             source_type = str(metadata.get("source_type") or "")
+            url = metadata.get("source_url") or getattr(context, "uri", None)
+            title = getattr(context, "title", None)
+            if (
+                not allow_illustrative_sources
+                and source_type in {"source_code", "source_code_history"}
+                and _source_reference_is_illustrative(
+                    channel,
+                    title,
+                    url,
+                    metadata.get("document_key"),
+                )
+            ):
+                rejected_supported_chunks += 1
+                continue
             if not allow_unrestricted_conversations:
                 access_scope = str(metadata.get("access_scope") or "")
                 if access_scope == "guild":
@@ -6585,8 +6679,6 @@ class CorpusManager:
                 if expected_date_to is not None and source_start > expected_date_to:
                     rejected_supported_chunks += 1
                     continue
-            url = metadata.get("source_url") or getattr(context, "uri", None)
-            title = getattr(context, "title", None)
             raw_citation_metadata = " ".join(
                 str(value or "")
                 for value in (

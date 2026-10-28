@@ -109,6 +109,25 @@ def classify_question_facets(question: str) -> tuple[QuestionKind, ...]:
     if QuestionKind.AUTHORIZATION in facets and QuestionKind.PEOPLE in facets:
         # 「誰が操作できる」は人物紹介ではなく認可の一部。
         facets.remove(QuestionKind.PEOPLE)
+    if (
+        QuestionKind.HISTORY in facets
+        and QuestionKind.RUNTIME in facets
+        and re.search(r"去年|昨年|昨年度|先月|今頃|この時期", question)
+        and not re.search(
+            r"公開中|有効|稼働|本番|デプロイ|開催中|中止|残り(?:枠|数)|最新|"
+            r"(?:現在|今).{0,20}(?:比較|違い)|(?:比較|違い).{0,20}(?:現在|今)|"
+            r"(?:大賞企画|Y-?1(?:グランプリ)?|ランキング|ranking).{0,20}"
+            r"(?:結果|票数|得票|順位|状態)",
+            question,
+            re.IGNORECASE,
+        )
+    ):
+        # ``現在日を基準に去年の今頃`` uses 現在 only as the calendar
+        # anchor.  Treating that wording as a second runtime facet creates an
+        # unrelated current-state search and often produces two empty answer
+        # sections.  Keep both facets only when a real present-vs-past
+        # comparison or another strong runtime cue is present.
+        facets.remove(QuestionKind.RUNTIME)
     if not facets:
         return (QuestionKind.GENERAL,)
     return tuple(facets)

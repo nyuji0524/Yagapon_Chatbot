@@ -120,6 +120,91 @@ def test_topic_query_excludes_rag_query_parser_as_evidence():
     ) == [plumbing, discussion]
 
 
+def test_topic_query_excludes_illustrative_source_unless_explicitly_requested():
+    mock = replace(
+        lexical_hit(
+            "mock-source",
+            score=900,
+            authority="repository_context",
+            source_type="source_code",
+            status="current",
+            excerpt="ITラボには架空のロボット体験がある。",
+        ),
+        channel_name="YagamiFes-IT/Yagamy:docs/requirements/mocks/mockup.html",
+        source_url=(
+            "https://github.com/YagamiFes-IT/Yagamy/blob/main/"
+            "docs/requirements/mocks/mockup.html"
+        ),
+    )
+
+    assert _filter_retrieval_plumbing_hits("ITラボについて教えて", [mock]) == []
+    assert _filter_retrieval_plumbing_hits("ITラボのモックについて教えて", [mock]) == [mock]
+
+
+def test_firebase_projection_does_not_preempt_requested_code_explanation():
+    contracts = (SimpleNamespace(source_type="ranking"),)
+
+    assert CorpusManager._firebase_schema_fallback_allowed(
+        "27thのrankingのFirestore構造を教えて",
+        contracts,
+    )
+    assert not CorpusManager._firebase_schema_fallback_allowed(
+        "27thのrankingのFirestore構造と、読み書きするコードを教えて",
+        contracts,
+    )
+
+
+def test_semantic_grounding_rejects_illustrative_code_for_real_world_answer(
+    corpus_manager,
+):
+    context = SimpleNamespace(
+        title="mockup.html",
+        uri=(
+            "https://github.com/YagamiFes-IT/Yagamy/blob/main/"
+            "docs/requirements/mocks/mockup.html"
+        ),
+        text="ITラボには架空のロボット体験がある。",
+        custom_metadata=[
+            {
+                "key": "channel_name",
+                "string_value": (
+                    "YagamiFes-IT/Yagamy:docs/requirements/mocks/mockup.html"
+                ),
+            },
+            {"key": "authority", "string_value": "repository_context"},
+            {"key": "status", "string_value": "current"},
+            {"key": "source_type", "string_value": "source_code"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(grounding_chunk_indices=[0])
+                    ],
+                )
+            )
+        ]
+    )
+
+    audit = corpus_manager._response_grounding_audit(
+        response,
+        question_kind=QuestionKind.GENERAL,
+    )
+    allowed = corpus_manager._response_grounding_audit(
+        response,
+        question_kind=QuestionKind.GENERAL,
+        allow_illustrative_sources=True,
+    )
+
+    assert audit.evidence == ()
+    assert audit.rejected_supported_chunks == 1
+    assert len(allowed.evidence) == 1
+
+
 def test_history_extractive_fallback_puts_discussion_before_source_code():
     implementation = lexical_hit(
         "implementation",
@@ -179,6 +264,56 @@ def test_history_context_reserves_narrative_sources_after_authority_ranking():
     assert len(selected) == 6
     assert {hit.document_key for hit in selected}.issuperset(
         {"discord-operation", "meeting-review"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_relative_history_adds_bounded_date_only_retrieval_lane(
+    corpus_manager,
+    monkeypatch,
+):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    monkeypatch.setattr(
+        corpus_module,
+        "calendar_window_from_query",
+        lambda *_args, **_kwargs: CalendarWindow(
+            starts_on=date(2025, 10, 1),
+            ends_on=date(2025, 10, 31),
+        ),
+    )
+    activity = lexical_hit(
+        "october-activity",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+        status="raw",
+        excerpt="新歓Webの要件整理と次年度の役職設計を進めた。",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["IT局"])
+    corpus_manager.rag_store.search_exact = Mock(side_effect=[[], [activity]])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted("prepayment credits are depleted")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "去年の今頃、IT局では何をしていましたか？現在日を基準に教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "新歓Webの要件整理" in result.text
+    assert corpus_manager.rag_store.search_exact.call_count == 2
+    assert corpus_manager.rag_store.search_exact.call_args_list[1].args[1] == []
+    assert corpus_manager.rag_store.search_exact.call_args_list[1].kwargs["date_from"] == (
+        "2025-10-01"
+    )
+    assert corpus_manager.rag_store.search_exact.call_args_list[1].kwargs["date_to"] == (
+        "2025-10-31"
     )
 
 

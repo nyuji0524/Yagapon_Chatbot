@@ -109,6 +109,10 @@ def test_allowlist_never_contains_personal_collections():
     ("question", "subject"),
     [
         ("ITラボについて教えて", "ITラボ"),
+        (
+            "ITラボについて教えてください。企画内容、担当、運用上の課題も知りたいです。",
+            "ITラボ",
+        ),
         ("新歓Webとは？", "新歓Web"),
         ("あなたについて教えて", None),
         ("企画について教えて", None),
