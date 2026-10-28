@@ -5730,9 +5730,9 @@ async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(
         "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
     )
     assert "9時" not in result.text
-    # A verified regeneration is attempted first; its no-evidence result then
-    # falls back to the locally supported partial record.
-    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    # The exact supported claim is retained locally; the unsupported time is
+    # removed without paying for a second model call.
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 @pytest.mark.asyncio
