@@ -241,6 +241,7 @@ async def main(*, _keep_watchdog_armed: bool = False):
     from bot.client import create_bot
 
     bot = create_bot()
+    bot._post_durable_cleanup = _tighten_watchdog_after_durable_cleanup
     app = create_app(bot)
 
     # uvicorn設定 (同一イベントループで実行)
