@@ -390,13 +390,16 @@ async def shutdown(bot, server, *, deadline: float | None = None):
 
 
 def run() -> None:
-    """Run until all async and default-executor teardown has completed."""
-    try:
-        asyncio.run(main(_keep_watchdog_armed=True))
-    finally:
-        # This line is intentionally outside the coroutine: cancelling a
-        # ``to_thread`` waiter does not stop asyncio.run from joining its thread.
-        _disarm_process_watchdog()
+    """Run while keeping the watchdog armed until the OS observes PID exit.
+
+    ``asyncio.run`` returning is not the final process boundary: CPython can
+    still wait for non-daemon threads during interpreter shutdown. Disarming
+    here previously reopened an unbounded 25-30 second gap after every durable
+    cleanup. A daemon watchdog does not keep a healthy process alive, so the
+    safe behavior is to let normal PID exit discard it and let it terminate a
+    process only when interpreter teardown stalls past the tightened deadline.
+    """
+    asyncio.run(main(_keep_watchdog_armed=True))
 
 
 if __name__ == "__main__":
