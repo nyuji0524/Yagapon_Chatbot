@@ -9,6 +9,7 @@ from main import (
     CoordinatedUvicornServer,
     ShutdownCoordinator,
     _prewarm_transcription_sdk,
+    _tighten_watchdog_after_durable_cleanup,
     shutdown,
 )
 
@@ -162,3 +163,29 @@ def test_embedded_uvicorn_does_not_replace_the_shared_signal_handler(monkeypatch
         pass
 
     replace_signal.assert_not_called()
+
+
+def test_durable_cleanup_tightens_only_an_active_later_watchdog(monkeypatch):
+    current = SimpleNamespace(deadline=time.monotonic() + 60, disarm=Mock())
+    replacements = []
+    monkeypatch.setattr("main._active_process_watchdog", current)
+    monkeypatch.setattr("main.HardShutdownWatchdog", lambda deadline: SimpleNamespace(deadline=deadline))
+    monkeypatch.setattr("main._activate_process_watchdog", replacements.append)
+    monkeypatch.setenv("YAGAPON_EXECUTOR_SHUTDOWN_SECONDS", "2")
+
+    _tighten_watchdog_after_durable_cleanup()
+
+    assert len(replacements) == 1
+    assert 0 < replacements[0].deadline - time.monotonic() <= 2
+
+
+def test_durable_cleanup_does_not_extend_an_earlier_watchdog(monkeypatch):
+    current = SimpleNamespace(deadline=time.monotonic() + 0.1)
+    activate = Mock()
+    monkeypatch.setattr("main._active_process_watchdog", current)
+    monkeypatch.setattr("main._activate_process_watchdog", activate)
+    monkeypatch.setenv("YAGAPON_EXECUTOR_SHUTDOWN_SECONDS", "5")
+
+    _tighten_watchdog_after_durable_cleanup()
+
+    activate.assert_not_called()
