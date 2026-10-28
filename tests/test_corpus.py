@@ -2820,11 +2820,14 @@ async def test_exhaustive_firebase_list_renders_every_item_without_a_model(corpu
 
     assert result.no_answer is False
     assert "27th 公開通知一覧（23件）" in result.text
-    assert "省略せずすべて掲載" in result.text
+    assert "全23件を掲載" in result.text
     for index in range(1, 24):
         assert f"公開通知 {index}" in result.text
-        assert f"通知本文 {index}" in result.text
+        assert f"通知本文 {index}" not in result.text
         assert f"notice-{index:02d}" not in result.text
+    assert "一覧では本文を省略" in result.text
+    assert "`schemaVersion`" not in result.text
+    assert "`status`" not in result.text
     assert "`document`" not in result.text
     assert result.text.index("公開通知 1") < result.text.index("公開通知 23")
     assert len(result.citations) == 1
