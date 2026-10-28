@@ -7,7 +7,6 @@ import pytest
 from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
-    LIAISON_CHANNELS,
     OFFICER_POSITIONS,
     POSITION_ROLES,
     CommitteeGuideView,
@@ -16,13 +15,7 @@ from bot.commands.committee_server import (
     SelfRolePanelView,
     _bot_guide_embed,
     _embed_field_id,
-    _ensure_category,
-    _ensure_forum,
-    _ensure_text,
-    _ensure_voice,
     _is_keio_email,
-    _liaison_guide_embed,
-    _overwrite_signature,
     _position_role_names,
     _position_role_summary,
     _post_once,
@@ -36,41 +29,10 @@ def test_role_groups_have_unique_names():
     assert len(names) == len(set(names))
 
 
-def test_liaison_channels_reference_known_bureaus_and_have_unique_names():
-    bureau_names = {item[0] for item in BUREAU_ROLES}
-    channel_names = []
-    for first_bureau, second_bureau, channel_name in LIAISON_CHANNELS:
-        assert first_bureau in bureau_names
-        assert second_bureau in bureau_names
-        assert first_bureau != second_bureau
-        channel_names.append(channel_name)
-    assert len(channel_names) == len(set(channel_names))
-    assert len(channel_names) == 28
-
-
-def test_liaison_guide_explains_private_scope_and_pinned_location():
-    embed = _liaison_guide_embed("IT局", "総務局")
-    assert "IT局・総務局・執行部" in embed.description
-    assert "ほかの局からは表示されません" in embed.fields[1].value
-    assert "ピン留め" in embed.footer.text
-
-
-def test_overwrite_signature_compares_ids_and_permission_bits():
-    first_target = discord.Object(id=10)
-    equivalent_target = discord.Object(id=10)
-    expected = {
-        first_target: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-    }
-    actual = {
-        equivalent_target: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-    }
-    extra = {
-        **actual,
-        discord.Object(id=20): discord.PermissionOverwrite(view_channel=True),
-    }
-
-    assert _overwrite_signature(actual) == _overwrite_signature(expected)
-    assert _overwrite_signature(extra) != _overwrite_signature(expected)
+def test_registration_roles_use_only_bureau_grade_and_declared_positions():
+    assert GRADE_ROLES == ("１年生", "２年生", "３年生")
+    assert "一般委員" not in POSITION_ROLES
+    assert "28th委員" not in POSITION_ROLES
 
 
 @pytest.mark.asyncio
@@ -138,7 +100,7 @@ def test_position_role_summary_is_stable_for_combined_roles_and_empty_input():
     assert _position_role_names(roles) == ["局長", "企画長", "役員"]
     assert _position_role_summary(roles) == "局長, 企画長, 役員"
     assert _position_role_names([]) == []
-    assert _position_role_summary([]) == "一般委員"
+    assert _position_role_summary([]) == "なし"
 
 
 @pytest.mark.asyncio
@@ -207,31 +169,6 @@ async def test_replace_role_group_removes_old_role_and_adds_selected():
     await _replace_role_group(member, selected, ("IT局", "総務局"))
 
     member.edit.assert_awaited_once_with(roles=[unrelated, selected], reason="本人によるロール選択")
-
-
-@pytest.mark.asyncio
-async def test_channel_creators_omit_none_overwrites():
-    category = object()
-    guild = SimpleNamespace(
-        categories=[],
-        text_channels=[],
-        forum_channels=[],
-        voice_channels=[],
-        create_category=AsyncMock(return_value=category),
-        create_text_channel=AsyncMock(return_value=object()),
-        create_forum_channel=AsyncMock(return_value=object()),
-        create_voice_channel=AsyncMock(return_value=object()),
-    )
-
-    await _ensure_category(guild, "category")
-    await _ensure_text(guild, "text", category, topic="topic")
-    await _ensure_forum(guild, "forum", category, topic="topic", tags=("tag",))
-    await _ensure_voice(guild, "voice", category)
-
-    assert "overwrites" not in guild.create_category.await_args.kwargs
-    assert "overwrites" not in guild.create_text_channel.await_args.kwargs
-    assert "overwrites" not in guild.create_forum_channel.await_args.kwargs
-    assert "overwrites" not in guild.create_voice_channel.await_args.kwargs
 
 
 @pytest.mark.asyncio

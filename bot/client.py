@@ -8,6 +8,7 @@ import time
 
 import discord
 
+from bot.committee_backend import CommitteeBackend
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 from bot.discord_visibility import resolve_minutes_notification_channel
@@ -278,7 +279,9 @@ class YagaPon(discord.Bot):
         self.scheduled_backfill = ScheduledBackfillManager(self)
         self.knowledge_refresh_tasks: set[asyncio.Task] = set()
         self.support_directory = SupportDirectory()
+        self.committee_backend = CommitteeBackend()
         self._recording_recovery_task: asyncio.Task | None = None
+        self._committee_role_sync_task: asyncio.Task | None = None
         self._close_lock = asyncio.Lock()
         self._close_completed = False
 
@@ -332,6 +335,13 @@ class YagaPon(discord.Bot):
             self._recording_recovery_task = asyncio.create_task(
                 recording_recovery_loop(self),
                 name="recording-recovery",
+            )
+        if self._committee_role_sync_task is None or self._committee_role_sync_task.done():
+            from bot.commands.committee_server import committee_role_sync_loop
+
+            self._committee_role_sync_task = asyncio.create_task(
+                committee_role_sync_loop(self),
+                name="committee-role-sync",
             )
         log.info(f"おしゃべりやがぽん起動: {self.user}")
 
@@ -1172,6 +1182,22 @@ class YagaPon(discord.Bot):
             await run_bounded(
                 "Recording recovery cancellation",
                 cancel_recording_recovery,
+                cap=2.0,
+            )
+
+            async def cancel_committee_role_sync(_timeout: float) -> None:
+                sync_task = getattr(self, "_committee_role_sync_task", None)
+                if sync_task is None or sync_task.done():
+                    return
+                sync_task.cancel()
+                try:
+                    await sync_task
+                except asyncio.CancelledError:
+                    pass
+
+            await run_bounded(
+                "Committee role sync cancellation",
+                cancel_committee_role_sync,
                 cap=2.0,
             )
             # Close the Discord connection before the slower corpus flush so
