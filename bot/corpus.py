@@ -3886,6 +3886,7 @@ class CorpusManager:
         schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
         schema_sources: list[str] = []
         schema_fallback_allowed = False
+        schema_projection_preferred = False
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -3947,6 +3948,13 @@ class CorpusManager:
                 schema_fallback_allowed = self._firebase_schema_fallback_allowed(
                     question,
                     schema_contracts,
+                )
+                schema_projection_preferred = bool(
+                    schema_fallback_allowed
+                    and re.search(
+                        r"(?:コレクション名|コレクションパス|ドキュメントパス|保存先)",
+                        question,
+                    )
                 )
                 if schema_fallback_allowed:
                     schema_sources = self._firebase_schema_sources(schema_contracts)
@@ -4347,6 +4355,7 @@ class CorpusManager:
             )
             if (
                 comprehensive
+                and not schema_projection_preferred
                 and not cross_source_history
                 and len(lexical_hits) >= 2
                 and local_narrative_ready
@@ -4397,6 +4406,7 @@ class CorpusManager:
 
             if (
                 not comprehensive
+                and not schema_projection_preferred
                 and not cross_source_history
                 and (authoritative_hits or direct_runtime_evidence)
             ):
