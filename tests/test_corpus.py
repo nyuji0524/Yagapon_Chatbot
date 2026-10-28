@@ -2157,6 +2157,11 @@ def test_requires_comprehensive_answer_keeps_single_fact_query_normal():
             "各通知のタイトル・公開日時・カテゴリ・本文・リンクまで一覧にして",
             ("タイトル", "公開日時", "カテゴリ", "本文", "リンク"),
         ),
+        (
+            "総務系申請とは何ですか。申請の種類、やがサポ上の仕様、入力制御、"
+            "提出後の確認方法、運用上の工夫を根拠付きで詳しく教えてください",
+            ("申請の種類", "やがサポ上の仕様", "入力制御", "提出後の確認方法", "運用上の工夫"),
+        ),
     ],
 )
 def test_answer_requirement_labels_extracts_explicit_deliverables(question, expected):
@@ -5736,6 +5741,72 @@ async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(
 
 
 @pytest.mark.asyncio
+async def test_comprehensive_answer_regenerates_when_local_verification_removed_claims(
+    corpus_manager,
+):
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    context = SimpleNamespace(
+        title="28th会場",
+        text="28thの会場は西館です。",
+        uri="https://knowledge.example/28-venue",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "28th会場"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "active"},
+            {"key": "source_type", "string_value": "knowledge_repository"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    primary = SimpleNamespace(
+        text=(
+            "確認できた内容は以下の3つです。会場は西館です。受付は9時開始です。\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    grounding_supports=[
+                        SimpleNamespace(
+                            grounding_chunk_indices=[0],
+                            segment=SimpleNamespace(text="会場は西館です。"),
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    recovered = SimpleNamespace(
+        text=(
+            "### 1. 会場\n会場は西館です。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:semantic:0]]\n"
+            "[[YAGAPON_ANSWER_STATUS:partial]]"
+        ),
+        usage_metadata=None,
+        candidates=[SimpleNamespace(finish_reason="STOP")],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=[primary, recovered]
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "28thの会場、受付時間、アクセス方法を根拠付きで詳しく教えてください",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "西館" in result.text
+    assert "以下の3つ" not in result.text
+    assert "9時" not in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_incomplete_support_mapping_keeps_locally_verified_primary_answer(
     corpus_manager,
 ):
@@ -5813,6 +5884,40 @@ def test_retrieved_answer_verifier_keeps_only_exact_supported_claims():
 
     assert "会場は西館です。" in verified
     assert "9時終了" not in verified
+
+
+def test_retrieved_answer_verifier_removes_dangling_enumeration_after_filtering():
+    answer = "具体的な企画は以下の3つです。\n寿司投げを実施しました。\n射的も実施しました。"
+
+    verified = CorpusManager._verified_retrieved_answer(
+        answer,
+        ["具体的な企画は以下の3つです。寿司投げを実施しました。"],
+    )
+
+    assert "以下の3つ" not in verified
+    assert "寿司投げ" in verified
+
+
+def test_verified_claim_renderer_preserves_headings_paragraphs_and_existing_lists():
+    answer = (
+        "### 1. 概要\n"
+        "ITラボはIT局が担当する企画です。未確認の説明です。\n\n"
+        "### 2. 課題\n"
+        "- 準備の遅れが課題でした。\n"
+        "- 未確認の課題です。"
+    )
+
+    rendered = CorpusManager._render_verified_claims(
+        answer,
+        ["ITラボはIT局が担当する企画です。", "準備の遅れが課題でした。"],
+    )
+
+    assert "### 1. 概要" in rendered
+    assert "ITラボはIT局が担当する企画です。" in rendered
+    assert "### 2. 課題" in rendered
+    assert "- 準備の遅れが課題でした。" in rendered
+    assert "未確認" not in rendered
+    assert "根拠との対応" not in rendered
 
 
 def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):

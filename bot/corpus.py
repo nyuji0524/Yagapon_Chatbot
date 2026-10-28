@@ -518,17 +518,27 @@ def requires_comprehensive_answer(question: str) -> bool:
 
 
 def answer_requirement_labels(question: str) -> tuple[str, ...]:
-    """Extract explicit middle-dot deliverables without interpreting evidence.
+    """Extract explicit deliverables without interpreting evidence.
 
     Japanese product questions commonly compress a checklist into one noun
-    phrase (``概要・担当局・状態``).  The labels are used only to remind the
-    model what the user asked for; they never become evidence or facts.
+    phrase (``概要・担当局・状態``) or a comma-delimited request
+    (``種類、仕様、入力制御、確認方法``).  The labels are used only to
+    remind the model what the user asked for; they never become evidence or
+    facts.
     """
     candidates: list[tuple[str, ...]] = []
     for sentence in re.split(r"[。！？!?\n]", question):
-        if sentence.count("・") < 2:
+        delimiter = "・" if sentence.count("・") >= 2 else "、"
+        if sentence.count(delimiter) < 2:
             continue
-        parts = [part.strip(" 　、,:：") for part in sentence.split("・")]
+        # Commas occur in ordinary prose too. Only interpret them as a
+        # checklist when the sentence itself is an explicit answer request.
+        if delimiter == "、" and not re.search(
+            r"(?:教えて|説明して|まとめて|示して|出して|挙げて|確認して|知りたい)",
+            sentence,
+        ):
+            continue
+        parts = [part.strip(" 　、,:：") for part in sentence.split(delimiter)]
         cleaned: list[str] = []
         for index, part in enumerate(parts):
             if index == 0:
@@ -537,10 +547,17 @@ def answer_requirement_labels(question: str) -> tuple[str, ...]:
             if index == len(parts) - 1:
                 part = re.sub(
                     r"(?:まで)?(?:を|について)?(?:一覧にして|一覧で|教えて|説明して|"
-                    r"まとめて|示して|出して)(?:ください|下さい|ほしい|欲しい)?$",
+                    r"まとめて|示して|出して|挙げて|確認して)(?:ください|下さい|ほしい|欲しい)?$",
                     "",
                     part,
                 )
+                part = re.sub(
+                    r"(?:を|について)?(?:根拠|出典|引用)(?:付き|つき)?で?"
+                    r"(?:詳しく|詳細に)?$",
+                    "",
+                    part,
+                )
+                part = re.sub(r"(?:を|について)?(?:詳しく|詳細に)$", "", part)
             part = part.strip(" 　、,:：")
             if 1 <= len(part) <= 80:
                 cleaned.append(part)
@@ -1835,6 +1852,17 @@ def answer_requirement_coverage(
                     r"(?:未決|未定|要検討|検討中|未確認|決まっていない)",
                     normalized_answer,
                 )
+            ),
+        )
+
+    explicit_requirements = answer_requirement_labels(question)
+    for label in explicit_requirements:
+        normalized_label = re.sub(r"[\s*_`#]", "", label.casefold())
+        add(
+            label,
+            bool(
+                normalized_label
+                and normalized_label in re.sub(r"[\s*_`#]", "", normalized_answer)
             ),
         )
 
@@ -4172,6 +4200,7 @@ class CorpusManager:
                         item for item in semantic_audit.evidence if item.text
                     )
                     semantic_candidate_count = len(recovery_semantic_evidence)
+                    locally_verified_primary = ""
                     # File Search occasionally maps only part of a fully
                     # grounded answer into ``grounding_supports``. Previously
                     # that metadata omission forced a second model call and
@@ -4213,6 +4242,16 @@ class CorpusManager:
                                 extractive_fallback
                                 or locally_verified_primary != parsed.text
                             )
+                    # A broad answer must not be finalized after local
+                    # verification removed one or more claims. The surviving
+                    # sentences are safe, but they no longer cover the user's
+                    # requested facets and can leave dangling list preambles.
+                    # Regenerate once from all locally authorized evidence.
+                    comprehensive_primary_was_reduced = bool(
+                        comprehensive
+                        and locally_verified_primary
+                        and locally_verified_primary != parsed.text
+                    )
                     comprehensive_coverage_too_narrow = requires_comprehensive_recovery(
                         comprehensive=comprehensive,
                         source_count=len(sources),
@@ -4238,6 +4277,7 @@ class CorpusManager:
                         or not (semantic_sources or used_lexical_hits or used_firebase)
                         or (semantic_audit.requires_recovery and not has_answer)
                         or comprehensive_coverage_too_narrow
+                        or comprehensive_primary_was_reduced
                     ):
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
@@ -6054,11 +6094,60 @@ class CorpusManager:
         ]
         if not verified:
             return ""
+        return cls._render_verified_claims(answer_text, verified)
 
-        return (
-            "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
-            + "\n".join(f"- {claim}" for claim in verified)
-        )
+    @classmethod
+    def _render_verified_claims(
+        cls,
+        answer_text: str,
+        verified_claims: list[str],
+    ) -> str:
+        """Keep the model's readable structure while removing unsupported claims.
+
+        Grounding verification is an internal safety mechanism, not a user-facing
+        answer format. Preserve headings, paragraphs and existing list markers
+        instead of replacing every surviving sentence with an audit-style bullet.
+        """
+        verified = {
+            cls._normalized_grounding_claim(claim)
+            for claim in verified_claims
+            if cls._normalized_grounding_claim(claim)
+        }
+        if not verified:
+            return ""
+
+        rendered: list[str] = []
+        pending_heading = ""
+        for raw_line in answer_text.splitlines():
+            line = raw_line.strip()
+            if not line or _GROUNDING_CONTROL_LINE_RE.fullmatch(line):
+                continue
+            if re.fullmatch(r"#{1,6}\s+.+", line):
+                pending_heading = line
+                continue
+
+            kept = [
+                claim
+                for claim in cls._grounding_claims(line)
+                if cls._normalized_grounding_claim(claim) in verified
+            ]
+            if not kept:
+                continue
+            if pending_heading:
+                if rendered:
+                    rendered.append("")
+                rendered.append(pending_heading)
+                pending_heading = ""
+
+            marker = re.match(r"^\s*((?:[-*+]\s+|\d+[.)]\s+))", raw_line)
+            content = " ".join(kept)
+            if marker:
+                rendered.append(f"{marker.group(1)}{content}")
+            else:
+                if rendered and rendered[-1] and not rendered[-1].startswith("#"):
+                    rendered.append("")
+                rendered.append(content)
+        return "\n".join(rendered).strip()
 
     @classmethod
     def _verified_retrieved_answer(
@@ -6096,13 +6185,14 @@ class CorpusManager:
             claim
             for claim in claims
             if exactly_supported(claim)
+            and not re.search(
+                r"(?:以下|次|つぎ)(?:の)?\s*[0-9０-９一二三四五六七八九十]+\s*つ?",
+                claim,
+            )
         ]
         if not verified:
             return ""
-        return (
-            "根拠本文と直接対応を確認できた内容だけを示すぽん。\n\n"
-            + "\n".join(f"- {claim}" for claim in verified)
-        )
+        return cls._render_verified_claims(answer_text, verified)
 
     @staticmethod
     def _recovered_claim_is_standalone(claim: str) -> bool:
