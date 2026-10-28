@@ -219,6 +219,20 @@ def test_relative_period_resolves_last_year_current_month():
     ) == CalendarWindow(date(2025, 10, 1), date(2025, 10, 31))
 
 
+def test_last_year_target_wins_over_current_date_anchor():
+    now = datetime(2026, 10, 29, 3, tzinfo=timezone.utc)
+
+    assert festival_from_query(
+        "去年の今頃、IT局では何をしていましたか？現在日を基準に教えて",
+        now,
+    ) == 27
+    assert calendar_window_from_query(
+        "去年の今頃、IT局では何をしていましたか？現在日を基準に教えて",
+        now,
+        festival=27,
+    ) == CalendarWindow(date(2025, 10, 1), date(2025, 10, 31))
+
+
 def test_relative_last_year_wording_uses_already_resolved_festival():
     now = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
 

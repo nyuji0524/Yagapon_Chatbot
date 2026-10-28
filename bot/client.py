@@ -179,12 +179,31 @@ def _rag_confidence_line(
     label: str | None,
     detail: str | None,
 ) -> str:
-    """Render server-calculated evidence and requirement coverage confidence."""
+    """Render observable retrieval facts without a false probability score.
+
+    The old 0-100 value mixed source count, heuristic requirement-word matches,
+    and grounding metadata.  It looked like answer correctness even though it
+    could mark a wrong answer highly or penalize an answer that used different
+    wording.  Keep the internal metrics for telemetry, but expose only facts a
+    user can interpret: whether evidence was found and how many source families
+    contributed.
+    """
     if score is None or label is None:
         return ""
     bounded_score = max(0, min(100, int(score)))
-    suffix = f" — {detail}" if detail else ""
-    return f"**回答信頼度（根拠・充足度）: {bounded_score}/100（{label}）**{suffix}"
+    if bounded_score == 0 or label in {"根拠なし", "処理失敗"}:
+        return f"**検索状況: {label}**"
+
+    match = re.search(
+        r"根拠(?P<evidence>\d+)件\s*/\s*(?P<families>\d+)系統",
+        detail or "",
+    )
+    if match:
+        return (
+            "**検索状況: 参照元あり** — "
+            f"{match.group('evidence')}件 / {match.group('families')}系統"
+        )
+    return "**検索状況: 参照元あり**"
 
 
 def _rag_visibility_scope(guild, member, channel) -> tuple[tuple[int, ...], bool]:
