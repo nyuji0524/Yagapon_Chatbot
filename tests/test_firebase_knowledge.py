@@ -66,6 +66,29 @@ def test_detailed_notification_columns_still_select_deterministic_list_path():
         "27thに発行された公開通知を、タイトル・公開日時・カテゴリ・本文・"
         "リンクを省略せず一覧で出してください"
     )
+
+
+def test_detailed_notification_columns_do_not_filter_exhaustive_results():
+    question = (
+        "27thに発行された公開通知を、タイトル・公開日時・カテゴリ・本文・"
+        "リンクを省略せず一覧で出してください"
+    )
+    document = _notification_document("notice-1", title="公開通知")
+    reader = FirebaseKnowledgeReader()
+
+    evidence = reader._rank(
+        question,
+        "notifications",
+        COLLECTIONS["notifications"]["fields"],
+        [document],
+        27,
+        exhaustive=True,
+    )
+
+    assert len(evidence) == 1
+    assert "公開通知" in evidence[0].body
+
+
 def test_allowlist_never_contains_personal_collections():
     rendered = " ".join(str(config["path"]) for config in COLLECTIONS.values())
 
