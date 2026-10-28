@@ -6630,6 +6630,7 @@ class CorpusManager:
         *,
         dry_run: bool = False,
         cutoff: datetime | None = None,
+        prefer_local_inventory: bool = False,
     ) -> BackfillSession | None:
         """Freeze one exact, per-guild history boundary before replacement.
 
@@ -6686,8 +6687,20 @@ class CorpusManager:
                 # If pagination fails, no channel may mutate against a partial
                 # inventory. Dry-runs use the same point-in-time lock boundary
                 # but deliberately leave live buffers untouched.
+                local_inventory = (
+                    await asyncio.to_thread(
+                        self.rag_store.backfill_inventory,
+                        guild_id,
+                    )
+                    if prefer_local_inventory
+                    else []
+                )
+                # An empty local mirror may be a new/recovered installation
+                # with an existing remote store. Reconcile remotely once in
+                # that case; normal scheduled runs stay entirely local.
                 session.remote_inventory = tuple(
-                    await self.list_remote_documents(corpus_store_name)
+                    local_inventory
+                    or await self.list_remote_documents(corpus_store_name)
                 )
                 session.remote_inventory_index = await asyncio.to_thread(
                     self._index_remote_inventory,

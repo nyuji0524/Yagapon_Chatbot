@@ -315,6 +315,41 @@ def test_document_references_include_guild_and_global_records(tmp_path):
     assert {item["document_key"] for item in references} == {"doc-28", "global"}
 
 
+def test_backfill_inventory_uses_only_locally_mirrored_discord_documents(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    discord_metadata = metadata(28) + [
+        {"key": "source_type", "string_value": "discord_conversation"},
+        {"key": "status", "string_value": "raw"},
+        {"key": "authority", "string_value": "conversation"},
+        {"key": "schema", "string_value": "discord-v3"},
+        {"key": "start_at", "string_value": "2026-08-31T23:00:00+09:00"},
+    ]
+    store.upsert_document(
+        "documents/discord",
+        "会話本文",
+        discord_metadata,
+    )
+    knowledge_metadata = metadata(28) + [
+        {"key": "document_key", "string_value": "knowledge-doc"},
+        {"key": "source_type", "string_value": "knowledge_repository"},
+    ]
+    store.upsert_document(
+        "documents/knowledge",
+        "確定仕様",
+        knowledge_metadata,
+    )
+
+    inventory = store.backfill_inventory(1)
+
+    assert len(inventory) == 1
+    assert inventory[0]["name"] == "documents/discord"
+    assert inventory[0]["metadata"]["guild_id"] == 1
+    assert inventory[0]["metadata"]["channel_id"] == 2
+    assert inventory[0]["metadata"]["source_type"] == "discord_conversation"
+    assert inventory[0]["metadata"]["start_at"] == "2026-08-31T23:00:00+09:00"
+    assert inventory[0]["metadata"]["end_at"] == "2026-09-01T00:00:00+09:00"
+
+
 def test_restore_document_snapshots_replaces_partial_generation_atomically(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     old_metadata = metadata(27)

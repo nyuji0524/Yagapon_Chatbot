@@ -1301,6 +1301,39 @@ async def test_prepared_multichannel_backfill_reuses_one_remote_inventory(
 
 
 @pytest.mark.asyncio
+async def test_scheduled_backfill_preparation_uses_local_inventory_without_remote_scan(
+    corpus_manager,
+):
+    local_inventory = [
+        {
+            "name": "documents/local-channel-two",
+            "display_name": "#開発",
+            "metadata": discord_document_metadata(2, start_epoch=0),
+            "state": "ACTIVE",
+        }
+    ]
+    corpus_manager.rag_store.backfill_inventory = Mock(
+        return_value=local_inventory,
+    )
+    corpus_manager.list_remote_documents = AsyncMock(
+        side_effect=AssertionError("routine scheduled refresh must not scan File Search"),
+    )
+
+    session = await corpus_manager.prepare_backfill(
+        1,
+        {2},
+        "fileSearchStores/test",
+        prefer_local_inventory=True,
+    )
+
+    assert session.remote_inventory == tuple(local_inventory)
+    assert (1, 2) in session.remote_inventory_index.documents_by_channel
+    corpus_manager.rag_store.backfill_inventory.assert_called_once_with(1)
+    corpus_manager.list_remote_documents.assert_not_awaited()
+    await corpus_manager.finish_backfill(session)
+
+
+@pytest.mark.asyncio
 async def test_prepared_same_name_channels_do_not_share_legacy_replacement(
     corpus_manager,
 ):
