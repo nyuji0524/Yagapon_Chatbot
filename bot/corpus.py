@@ -294,7 +294,8 @@ _GROUNDING_CONTROL_LINE_RE = re.compile(
     r"EVIDENCE_KEYS:[A-Za-z0-9:._/,\-]*)\]\]"
 )
 _GROUNDING_CLAUSE_SPLIT_RE = re.compile(r"[、,，;；]+")
-_RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
+_RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.15
+_RECOVERY_CRITICAL_BIGRAM_THRESHOLD = 0.3
 _RUNTIME_SUMMARY_FIELDS = (
     ("shortDescription", "概要"),
     ("longDescription", "詳細"),
@@ -4002,6 +4003,10 @@ class CorpusManager:
             "runtime:<document_key>、semantic:<index> の提示形式どおりに列挙した"
             " [[YAGAPON_EVIDENCE_KEYS:key1,key2]] 行を回答状態行の直前へ必ず出すぽん。"
             "使っていないkeyや提示されていないkeyは列挙しないぽん。"
+            "要約は1つの箇条書きにつき1つの根拠だけから作り、複数の記録を"
+            "1つの事実へ合成しないぽん。人名・数値・日付・状態・役職は根拠の"
+            "表記をそのまま使うぽん。根拠に明記されていない件数や『主に』などの"
+            "評価を付け足さないぽん。"
             "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
             "提示されていない事実は補完しないぽん。"
@@ -4175,6 +4180,8 @@ class CorpusManager:
         seen: set[str] = set()
 
         def add(label: str, value: str) -> None:
+            if len(lines) >= 6:
+                return
             normalized = re.sub(r"\s+", " ", value).strip()
             if not normalized or normalized.casefold() in seen:
                 return
@@ -4187,11 +4194,14 @@ class CorpusManager:
             summary = CorpusManager._runtime_evidence_summary(item)
             if summary is not None:
                 add(*summary)
+        # File Search semantic hits reflect the model's topical retrieval and
+        # are usually more relevant than broad lexical matches. Show them
+        # first when synthesis cannot be safely returned.
+        for index, item in enumerate(semantic_evidence[:4], start=1):
+            add(f"検索結果 {index}", item.text)
         for hit in hits[:4]:
             period = f" / {hit.festival}th" if hit.festival is not None else ""
             add(f"{hit.channel_name}{period}", hit.excerpt)
-        for index, item in enumerate(semantic_evidence[:4], start=1):
-            add(f"検索結果 {index}", item.text)
 
         if not lines:
             return ""
@@ -5255,10 +5265,15 @@ class CorpusManager:
             return False
         matched = clause_bigrams & cls._grounding_bigrams(evidence)
         minimum_matches = 1 if len(clause_bigrams) == 1 else 2
+        threshold = (
+            _RECOVERY_CRITICAL_BIGRAM_THRESHOLD
+            if _CRITICAL_GROUNDING_CLAIM_RE.search(raw_clause)
+            else _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
+        )
         return (
             len(matched) >= minimum_matches
             and len(matched) / len(clause_bigrams)
-            >= _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
+            >= threshold
         )
 
     @classmethod
