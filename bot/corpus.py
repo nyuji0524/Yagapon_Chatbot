@@ -5169,6 +5169,94 @@ class CorpusManager:
         return title, " / ".join(details) or "公開データを確認"
 
     @staticmethod
+    def _natural_runtime_overview(item: FirebaseEvidence) -> str | None:
+        """Turn one public Firebase record into readable overview prose.
+
+        This formatter intentionally stays deterministic.  A generic entity
+        question should not need another paid model call, but it also should
+        not look like a failed grounding audit or a dump of database fields.
+        """
+        fields_marker = re.search(r"^fields:\s*", item.body, re.MULTILINE)
+        if not fields_marker:
+            return None
+        try:
+            fields, _end = json.JSONDecoder().raw_decode(
+                item.body[fields_marker.end():].lstrip()
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(fields, dict):
+            return None
+
+        title = next(
+            (
+                str(fields[key]).strip()
+                for key in ("eventName", "name", "title", "organizationName")
+                if str(fields.get(key) or "").strip()
+            ),
+            str(item.title or "").strip() or "対象の企画",
+        )
+
+        def clean(key: str, *, limit: int = 420) -> str:
+            value = fields.get(key)
+            if value in (None, "", [], {}, ()):
+                return ""
+            if isinstance(value, (dict, list, tuple)):
+                rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            else:
+                rendered = str(value)
+            rendered = re.sub(r"\s+", " ", rendered).strip()
+            if len(rendered) > limit:
+                rendered = rendered[: limit - 1].rstrip() + "…"
+            return rendered
+
+        paragraphs: list[str] = []
+        introduction = clean("shortDescription") or clean("body")
+        if introduction:
+            paragraphs.append(
+                f"**{title}**について、Firebaseの公開データでは"
+                f"「{introduction}」と案内されているぽん。"
+            )
+        else:
+            paragraphs.append(f"**{title}**の公開情報を確認できたぽん。")
+
+        long_description = clean("longDescription", limit=700)
+        if long_description and long_description != introduction:
+            paragraphs.append(long_description)
+
+        facts: list[str] = []
+        organization = clean("organizationName")
+        organization_description = clean("organizationDescription")
+        if organization and organization != title:
+            facts.append(f"運営団体は**{organization}**")
+        elif organization_description:
+            facts.append(f"団体情報は「{organization_description}」")
+
+        place = clean("place")
+        room = clean("placeRoom")
+        if place and room:
+            facts.append(f"開催場所は**{place}（{room}）**")
+        elif place or room:
+            facts.append(f"開催場所は**{place or room}**")
+
+        status = clean("status")
+        if status:
+            facts.append(f"登録上の状態は**{status}**")
+        category = clean("category")
+        if category:
+            facts.append(f"カテゴリは**{category}**")
+
+        if facts:
+            if len(facts) == 1:
+                fact_text = facts[0]
+            else:
+                fact_text = "、".join(facts[:-1]) + f"、{facts[-1]}だぽん。"
+                paragraphs.append(fact_text)
+                return "\n\n".join(paragraphs)
+            paragraphs.append(fact_text + "だぽん。")
+        return "\n\n".join(paragraphs)
+
+    @staticmethod
     def _render_entity_overview_fallback(
         subject: str,
         hits: list[LexicalHit],
@@ -5184,13 +5272,12 @@ class CorpusManager:
         sections: list[str] = []
         runtime_lines: list[str] = []
         for item in runtime_evidence[:6]:
-            summary = CorpusManager._runtime_evidence_summary(item)
-            if summary is None:
+            overview = CorpusManager._natural_runtime_overview(item)
+            if overview is None:
                 continue
-            title, suffix = summary
-            runtime_lines.append(f"- **{title}** — {suffix}")
+            runtime_lines.append(overview)
         if runtime_lines:
-            sections.append("### Firebaseの企画データ\n" + "\n".join(runtime_lines))
+            sections.append("\n\n".join(runtime_lines))
 
         record_lines = []
         for hit in hits[:4]:
@@ -5207,10 +5294,9 @@ class CorpusManager:
 
         if not sections:
             return ""
-        return (
-            f"**{subject}**について、確認できた根拠を種類ごとに整理するぽん。\n\n"
-            + "\n\n".join(sections)
-        )
+        if runtime_lines and not record_lines:
+            return "\n\n".join(sections)
+        return f"**{subject}**について確認できた情報だぽん。\n\n" + "\n\n".join(sections)
 
     @staticmethod
     def _render_retrieved_evidence_fallback(
