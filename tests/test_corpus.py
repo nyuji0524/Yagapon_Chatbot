@@ -21,6 +21,7 @@ from bot.corpus import (
     _rank_extract_fallback_hits,
     _select_lexical_context_hits,
     answer_declares_missing_knowledge,
+    answer_requirement_coverage,
     answer_requirement_labels,
     backfill_channel_concurrency,
     calculate_incremental_after,
@@ -330,8 +331,8 @@ async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus
     assert result.no_answer is True
     call = corpus_manager._client.aio.models.generate_content.await_args
     assert call.kwargs["config"].tools is not None
-    assert call.kwargs["model"] == "gemini-3.1-flash-lite"
-    assert call.kwargs["config"].thinking_config.thinking_level == "MINIMAL"
+    assert call.kwargs["model"] == "gemini-3.5-flash-lite"
+    assert call.kwargs["config"].thinking_config.thinking_level == "LOW"
     assert "implementation" in call.kwargs["contents"]
     assert "on-site-report" in call.kwargs["contents"]
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["question_kind"] is (
@@ -2472,6 +2473,33 @@ def test_evidence_confidence_never_labels_raw_extractive_dump_as_high():
     assert score == 69
     assert label == "中"
     assert "抽出表示" in detail
+
+
+def test_requirement_coverage_penalizes_grounded_but_incomplete_compound_answer():
+    question = (
+        "新歓Webで外部や他局から要求があった内容と、その後コードでどう対応したかを、"
+        "時系列と根拠付きでまとめてください"
+    )
+    incomplete = (
+        "レスポンシブ対応に必要な構造が共有され、コードを記述する方針になったぽん。"
+    )
+
+    score, detail = answer_requirement_coverage(
+        question,
+        incomplete,
+        citations=("[Discord](https://discord.com/channels/1/2/3)",),
+    )
+
+    assert score < 55
+    assert "要求・フィードバック内容" in detail
+    assert "時系列" in detail
+
+
+def test_requirement_coverage_keeps_simple_answer_at_full_coverage():
+    assert answer_requirement_coverage(
+        "ITラボとは何ですか",
+        "ITラボはIT局が運営する展示企画だぽん。",
+    ) == (100, "単一の依頼へ直接回答")
 
 
 @pytest.mark.parametrize(
