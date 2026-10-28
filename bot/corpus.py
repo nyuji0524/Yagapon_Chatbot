@@ -3688,6 +3688,37 @@ class CorpusManager:
                         )
                         sources = []
 
+            if (
+                not has_answer
+                and schema_fallback_allowed
+                and schema_contracts
+                and schema_sources
+            ):
+                # A current repository hit may describe more than the reviewed
+                # public projection, so let the cheap direct recovery try once.
+                # If that answer cannot pass grounding, the deterministic
+                # projection is already a complete safe answer to the schema
+                # question.  Do not spend another large File Search request on
+                # the same contract or risk replacing it with tangential hits.
+                confidence = evidence_confidence(
+                    answered=True,
+                    evidence_count=len(schema_sources),
+                    source_family_count=citation_source_family_count(schema_sources),
+                    candidate_count=len(schema_contracts),
+                    locally_verified=True,
+                    extractive_fallback=True,
+                )
+                return RagAnswer(
+                    text=self._render_firebase_schema_contracts(schema_contracts),
+                    citations=tuple(schema_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                    confidence_score=confidence[0],
+                    confidence_label=confidence[1],
+                    confidence_detail=confidence[2],
+                )
+
             if not has_answer:
                 search_hits = (
                     lexical_hits
