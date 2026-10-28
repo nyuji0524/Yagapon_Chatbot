@@ -5398,9 +5398,11 @@ class CorpusManager:
     ) -> bool:
         """Limit deterministic projections to broad read-schema overviews.
 
-        The projection cannot establish write permissions, validation rules,
-        nested collections, types, or required fields.  Those questions must
-        be answered from repository/deployed implementation evidence instead.
+        The projection can establish the reviewed collection/document paths
+        even when a user calls them "the names used by the implementation".
+        It cannot establish write behavior, validation rules, nested
+        collections, types, or required fields; those questions must be
+        answered from repository/deployed implementation evidence instead.
         """
         if not contracts:
             return False
@@ -5412,7 +5414,7 @@ class CorpusManager:
             return False
         if re.search(
             r"書き込|書込|更新|作成|削除|write|create|update|delete|"
-            r"読み書き|コード|実装|API|Functions?|クライアント|サーバー|"
+            r"読み書き|API|Functions?|クライアント|サーバー|"
             r"security|セキュリティ|rules?|ルール|権限|permission|"
             r"必須|required|型|types?|サブコレクション|nested|"
             r"features?|geometry|calibrations?|完全な",

@@ -148,6 +148,10 @@ def test_firebase_projection_does_not_preempt_requested_code_explanation():
         "27thのrankingのFirestore構造を教えて",
         contracts,
     )
+    assert CorpusManager._firebase_schema_fallback_allowed(
+        "27thのrankingのFirestore構造と、実装で使うコレクション名を教えて",
+        contracts,
+    )
     assert not CorpusManager._firebase_schema_fallback_allowed(
         "27thのrankingのFirestore構造と、読み書きするコードを教えて",
         contracts,
