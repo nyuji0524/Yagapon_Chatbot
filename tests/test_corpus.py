@@ -5730,9 +5730,89 @@ async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(
         "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
     )
     assert "9時" not in result.text
-    # A verified regeneration is attempted first; its no-evidence result then
-    # falls back to the locally supported partial record.
-    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    # The exact supported claim is retained locally; the unsupported time is
+    # removed without paying for a second model call.
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_incomplete_support_mapping_keeps_locally_verified_primary_answer(
+    corpus_manager,
+):
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    context = SimpleNamespace(
+        title="28th開催案内",
+        text="会場は西館です。受付は9時開始です。",
+        uri="https://knowledge.example/28-guide",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "28th開催案内"},
+            {"key": "festival", "numeric_value": 28},
+            {"key": "authority", "string_value": "curated"},
+            {"key": "status", "string_value": "active"},
+            {"key": "source_type", "string_value": "knowledge_repository"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    primary = SimpleNamespace(
+        text=(
+            "会場は西館です。受付は9時開始です。\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    # Gemini mapped only the first of two claims even though
+                    # both occur in the same authorized retrieved body.
+                    grounding_supports=[
+                        SimpleNamespace(
+                            grounding_chunk_indices=[0],
+                            segment=SimpleNamespace(text="会場は西館です。"),
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=primary
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "28thの会場と受付時間を教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "西館" in result.text
+    assert "9時" in result.text
+    assert result.citations == (
+        "[確定仕様: 28th開催案内 [28th / active]](https://knowledge.example/28-guide)",
+    )
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
+def test_retrieved_answer_verifier_rejects_predicate_reversal():
+    assert CorpusManager._verified_retrieved_answer(
+        "受付は9時終了です。",
+        ["会場は西館です。受付は9時開始です。"],
+    ) == ""
+
+
+def test_retrieved_answer_verifier_keeps_only_exact_supported_claims():
+    answer = "会場は西館です。\n受付は9時終了です。"
+
+    verified = CorpusManager._verified_retrieved_answer(
+        answer,
+        ["会場は西館です。受付は9時開始です。"],
+    )
+
+    assert "会場は西館です。" in verified
+    assert "9時終了" not in verified
 
 
 def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):

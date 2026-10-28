@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from google.genai import types
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
-from bot.ai_models import ai_profile, generation_config, log_usage, rag_model
+from bot.ai_models import generation_config, log_usage, rag_model
 from bot.ai_retry import (
     RateLimitExceeded,
     is_ai_unavailable_error,
@@ -4095,13 +4095,7 @@ class CorpusManager:
                         contents=self._question_with_evidence(question, search_context),
                         config=generation_config(
                             model,
-                            thinking_level=(
-                                "low"
-                                if comprehensive or cross_source_history
-                                else "minimal"
-                                if ai_profile() == "budget"
-                                else "low"
-                            ),
+                            thinking_level="low",
                             max_output_tokens=primary_budget,
                             system_instruction=system,
                             tools=[types.Tool(file_search=search)],
@@ -4178,6 +4172,47 @@ class CorpusManager:
                         item for item in semantic_audit.evidence if item.text
                     )
                     semantic_candidate_count = len(recovery_semantic_evidence)
+                    # File Search occasionally maps only part of a fully
+                    # grounded answer into ``grounding_supports``. Previously
+                    # that metadata omission forced a second model call and
+                    # could turn a useful answer into a false no-evidence
+                    # response. When every retrieved chunk passed ACL and
+                    # authority checks, independently verify the original
+                    # answer against the authorized chunk bodies. Unsupported
+                    # claims are still removed by the same atom/polarity
+                    # verifier used for regenerated answers.
+                    if (
+                        semantic_audit.requires_recovery
+                        and not semantic_audit.invalid_supports
+                        and not semantic_audit.rejected_supported_chunks
+                    ):
+                        locally_verified_primary = self._verified_retrieved_answer(
+                            parsed.text,
+                            selected_evidence_texts(
+                                used_lexical_hits,
+                                used_firebase,
+                                list(recovery_semantic_evidence),
+                            ),
+                        )
+                        if locally_verified_primary:
+                            answer = locally_verified_primary
+                            sources = [
+                                item.citation
+                                for item in recovery_semantic_evidence
+                                if item.citation
+                            ]
+                            sources = list(dict.fromkeys(sources))
+                            sources.extend(
+                                self._lexical_sources(used_lexical_hits, sources)
+                            )
+                            sources.extend(
+                                self._firebase_sources(used_firebase, sources)
+                            )
+                            has_answer = bool(sources)
+                            extractive_fallback = (
+                                extractive_fallback
+                                or locally_verified_primary != parsed.text
+                            )
                     comprehensive_coverage_too_narrow = requires_comprehensive_recovery(
                         comprehensive=comprehensive,
                         source_count=len(sources),
@@ -4201,7 +4236,7 @@ class CorpusManager:
                     if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                         not has_answer
                         or not (semantic_sources or used_lexical_hits or used_firebase)
-                        or semantic_audit.requires_recovery
+                        or (semantic_audit.requires_recovery and not has_answer)
                         or comprehensive_coverage_too_narrow
                     ):
                         recovery_context = search_context
@@ -4522,13 +4557,7 @@ class CorpusManager:
                     contents=self._question_with_evidence(question, evidence_context),
                     config=generation_config(
                         model,
-                        thinking_level=(
-                            "low"
-                            if requires_comprehensive_answer(question)
-                            else "minimal"
-                            if ai_profile() == "budget"
-                            else "low"
-                        ),
+                        thinking_level="low",
                         max_output_tokens=max_output_tokens,
                         system_instruction=recovery_instruction,
                     ),
@@ -6028,6 +6057,50 @@ class CorpusManager:
 
         return (
             "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
+            + "\n".join(f"- {claim}" for claim in verified)
+        )
+
+    @classmethod
+    def _verified_retrieved_answer(
+        cls,
+        answer_text: str,
+        evidence_texts: list[str],
+    ) -> str:
+        """Verify an original File Search answer without fuzzy paraphrase matching.
+
+        This path is used only when Gemini's ``grounding_supports`` omitted part
+        of the answer.  In that situation there is no provider assertion that a
+        paraphrase is supported, so accepting it via low-overlap bigrams can
+        reverse a predicate (for example ``開始`` into ``終了``).  Keep only
+        complete normalized claims that occur in one already-authorized chunk;
+        ordinary paraphrases continue through the independently generated and
+        audited recovery path below.
+        """
+        evidence = [
+            cls._normalized_grounding_text(value)
+            for value in evidence_texts
+            if cls._normalized_grounding_text(value)
+        ]
+        claims = cls._grounding_claims(answer_text)
+        if not evidence or not claims:
+            return ""
+
+        def exactly_supported(claim: str) -> bool:
+            normalized = cls._normalized_grounding_claim(claim)
+            return bool(normalized) and any(normalized in source for source in evidence)
+
+        if all(exactly_supported(claim) for claim in claims):
+            return answer_text
+
+        verified = [
+            claim
+            for claim in claims
+            if exactly_supported(claim)
+        ]
+        if not verified:
+            return ""
+        return (
+            "根拠本文と直接対応を確認できた内容だけを示すぽん。\n\n"
             + "\n".join(f"- {claim}" for claim in verified)
         )
 

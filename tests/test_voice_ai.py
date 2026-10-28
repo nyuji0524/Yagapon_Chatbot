@@ -806,6 +806,21 @@ async def test_periodic_durability_checkpoint_fsyncs_while_recording(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_recording_sink_io_does_not_wait_for_shared_executor(monkeypatch):
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    loop = asyncio.get_running_loop()
+    shared_executor = Mock(side_effect=AssertionError("shared executor used"))
+    monkeypatch.setattr(loop, "run_in_executor", shared_executor)
+    operation = Mock(return_value="durable")
+
+    result = await session._run_sink_worker(operation, timeout=1)
+
+    assert result == "durable"
+    operation.assert_called_once_with()
+    shared_executor.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_periodic_durability_failure_warns_and_blocks_publication(monkeypatch):
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
     session.is_active = True

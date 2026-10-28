@@ -18,7 +18,12 @@ from bot.ai_models import (
     transcribe_fallback_model,
     transcribe_model,
 )
-from bot.ai_retry import RateLimitCircuitBreaker, RateLimitExceeded, retry_rate_limit
+from bot.ai_retry import (
+    RateLimitCircuitBreaker,
+    RateLimitExceeded,
+    retry_rate_limit,
+    retry_transient_api,
+)
 
 log = logging.getLogger("yagapon.transcription")
 
@@ -193,10 +198,16 @@ async def transcribe_audio(
             try:
                 # Quota exhaustion will not recover in a few seconds. Fail over
                 # immediately instead of making the voice loop wait and reupload.
-                response = await retry_rate_limit(
-                    create_transcription,
-                    operation_name="transcription_create",
-                    attempts=1,
+                response = await retry_transient_api(
+                    lambda: retry_rate_limit(
+                        create_transcription,
+                        operation_name="transcription_create",
+                        attempts=1,
+                    ),
+                    operation_name="transcription_create_transient",
+                    attempts=3,
+                    initial_delay=2,
+                    max_delay=10,
                 )
                 _dedicated_transcription_rate_limiter.reset()
                 model = transcribe_model()
@@ -328,12 +339,18 @@ async def transcribe_audio(
                 ),
             )
 
-        fallback_response = await retry_rate_limit(
-            create_fallback_transcription,
-            operation_name="transcription_fallback",
-            attempts=2,
-            initial_delay=5.0,
-            max_delay=15.0,
+        fallback_response = await retry_transient_api(
+            lambda: retry_rate_limit(
+                create_fallback_transcription,
+                operation_name="transcription_fallback",
+                attempts=2,
+                initial_delay=5.0,
+                max_delay=15.0,
+            ),
+            operation_name="transcription_fallback_transient",
+            attempts=3,
+            initial_delay=2,
+            max_delay=10,
         )
         log_usage(log, "transcription_fallback", fallback_model, fallback_response)
         require_complete_model_output(

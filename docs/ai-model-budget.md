@@ -12,7 +12,8 @@ RAG・音声回答・議事録を3.8中心へ戻せる。個別の `YAGAPON_*_MO
 
 | 処理 | budget | quality | コスト制御 |
 | --- | --- | --- | --- |
-| RAG回答、音声会話 | `gemini-3.1-flash-lite` | `gemini-3.8-flash` | 通常2,048、総括6,144 tokenまで。budgetはthinkingをminimalに固定 |
+| RAG回答 | `gemini-3.5-flash-lite` | `gemini-3.8-flash` | 通常2,048、総括6,144 tokenまで。thinkingは`low` |
+| 音声会話 | `gemini-3.1-flash-lite` | `gemini-3.8-flash` | 短いリアルタイム応答 |
 | 議事録の整形 | `gemini-3.5-flash-lite` | `gemini-3.8-flash` | 文字起こしとは独立して変更可能 |
 | 音声文字起こし | 通常 `gemini-3.5-flash-lite` / 高精度指定時 `gemini-3.5-transcribe` | 同左 | `/recording minutes` ごとに選択。通常は低コスト |
 | Knowledge整理 | `gemini-3.1-flash-lite` | `gemini-3.5-flash-lite` | Batch API、1回2判定・1生成まで |

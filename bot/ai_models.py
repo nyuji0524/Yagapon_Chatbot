@@ -11,9 +11,10 @@ from google.genai import types
 
 _PROFILE_MODELS = {
     "budget": {
-        # RAG must synthesize several evidence families and follow the
-        # evidence-key contract.  3.5 keeps the low-cost tier while improving
-        # instruction following for compound questions.
+        # Keep the normal profile below the monthly operating ceiling. Retrieval
+        # quality is enforced by deterministic evidence selection/auditing;
+        # operators can promote only the critical jobs through the model
+        # overrides or switch the whole service to the quality profile.
         "rag": "gemini-3.5-flash-lite",
         "response": "gemini-3.1-flash-lite",
         "minutes": "gemini-3.5-flash-lite",

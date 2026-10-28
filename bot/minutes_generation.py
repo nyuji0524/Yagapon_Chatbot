@@ -10,7 +10,7 @@ from pathlib import Path
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
 from bot.ai_models import generation_config, log_usage, minutes_model
-from bot.ai_retry import retry_rate_limit
+from bot.ai_retry import retry_transient_api
 
 log = logging.getLogger("yagapon.minutes_generation")
 
@@ -154,7 +154,17 @@ async def _generate(client, *, prompt: str, operation_name: str, max_output_toke
             ),
         )
 
-    response = await retry_rate_limit(request, operation_name=operation_name)
+    # Minutes generation is safe to repeat and must survive short 408/429/5xx
+    # provider incidents. The SDK retry is intentionally small, so own the
+    # complete bounded policy here instead of failing an otherwise durable
+    # recording on the first transient response.
+    response = await retry_transient_api(
+        request,
+        operation_name=operation_name,
+        attempts=4,
+        initial_delay=2,
+        max_delay=20,
+    )
     log_usage(log, operation_name, model, response)
     require_complete_model_output(response, operation=operation_name)
     text = (response.text or "").strip()
