@@ -31,6 +31,10 @@ KEY_BUTTON_IDS = {
     "屋外倉庫": "outdoor",
 }
 RESTRICTED_KEY = "矢上部室（209）"
+YAGAMI_ROOM_KEYS = frozenset({"矢上部室（212）", "矢上部室（209）"})
+COMMITTEE_BUREAU_ROLES = frozenset(
+    {"IT局", "総務局", "装飾局", "ステージ局", "屋外局", "室内局", "広報局", "渉外局"}
+)
 KEY_CATEGORY = "02｜鍵管理"
 KEY_ACTION_CHANNEL = "報告"
 KEY_REPORT_CHANNEL = "鍵管理状況"
@@ -83,6 +87,7 @@ class KeyHolding:
     borrowed_at: str
     updated_at: str
     last_reminded_at: str | None = None
+    borrowing_bureau: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +151,7 @@ class KeyManagementStore:
                     borrowed_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_reminded_at TEXT,
+                    borrowing_bureau TEXT,
                     PRIMARY KEY (guild_id, key_name)
                 );
                 CREATE TABLE IF NOT EXISTS key_events (
@@ -188,6 +194,11 @@ class KeyManagementStore:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(key_events)")}
             if "reported_at" not in columns:
                 connection.execute("ALTER TABLE key_events ADD COLUMN reported_at TEXT")
+            holding_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(key_holdings)")
+            }
+            if "borrowing_bureau" not in holding_columns:
+                connection.execute("ALTER TABLE key_holdings ADD COLUMN borrowing_bureau TEXT")
 
     @staticmethod
     def _holding(row: sqlite3.Row | None) -> KeyHolding | None:
@@ -225,6 +236,8 @@ class KeyManagementStore:
         reason: str | None,
         approved_by: int | None,
         force: bool,
+        actor_bureau: str | None,
+        target_bureau: str | None,
         now: str,
     ) -> KeyEvent:
         if key_name not in KEY_NAMES:
@@ -245,10 +258,11 @@ class KeyManagementStore:
             connection.execute(
                 """
                 INSERT INTO key_holdings (
-                    guild_id, key_name, holder_id, borrowed_at, updated_at, last_reminded_at
-                ) VALUES (?, ?, ?, ?, ?, NULL)
+                    guild_id, key_name, holder_id, borrowed_at, updated_at,
+                    last_reminded_at, borrowing_bureau
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?)
                 """,
-                (guild_id, key_name, new_holder_id, now, now),
+                (guild_id, key_name, new_holder_id, now, now, actor_bureau),
             )
         elif action == "return":
             if not holding:
@@ -267,14 +281,29 @@ class KeyManagementStore:
                 raise KeyStateConflict("さしかえを記録できるのは、現在の所持者だけです。")
             if not target_id or target_id == actor_id:
                 raise KeyStateConflict("自分以外の受取人を選んでください。")
+            if key_name in YAGAMI_ROOM_KEYS:
+                borrowing_bureau = holding.borrowing_bureau or actor_bureau
+                if not borrowing_bureau:
+                    raise KeyStateConflict(
+                        "貸出元の局を確認できません。局ロールを確認し、管理者へ連絡してください。"
+                    )
+                if not target_bureau:
+                    raise KeyStateConflict(
+                        "受取人の局を確認できません。受取人の局ロールを確認してください。"
+                    )
+                if target_bureau != borrowing_bureau:
+                    raise KeyStateConflict(
+                        f"矢上部室の鍵は、借りた{borrowing_bureau}の委員にのみ差し替えできます。"
+                    )
             new_holder_id = target_id
             connection.execute(
                 """
                 UPDATE key_holdings
-                SET holder_id=?, borrowed_at=?, updated_at=?, last_reminded_at=NULL
+                SET holder_id=?, borrowed_at=?, updated_at=?, last_reminded_at=NULL,
+                    borrowing_bureau=COALESCE(borrowing_bureau, ?)
                 WHERE guild_id=? AND key_name=?
                 """,
-                (new_holder_id, now, now, guild_id, key_name),
+                (new_holder_id, now, now, actor_bureau, guild_id, key_name),
             )
         else:
             raise KeyStateConflict("不明な操作です。")
@@ -324,6 +353,8 @@ class KeyManagementStore:
         reason: str | None = None,
         approved_by: int | None = None,
         force: bool = False,
+        actor_bureau: str | None = None,
+        target_bureau: str | None = None,
     ) -> KeyEvent:
         now = _iso()
         with self._lock, self._connect() as connection:
@@ -338,6 +369,8 @@ class KeyManagementStore:
                 reason=reason,
                 approved_by=approved_by,
                 force=force,
+                actor_bureau=actor_bureau,
+                target_bureau=target_bureau,
                 now=now,
             )
 
@@ -414,6 +447,8 @@ class KeyManagementStore:
         approver_id: int,
         *,
         approve: bool,
+        actor_bureau: str | None = None,
+        target_bureau: str | None = None,
     ) -> tuple[KeyRequest, KeyEvent | None]:
         now = _iso()
         with self._lock, self._connect() as connection:
@@ -437,6 +472,8 @@ class KeyManagementStore:
                     reason=request.reason,
                     approved_by=approver_id,
                     force=False,
+                    actor_bureau=actor_bureau,
+                    target_bureau=target_bureau,
                     now=now,
                 )
                 status = "approved"
@@ -531,6 +568,19 @@ def _has_role(member: discord.Member | discord.User, role_name: str) -> bool:
     return any(role.name == role_name for role in (getattr(member, "roles", None) or ()))
 
 
+def committee_bureau(member: discord.Member | discord.User | None) -> str | None:
+    """Return the member's single committee bureau role.
+
+    Multiple bureau roles are treated as ambiguous instead of silently selecting one.
+    """
+    matches = {
+        role.name
+        for role in (getattr(member, "roles", None) or ())
+        if role.name in COMMITTEE_BUREAU_ROLES
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def can_use_restricted_key(member: discord.Member) -> bool:
     permissions = getattr(member, "guild_permissions", None)
     return bool(
@@ -587,6 +637,11 @@ def key_panel_embed() -> discord.Embed:
         value="利用時は画面の案内に沿って操作してください。必要な場合のみ利用理由の入力画面が表示されます。",
         inline=False,
     )
+    embed.add_field(
+        name="🏫 矢上部室（209・212）の差し替え",
+        value="借りた局の委員にだけ差し替えできます。局をまたいで渡す場合は、一度返却してください。",
+        inline=False,
+    )
     embed.set_footer(text="物理的に受け渡した後、記録も必ず更新してください")
     return embed
 
@@ -602,7 +657,11 @@ def key_status_embed(guild: discord.Guild, store: KeyManagementStore) -> discord
     for key_name in KEY_NAMES:
         holding = holdings.get(key_name)
         if holding:
-            value = f"🔴 貸出中：<@{holding.holder_id}>\n<t:{int(datetime.fromisoformat(holding.borrowed_at).timestamp())}:R>から"
+            bureau = f"（{holding.borrowing_bureau}）" if holding.borrowing_bureau else ""
+            value = (
+                f"🔴 貸出中：<@{holding.holder_id}> {bureau}\n"
+                f"<t:{int(datetime.fromisoformat(holding.borrowed_at).timestamp())}:R>から"
+            )
         else:
             value = "🟢 返却済み"
         embed.add_field(name=key_name, value=value, inline=False)
@@ -738,6 +797,30 @@ class KeyRecipientSelect(discord.ui.Select):
         if target_member is None:
             await _respond_ephemeral(interaction, content="受取人がこのサーバーのメンバーか確認できなかったぽん。")
             return
+        if self.key_name in YAGAMI_ROOM_KEYS:
+            actor_bureau = committee_bureau(member)
+            target_bureau = committee_bureau(target_member)
+            if not actor_bureau:
+                await _respond_ephemeral(
+                    interaction,
+                    content="あなたの局を1つに特定できないぽん。局ロールを確認してほしいぽん。",
+                )
+                return
+            if not target_bureau:
+                await _respond_ephemeral(
+                    interaction,
+                    content="受取人の局を1つに特定できないぽん。受取人の局ロールを確認してほしいぽん。",
+                )
+                return
+            if actor_bureau != target_bureau:
+                await _respond_ephemeral(
+                    interaction,
+                    content=(
+                        f"矢上部室の鍵は、借りた **{actor_bureau}** の委員にだけ差し替えできるぽん。"
+                        "局をまたいで渡す場合は、一度返却してほしいぽん。"
+                    ),
+                )
+                return
         if self.key_name == RESTRICTED_KEY and not can_use_restricted_key(target_member):
             await interaction.response.send_modal(RestrictedKeyReasonModal("transfer", target_id=target.id))
             return
@@ -884,6 +967,22 @@ class KeyManagementManager:
             await _respond_ephemeral(interaction, content="サーバー内で操作してほしいぽん。")
             return
         await interaction.response.defer(ephemeral=True)
+        actor_bureau = committee_bureau(interaction.user)
+        target_bureau = None
+        if target_id:
+            target_member = interaction.guild.get_member(target_id)
+            if target_member is None:
+                try:
+                    target_member = await interaction.guild.fetch_member(target_id)
+                except (discord.NotFound, discord.HTTPException):
+                    target_member = None
+            target_bureau = committee_bureau(target_member)
+        if key_name in YAGAMI_ROOM_KEYS and action == "borrow" and not actor_bureau:
+            await interaction.followup.send(
+                "⚠️ 所属局を1つに特定できないぽん。局ロールを確認してほしいぽん。",
+                ephemeral=True,
+            )
+            return
         try:
             event = await asyncio.to_thread(
                 self.store.apply_action,
@@ -892,6 +991,8 @@ class KeyManagementManager:
                 action,
                 interaction.user.id,
                 target_id=target_id,
+                actor_bureau=actor_bureau,
+                target_bureau=target_bureau,
             )
         except KeyStateConflict as exc:
             await interaction.followup.send(f"⚠️ {exc}ぽん", ephemeral=True)
@@ -993,8 +1094,16 @@ class KeyManagementManager:
             timestamp=_now(),
         )
         embed.add_field(name="操作", value=ACTION_LABELS[action], inline=True)
+        requester_bureau = committee_bureau(interaction.user)
+        embed.add_field(name="申請者の局", value=requester_bureau or "確認できません", inline=True)
         if target_id:
             embed.add_field(name="受取人", value=f"<@{target_id}>", inline=True)
+            target_member = guild.get_member(target_id)
+            embed.add_field(
+                name="受取人の局",
+                value=committee_bureau(target_member) or "確認できません",
+                inline=True,
+            )
         embed.add_field(name="利用理由・用途", value=reason, inline=False)
         embed.add_field(name="申請ID", value=f"`{request.id}`", inline=False)
         embed.set_footer(text="承認時にも現在の所持状況を再確認します")
@@ -1017,6 +1126,7 @@ class KeyManagementManager:
                 timestamp=_now(),
             )
             notice.add_field(name="操作", value=ACTION_LABELS[action])
+            notice.add_field(name="局", value=requester_bureau or "確認できません")
             try:
                 await self._send_transient_report(report_channel, notice)
             except discord.HTTPException:
@@ -1039,12 +1149,23 @@ class KeyManagementManager:
         if not request_id:
             await _respond_ephemeral(interaction, content="申請IDを確認できなかったぽん。")
             return
+        pending_request = self.store.get_request(request_id)
+        actor_bureau = None
+        target_bureau = None
+        if pending_request and interaction.guild:
+            requester = interaction.guild.get_member(pending_request.requester_id)
+            actor_bureau = committee_bureau(requester)
+            if pending_request.target_id:
+                recipient = interaction.guild.get_member(pending_request.target_id)
+                target_bureau = committee_bureau(recipient)
         try:
             request, event = await asyncio.to_thread(
                 self.store.decide_request,
                 request_id,
                 member.id,
                 approve=approve,
+                actor_bureau=actor_bureau,
+                target_bureau=target_bureau,
             )
         except KeyStateConflict as exc:
             await _respond_ephemeral(interaction, content=f"⚠️ {exc}ぽん")
@@ -1110,6 +1231,11 @@ class KeyManagementManager:
             timestamp=datetime.fromisoformat(event.created_at),
         )
         embed.add_field(name="鍵", value=event.key_name, inline=True)
+        principal_id = event.new_holder_id if event.action in {"borrow", "transfer"} else event.actor_id
+        member = guild.get_member(principal_id) if principal_id else None
+        holding = self.store.get_holding(guild.id, event.key_name)
+        bureau = (holding.borrowing_bureau if holding else None) or committee_bureau(member)
+        embed.add_field(name="局", value=bureau or "確認できません", inline=True)
         if event.action == "borrow":
             embed.add_field(name="所持者", value=f"<@{event.new_holder_id}>", inline=True)
         elif event.action == "return":

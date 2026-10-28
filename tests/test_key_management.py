@@ -15,6 +15,7 @@ from bot.key_management import (
     _selected_key_embed,
     can_approve_restricted_key,
     can_use_restricted_key,
+    committee_bureau,
     key_panel_embed,
 )
 
@@ -37,6 +38,12 @@ def test_restricted_key_uses_profile_roles_and_records_approver_roles():
     assert not can_approve_restricted_key(_member("一般委員"))
     user_without_roles = SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False))
     assert not can_use_restricted_key(user_without_roles)
+
+
+def test_committee_bureau_requires_exactly_one_bureau_role():
+    assert committee_bureau(_member("IT局", "２年生")) == "IT局"
+    assert committee_bureau(_member("IT局", "総務局")) is None
+    assert committee_bureau(_member("２年生")) is None
 
 
 @pytest.mark.asyncio
@@ -167,6 +174,91 @@ def test_key_state_machine_borrow_transfer_and_return(tmp_path):
     assert borrowed.id not in {event.id for event in store.list_unreported_events()}
 
 
+@pytest.mark.parametrize("key_name", ["矢上部室（212）", "矢上部室（209）"])
+def test_yagami_room_key_transfer_is_limited_to_borrowing_bureau(tmp_path, key_name):
+    store = KeyManagementStore(tmp_path / "keys.sqlite3")
+    store.apply_action(1, key_name, "borrow", 10, actor_bureau="IT局")
+
+    with pytest.raises(KeyStateConflict, match="借りたIT局"):
+        store.apply_action(
+            1,
+            key_name,
+            "transfer",
+            10,
+            target_id=20,
+            actor_bureau="IT局",
+            target_bureau="総務局",
+        )
+
+    transferred = store.apply_action(
+        1,
+        key_name,
+        "transfer",
+        10,
+        target_id=30,
+        actor_bureau="IT局",
+        target_bureau="IT局",
+    )
+    assert transferred.new_holder_id == 30
+    assert store.get_holding(1, key_name).borrowing_bureau == "IT局"
+
+
+def test_non_yagami_key_transfer_keeps_cross_bureau_behavior(tmp_path):
+    store = KeyManagementStore(tmp_path / "keys.sqlite3")
+    store.apply_action(1, "日吉部室", "borrow", 10, actor_bureau="IT局")
+    event = store.apply_action(
+        1,
+        "日吉部室",
+        "transfer",
+        10,
+        target_id=20,
+        actor_bureau="IT局",
+        target_bureau="総務局",
+    )
+    assert event.new_holder_id == 20
+
+
+def test_legacy_yagami_holding_adopts_current_holders_bureau(tmp_path):
+    store = KeyManagementStore(tmp_path / "keys.sqlite3")
+    store.apply_action(1, "矢上部室（212）", "borrow", 10)
+
+    store.apply_action(
+        1,
+        "矢上部室（212）",
+        "transfer",
+        10,
+        target_id=20,
+        actor_bureau="IT局",
+        target_bureau="IT局",
+    )
+    assert store.get_holding(1, "矢上部室（212）").borrowing_bureau == "IT局"
+
+
+@pytest.mark.asyncio
+async def test_key_notification_displays_borrowing_bureau(tmp_path):
+    store = KeyManagementStore(tmp_path / "keys.sqlite3")
+    event = store.apply_action(
+        1,
+        "矢上部室（212）",
+        "borrow",
+        10,
+        actor_bureau="IT局",
+    )
+    channel = SimpleNamespace(name="報告", send=AsyncMock())
+    member = SimpleNamespace(id=10, roles=[SimpleNamespace(name="IT局")])
+    guild = SimpleNamespace(
+        id=1,
+        text_channels=[channel],
+        get_member=lambda member_id: member if member_id == 10 else None,
+    )
+    manager = KeyManagementManager(SimpleNamespace(), store)
+
+    await manager._publish_event(guild, event)
+
+    embed = channel.send.await_args.kwargs["embed"]
+    assert next(field.value for field in embed.fields if field.name == "局") == "IT局"
+
+
 def test_admin_can_force_return_a_stale_record(tmp_path):
     store = KeyManagementStore(tmp_path / "keys.sqlite3")
     store.apply_action(1, "屋外倉庫", "borrow", 10)
@@ -232,6 +324,29 @@ def test_approval_rechecks_current_key_state(tmp_path):
 
     with pytest.raises(KeyStateConflict, match="ほかの人"):
         store.decide_request(request.id, 99, approve=True)
+    assert store.get_request(request.id).status == "pending"
+
+
+def test_209_transfer_approval_rechecks_bureau_boundary(tmp_path):
+    store = KeyManagementStore(tmp_path / "keys.sqlite3")
+    store.apply_action(1, RESTRICTED_KEY, "borrow", 10, actor_bureau="IT局")
+    request, _ = store.create_request(
+        1,
+        RESTRICTED_KEY,
+        "transfer",
+        10,
+        target_id=20,
+        reason="引き継ぎのため",
+    )
+
+    with pytest.raises(KeyStateConflict, match="借りたIT局"):
+        store.decide_request(
+            request.id,
+            99,
+            approve=True,
+            actor_bureau="IT局",
+            target_bureau="総務局",
+        )
     assert store.get_request(request.id).status == "pending"
 
 
