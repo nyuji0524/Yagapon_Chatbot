@@ -103,6 +103,11 @@ def test_legacy_database_migrates_category_to_explicit_lineage(tmp_path):
     assert document["category_id"] is None
     assert document["auto_promote"] == 0
     assert document["upload_payload_sha256"] is None
+    assert store.search_exact(
+        1,
+        ["legacy body"],
+        allow_unrestricted_conversations=True,
+    )[0].document_key == "legacy"
 
     with sqlite3.connect(path) as connection:
         pending_upload_table = connection.execute(
@@ -111,7 +116,31 @@ def test_legacy_database_migrates_category_to_explicit_lineage(tmp_path):
             WHERE type = 'table' AND name = 'pending_upload_operations'
             """
         ).fetchone()
+        fts_version = connection.execute(
+            "SELECT value FROM rag_store_meta WHERE key = 'documents_fts_version'"
+        ).fetchone()
     assert pending_upload_table is not None
+    assert fts_version == ("1",)
+
+
+def test_trigram_index_tracks_document_replacements(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    store.upsert_document(
+        "documents/current",
+        "総務系申請の提出方法を説明する",
+        metadata(27),
+    )
+
+    assert store.search_exact(1, ["総務系申請"], festival=27)
+
+    store.upsert_document(
+        "documents/current",
+        "新歓Webの更新方法を説明する",
+        metadata(27),
+    )
+
+    assert store.search_exact(1, ["総務系申請"], festival=27) == []
+    assert store.search_exact(1, ["新歓Web"], festival=27)
 
 
 def test_upload_operation_survives_restart_and_completes_atomically(tmp_path):

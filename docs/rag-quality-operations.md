@@ -155,15 +155,12 @@ Discord会話と議事録にも候補枠を確保する。コード履歴は「�
 回次判定と会議内容などを同時に求める複合質問は短絡せず通常のACL付き検索へ戻し、存在しない明示日付は
 全期間検索へ広げず、検索前に入力エラーとして終了する。
 
-`YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS=true`を既定とし、File Searchが回答区間と
-根拠chunkの対応情報を返さない場合、その意味検索回答は採用しない。安全性を検証済みの
-完全一致候補があればその原文だけで再生成し、なければ情報なしを返す。旧API挙動の調査時だけ
-`false`を明示して互換fallbackを有効化できるが、本番では使用しない。
+`YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS=false`を既定とする。File Searchが回答区間と
+根拠chunkの対応情報を返した場合は従来どおり監査するが、対応メタデータが省略された
+だけで回答全体を捨てない。権限・年度・期間・引用元の検証は引き続き適用する。
 
-`YAGAPON_RAG_REQUIRE_ANSWER_STATUS=true`も既定とし、モデルが末尾の回答状態を返さない
-応答を採用しない。完全一致・Firebase候補を使う回答では、直前のevidence key行に実際に
-使った候補を列挙できない場合も参照なしとして棄却する。旧応答形式を調査する場合だけ
-`false`を明示できるが、本番では使用しない。
+`YAGAPON_RAG_REQUIRE_ANSWER_STATUS=false`も既定とする。末尾の回答状態やevidence keyが
+あれば選択に利用するが、本文と安全な引用が揃っている回答を制御行の欠落だけで棄却しない。
 
 年度指定がある質問では、移行中にFile Searchのmetadata filterを無効にしていても、
 回答へ採用する参照をアプリ側でも検証する。`festival`が一致しない、または年度情報を

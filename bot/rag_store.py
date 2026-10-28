@@ -29,6 +29,7 @@ SQLITE_CONNECT_TIMEOUT_SECONDS = 5.0
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_WRITE_ATTEMPTS = 3
 SQLITE_RETRY_BASE_SECONDS = 0.05
+DOCUMENTS_FTS_INDEX_VERSION = "1"
 
 _LOW_INFORMATION_QUERY_TERMS = {
     "あった内容",
@@ -193,6 +194,31 @@ class RagStore:
                     ON documents(guild_id, festival);
                 CREATE INDEX IF NOT EXISTS documents_remote_name
                     ON documents(remote_name);
+                CREATE TABLE IF NOT EXISTS rag_store_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+                    body,
+                    content='documents',
+                    content_rowid='rowid',
+                    tokenize='trigram'
+                );
+                CREATE TRIGGER IF NOT EXISTS documents_fts_after_insert
+                AFTER INSERT ON documents BEGIN
+                    INSERT INTO documents_fts(rowid, body) VALUES (new.rowid, new.body);
+                END;
+                CREATE TRIGGER IF NOT EXISTS documents_fts_after_delete
+                AFTER DELETE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, body)
+                    VALUES ('delete', old.rowid, old.body);
+                END;
+                CREATE TRIGGER IF NOT EXISTS documents_fts_after_update
+                AFTER UPDATE OF body ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, body)
+                    VALUES ('delete', old.rowid, old.body);
+                    INSERT INTO documents_fts(rowid, body) VALUES (new.rowid, new.body);
+                END;
                 CREATE TABLE IF NOT EXISTS queries (
                     id TEXT PRIMARY KEY,
                     guild_id INTEGER NOT NULL,
@@ -290,6 +316,25 @@ class RagStore:
                   AND coalesce(category_name, '') != ''
                 """
             )
+            indexed_version = connection.execute(
+                "SELECT value FROM rag_store_meta WHERE key = 'documents_fts_version'"
+            ).fetchone()
+            if indexed_version is None or indexed_version["value"] != DOCUMENTS_FTS_INDEX_VERSION:
+                # Existing installations predate the FTS triggers. Rebuild the
+                # index exactly once; subsequent writes are maintained by the
+                # triggers above. This turns every RAG question from a full
+                # lower(body) scan into an indexed lookup.
+                connection.execute(
+                    "INSERT INTO documents_fts(documents_fts) VALUES ('rebuild')"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO rag_store_meta(key, value)
+                    VALUES ('documents_fts_version', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (DOCUMENTS_FTS_INDEX_VERSION,),
+                )
 
         self._write(initialize)
 
@@ -1077,7 +1122,19 @@ class RagStore:
             conditions.append(f"authority IN ({placeholders})")
             params.extend(authorities)
             conditions.append("status NOT IN ('draft', 'raw', 'deprecated')")
-        if clean_terms:
+        # FTS5's trigram tokenizer supports substring search for Japanese and
+        # Latin text while avoiding a full scan of every document body. Terms
+        # shorter than three characters cannot be represented by the trigram
+        # index; retain the legacy scan only when no indexed term is available.
+        indexed_terms = [term for term in clean_terms if len(term) >= 3]
+        use_fts = bool(indexed_terms)
+        if use_fts:
+            fts_query = " OR ".join(
+                f'"{term.replace(chr(34), chr(34) * 2)}"' for term in indexed_terms
+            )
+            conditions.append("documents_fts MATCH ?")
+            params.append(fts_query)
+        elif clean_terms:
             term_conditions = []
             for term in clean_terms:
                 term_conditions.append("instr(lower(body), lower(?)) > 0")
@@ -1090,10 +1147,12 @@ class RagStore:
         # record before it was ever considered.
         relevance_parts = []
         relevance_params: list[object] = []
+        body_expression = "d.body" if use_fts else "body"
         for term in clean_terms:
             weight = 100 + min(len(term), 24) * 4
             relevance_parts.append(
-                f"CASE WHEN instr(lower(body), lower(?)) > 0 THEN {weight} ELSE 0 END"
+                "CASE WHEN instr(lower("
+                f"{body_expression}), lower(?)) > 0 THEN {weight} ELSE 0 END"
             )
             relevance_params.append(term)
         # Bare ``ORDER BY 0`` is parsed as a result-column ordinal by SQLite.
@@ -1118,7 +1177,20 @@ class RagStore:
             where = list(conditions)
             if extra_condition:
                 where.append(extra_condition)
-            sql = "SELECT * FROM documents WHERE " + " AND ".join(where) + order_sql
+            source_sql = (
+                "documents AS d JOIN documents_fts ON documents_fts.rowid = d.rowid"
+                if use_fts
+                else "documents"
+            )
+            select_sql = "SELECT d.*" if use_fts else "SELECT *"
+            sql = (
+                select_sql
+                + " FROM "
+                + source_sql
+                + " WHERE "
+                + " AND ".join(where)
+                + order_sql
+            )
             query_params = [
                 *params,
                 *extra_params,

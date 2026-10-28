@@ -239,10 +239,10 @@ def file_search_ambiguous_start_grace_seconds() -> int:
 
 
 RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env(
-    "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 1024, 512, 4096
+    "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 2048, 512, 4096
 )
 RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS = _bounded_int_env(
-    "YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 4096, 2048, 16384
+    "YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 6144, 2048, 16384
 )
 RAG_SEARCH_TOP_K = _bounded_int_env("YAGAPON_RAG_SEARCH_TOP_K", 8, 4, 20)
 RAG_COMPREHENSIVE_SEARCH_TOP_K = _bounded_int_env(
@@ -454,8 +454,8 @@ _RECOVERY_CRITICAL_POLARITY_PATTERNS = (
 
 
 def _explicit_answer_status_required(value: str | None) -> bool:
-    """Fail closed unless legacy answer parsing is explicitly requested."""
-    return (value if value is not None else "true").strip().casefold() != "false"
+    """Use the control line when present without rejecting a useful answer."""
+    return (value if value is not None else "false").strip().casefold() != "false"
 
 
 REQUIRE_EXPLICIT_ANSWER_STATUS = _explicit_answer_status_required(
@@ -464,8 +464,8 @@ REQUIRE_EXPLICIT_ANSWER_STATUS = _explicit_answer_status_required(
 
 
 def _grounding_supports_required(value: str | None) -> bool:
-    """Fail closed unless compatibility fallback is explicitly requested."""
-    return (value if value is not None else "true").strip().casefold() != "false"
+    """Allow locally filtered evidence when Gemini omits support metadata."""
+    return (value if value is not None else "false").strip().casefold() != "false"
 
 
 REQUIRE_GROUNDING_SUPPORTS = _grounding_supports_required(
@@ -486,7 +486,7 @@ def requires_comprehensive_answer(question: str) -> bool:
     if re.search(
         r"(?:すべて|全て|全部|全体|総括|網羅|詳しく|詳細|洗い出|"
         r"それぞれ|比較|違い|経緯|問題点|課題|改善点|修正点|全貌|一通り|"
-        r"フィードバック|指摘|反省|まとめ|一覧|何が出た|どんな(?:意見|内容)|"
+        r"フィードバック|指摘|反省|まとめ|一覧|主な|内訳|何が出た|どんな(?:意見|内容)|"
         r"去年の今頃|昨年の今頃|この時期|何してた|何をしていた)",
         normalized,
         re.IGNORECASE,
@@ -3928,9 +3928,10 @@ class CorpusManager:
                         config=generation_config(
                             model,
                             thinking_level=(
-                                "medium"
-                                if ai_profile() == "quality"
-                                and (comprehensive or cross_source_history)
+                                "minimal"
+                                if ai_profile() == "budget"
+                                else "medium"
+                                if comprehensive or cross_source_history
                                 else "low"
                             ),
                             max_output_tokens=primary_budget,
@@ -4353,7 +4354,9 @@ class CorpusManager:
                     contents=self._question_with_evidence(question, evidence_context),
                     config=generation_config(
                         model,
-                        thinking_level="low",
+                        thinking_level=(
+                            "minimal" if ai_profile() == "budget" else "low"
+                        ),
                         max_output_tokens=max_output_tokens,
                         system_instruction=recovery_instruction,
                     ),
