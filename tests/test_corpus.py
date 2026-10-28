@@ -2210,6 +2210,8 @@ async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
     assert "Firebaseの企画データ" in result.text
     assert "AI鬼ごっこなどの体験企画" in result.text
     assert "fields:" not in result.text
+    corpus_manager.rag_store.search_exact.assert_not_called()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2249,7 +2251,8 @@ async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
     assert "ITラボ" in result.text
     assert "場所: 11-21" in result.text
     assert "fields:" not in result.text
-    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    corpus_manager.rag_store.search_exact.assert_not_called()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
 def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():
