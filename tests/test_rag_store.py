@@ -964,6 +964,47 @@ def test_abbreviated_subject_outranks_large_generic_action_documents(tmp_path):
     assert hits[0].document_key == "abbreviated-subject"
 
 
+def test_compound_subject_and_abbreviation_are_not_double_counted(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "authority", "string_value": "conversation"},
+        {"key": "status", "string_value": "raw"},
+        {"key": "source_type", "string_value": "discord_conversation"},
+    ]
+    store.upsert_document(
+        "documents/compound-only",
+        "新歓Webについての一般的な作業記録。",
+        [
+            *common,
+            {"key": "document_key", "string_value": "compound-only"},
+        ],
+    )
+    store.upsert_document(
+        "documents/abbreviated-with-facets",
+        "新歓実から公開規制がなくなり、掲載対応を行った。",
+        [
+            *common,
+            {
+                "key": "document_key",
+                "string_value": "abbreviated-with-facets",
+            },
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        ["新歓Web", "新歓", "対応", "規制", "掲載"],
+        festival=27,
+        question_kind="history",
+        limit=4,
+    )
+
+    assert hits[0].document_key == "abbreviated-with-facets"
+
+
 def test_data_contract_filters_non_direct_history_before_candidate_limit(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     common = [

@@ -1311,10 +1311,31 @@ class RagStore:
                 return weight * 8
             return weight
 
+        primary_terms = [
+            term
+            for term in clean_terms
+            if term.casefold() == primary_term
+            or (len(term) >= 2 and term.casefold() in primary_term)
+        ]
+        non_primary_terms = [term for term in clean_terms if term not in primary_terms]
         relevance_parts = []
         relevance_params: list[object] = []
-        body_expression = "d.body" if use_fts else "body"
-        for term in clean_terms:
+        body_expression = "d.body"
+        primary_parts = []
+        for term in primary_terms:
+            weight = term_weight(term)
+            primary_parts.append(
+                "CASE WHEN instr(lower("
+                f"{body_expression}), lower(?)) > 0 THEN {weight} ELSE 0 END"
+            )
+            relevance_params.append(term)
+        if primary_parts:
+            relevance_parts.append(
+                primary_parts[0]
+                if len(primary_parts) == 1
+                else "max(" + ", ".join(primary_parts) + ")"
+            )
+        for term in non_primary_terms:
             weight = term_weight(term)
             relevance_parts.append(
                 "CASE WHEN instr(lower("
@@ -1430,9 +1451,17 @@ class RagStore:
         for row in rows:
             body = row["body"]
             excerpt = self._best_matching_excerpt(body, clean_terms)
-            matched_terms = sum(
+            primary_score = max(
+                (
+                    term_weight(term)
+                    for term in primary_terms
+                    if term.casefold() in body.casefold()
+                ),
+                default=0,
+            )
+            matched_terms = primary_score + sum(
                 term_weight(term)
-                for term in clean_terms
+                for term in non_primary_terms
                 if term.casefold() in body.casefold()
             )
             authority_bonus = {
