@@ -4364,6 +4364,30 @@ def test_recovered_narrative_summary_allows_bounded_natural_paraphrase(
     ) is False
 
 
+def test_recovered_answer_keeps_only_independently_verified_claims(corpus_manager):
+    evidence = (
+        "新歓用の素材として、各局の局長紹介と局自体の紹介が欲しい。"
+        "局長紹介には本人から一言と紹介文を含める。"
+    )
+
+    result = corpus_manager._verified_recovered_answer(
+        "- 各局の局長紹介と局紹介を載せてほしいという依頼があったぽん。\n"
+        "- 新歓Webは公開済みで受付も終了したぽん。",
+        [evidence],
+    )
+
+    assert "局長紹介と局紹介" in result
+    assert "公開済み" not in result
+    assert "受付も終了" not in result
+
+
+def test_recovered_answer_rejects_all_unsupported_claims(corpus_manager):
+    assert corpus_manager._verified_recovered_answer(
+        "管理者権限を付与できるぽん。",
+        ["申請は公開フォームから行う。"],
+    ) == ""
+
+
 @pytest.mark.parametrize(
     "answer",
     [

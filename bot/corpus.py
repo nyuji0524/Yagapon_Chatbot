@@ -3507,6 +3507,7 @@ class CorpusManager:
             ) -> bool:
                 """Retry using only evidence that passed local authorization filters."""
                 nonlocal answer, has_answer, sources, used_lexical_hits
+                nonlocal extractive_fallback
                 recovered_answer = await self._recover_from_lexical_hits(
                     question=question,
                     system_instruction=system,
@@ -3541,14 +3542,16 @@ class CorpusManager:
                     sources = []
                     return False
 
-                if not self._recovered_claims_supported(
+                selected_texts = selected_evidence_texts(
+                    recovered_hits,
+                    used_firebase,
+                    used_semantic,
+                )
+                verified_text = self._verified_recovered_answer(
                     recovered.text,
-                    selected_evidence_texts(
-                        recovered_hits,
-                        used_firebase,
-                        used_semantic,
-                    ),
-                ):
+                    selected_texts,
+                )
+                if not verified_text:
                     log.warning(
                         "Rejected regenerated RAG answer not supported by selected evidence "
                         "(kind=%s guild=%s exact=%s runtime=%s semantic=%s)",
@@ -3562,11 +3565,23 @@ class CorpusManager:
                     sources = []
                     return False
 
+                if verified_text != recovered.text:
+                    log.info(
+                        "Using sentence-filtered regenerated RAG answer "
+                        "(kind=%s guild=%s exact=%s runtime=%s semantic=%s)",
+                        question_kind.value,
+                        guild_id,
+                        len(recovered_hits),
+                        len(used_firebase),
+                        len(used_semantic),
+                    )
+                    extractive_fallback = True
+
                 # The retry used only locally filtered exact/runtime evidence,
                 # plus semantic excerpts that passed the grounding audit.
                 used_lexical_hits = recovered_hits
                 sources = recovered_sources
-                answer = recovered.text
+                answer = verified_text
                 has_answer = True
                 return True
 
@@ -5392,6 +5407,37 @@ class CorpusManager:
                     return False
                 previous_clause = (raw_clause, clause)
         return True
+
+    @classmethod
+    def _verified_recovered_answer(
+        cls,
+        answer_text: str,
+        evidence_texts: list[str],
+    ) -> str:
+        """Keep a recovery answer whole, or retain only independently verified claims.
+
+        Model summaries often contain several otherwise useful bullets. Rejecting the
+        entire answer because one narrative sentence paraphrases too broadly turns a
+        successful retrieval into an unreadable raw-record dump. Each retained line is
+        still checked by the same fail-closed atom, polarity, role and permission
+        verification as a complete answer; unsupported lines are never shown.
+        """
+        if cls._recovered_claims_supported(answer_text, evidence_texts):
+            return answer_text
+
+        claims = cls._grounding_claims(answer_text)
+        verified = [
+            claim
+            for claim in claims
+            if cls._recovered_claims_supported(claim, evidence_texts)
+        ]
+        if not verified:
+            return ""
+
+        return (
+            "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
+            + "\n".join(f"- {claim}" for claim in verified)
+        )
 
     @staticmethod
     def _support_segment_text(support, answer_text: str) -> str:
