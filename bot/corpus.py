@@ -6095,7 +6095,7 @@ class CorpusManager:
         verified = [
             claim
             for claim in claims
-            if cls._recovered_claim_is_standalone(claim) and exactly_supported(claim)
+            if exactly_supported(claim)
         ]
         if not verified:
             return ""
