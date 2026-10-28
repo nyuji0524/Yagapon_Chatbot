@@ -5711,12 +5711,13 @@ async def test_explicit_false_preserves_legacy_answer_status_compatibility(
 
 
 @pytest.mark.parametrize(
-    ("direct_text", "expected_in_file_search_context"),
+    ("direct_text", "expected_call_count", "expected_in_file_search_context"),
     (
-        ("回答状態行を欠いた出力だぽん。", True),
+        ("回答状態行を欠いた出力だぽん。", 1, None),
         (
             "その件に関する情報は、今のボクの記憶には見当たらないぽん。\n"
             "[[YAGAPON_ANSWER_STATUS:no_evidence]]",
+            2,
             False,
         ),
     ),
@@ -5725,6 +5726,7 @@ async def test_explicit_false_preserves_legacy_answer_status_compatibility(
 async def test_direct_exact_hit_is_dropped_only_after_explicit_no_evidence(
     corpus_manager,
     direct_text,
+    expected_call_count,
     expected_in_file_search_context,
 ):
     hit = lexical_hit(
@@ -5752,7 +5754,11 @@ async def test_direct_exact_hit_is_dropped_only_after_explicit_no_evidence(
         allow_unrestricted_conversations=True,
     )
 
-    file_search_call = corpus_manager._client.aio.models.generate_content.await_args_list[1]
+    calls = corpus_manager._client.aio.models.generate_content.await_args_list
+    assert len(calls) == expected_call_count
+    if expected_in_file_search_context is None:
+        return
+    file_search_call = calls[1]
     assert (
         "exact:approved-procedure" in file_search_call.kwargs["contents"]
     ) is expected_in_file_search_context

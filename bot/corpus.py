@@ -4069,7 +4069,7 @@ class CorpusManager:
                 return texts
 
             def observe_answer_contract(parsed: ParsedModelAnswer, *, stage: str) -> None:
-                if not parsed.explicit_status:
+                if REQUIRE_EXPLICIT_ANSWER_STATUS and not parsed.explicit_status:
                     log.warning(
                         "RAG answer missing explicit status control line "
                         "(stage=%s kind=%s guild=%s required=%s)",
@@ -4313,13 +4313,27 @@ class CorpusManager:
                     used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
                     sources = self._lexical_sources(used_lexical_hits, [])
                     sources.extend(self._firebase_sources(used_firebase, sources))
-                    direct_claims_supported = self._recovered_claims_supported(
-                        parsed.text,
-                        selected_evidence_texts(
-                            used_lexical_hits,
-                            used_firebase,
-                            [],
-                        ),
+                    # These candidates have already passed ACL, authority and
+                    # secret filtering before generation.  The old lexical
+                    # overlap check often rejected good paraphrases and code
+                    # explanations, then replaced them with a broader, more
+                    # expensive File Search answer.  Keep sentence-level
+                    # verification available only for deployments that opt in
+                    # to strict mode; the normal path trusts the bounded,
+                    # authorized evidence set and retains its citations.
+                    direct_claims_supported = (
+                        (
+                            not RAG_STRICT_CLAIM_VERIFICATION
+                            and not (schema_fallback_allowed and schema_contracts)
+                        )
+                        or self._recovered_claims_supported(
+                            parsed.text,
+                            selected_evidence_texts(
+                                used_lexical_hits,
+                                used_firebase,
+                                [],
+                            ),
+                        )
                     )
                     if sources and direct_claims_supported:
                         answer = parsed.text
