@@ -27,7 +27,33 @@ async def _require_operator(ctx, bot) -> bool:
 
 
 def register(bot):
-    group = bot.create_group("recording", "保存済み録音の運用テスト")
+    group = bot.create_group("recording", "保存済み録音の確認・議事録作成")
+
+    @group.command(name="minutes", description="保存済み録音から文字起こしと議事録を作成する")
+    @discord.default_permissions(administrator=True)
+    @discord.option("session_id", description="/leave で表示されたセッションID")
+    async def recording_minutes(ctx: discord.ApplicationContext, session_id: str):
+        if not await require_guild_admin(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        try:
+            artifact = await asyncio.to_thread(find_recording_artifact, session_id)
+            if artifact.source_guild_id != ctx.guild_id:
+                raise ValueError("このサーバーで保存された録音ではありません")
+            job = bot.recording_replays.start(
+                artifact=artifact,
+                target_channel=ctx.channel,
+                retranscribe=True,
+                review_only=False,
+            )
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            await ctx.followup.send(f"開始できません: {exc}", ephemeral=True)
+            return
+        await ctx.followup.send(
+            f"議事録作成ジョブ `{job.id}` を開始したぽん。"
+            "録音は削除せず、完了後にこのチャンネルへ議事録と文字起こしを投稿するぽん。",
+            ephemeral=True,
+        )
 
     @group.command(name="list", description="再生できる長時間録音を確認する")
     @discord.default_permissions(administrator=True)

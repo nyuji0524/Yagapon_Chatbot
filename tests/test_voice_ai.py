@@ -1195,7 +1195,7 @@ async def test_delivery_claim_sets_future_recovery_lease(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_minutes_generation_failure_is_not_a_successful_listen_stop():
-    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.MEETING)
     session.recording_sink = SimpleNamespace(mark=Mock())
     session._drain_recording = AsyncMock()
     session._reprocess_complete_recording = AsyncMock(return_value=True)
@@ -1214,7 +1214,7 @@ async def test_minutes_generation_failure_is_not_a_successful_listen_stop():
 
 @pytest.mark.asyncio
 async def test_empty_transcript_keeps_listen_session_recoverable():
-    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.MEETING)
     session.recording_sink = SimpleNamespace(mark=Mock())
     session._drain_recording = AsyncMock()
     session._reprocess_complete_recording = AsyncMock(return_value=False)
@@ -1228,6 +1228,35 @@ async def test_empty_transcript_keeps_listen_session_recoverable():
         error="RuntimeError",
         transcript_path="",
     )
+
+
+@pytest.mark.asyncio
+async def test_listen_stop_only_saves_recording_without_any_ai_processing():
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session.recording_sink = SimpleNamespace(
+        flush=Mock(),
+        cleanup=Mock(),
+        mark=Mock(),
+        limit_reached=False,
+    )
+    session._warn_if_capture_suspicious = AsyncMock()
+    session._wait_for_inflight_stt = AsyncMock(return_value=False)
+    session._reprocess_complete_recording = AsyncMock()
+    session._persist_transcript = AsyncMock()
+    session._generate_minutes = AsyncMock()
+
+    assert await session._stop_once() is None
+
+    session.recording_sink.mark.assert_called_once_with(
+        "recording_saved",
+        raw_recording_retained=True,
+        transcript_complete=False,
+        post_processing_requested=False,
+    )
+    session._wait_for_inflight_stt.assert_not_awaited()
+    session._reprocess_complete_recording.assert_not_awaited()
+    session._persist_transcript.assert_not_awaited()
+    session._generate_minutes.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1650,7 +1679,7 @@ async def test_shutdown_checkpoint_returns_false_without_explicit_success(monkey
 @pytest.mark.asyncio
 async def test_stt_drain_timeout_does_not_start_final_reprocessing():
     health = SimpleNamespace(suspicious=False)
-    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.MEETING)
     session.recording_sink = SimpleNamespace(
         flush=Mock(),
         cleanup=Mock(),
@@ -1820,7 +1849,7 @@ async def test_startup_does_not_quarantine_recording_while_same_guild_is_startin
 @pytest.mark.asyncio
 async def test_interactive_final_reprocess_timeout_defers_to_recovery(monkeypatch):
     monkeypatch.setenv("YAGAPON_FINAL_REPROCESS_INTERACTIVE_TIMEOUT_SECONDS", "0.01")
-    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.MEETING)
     session.recording_sink = SimpleNamespace(
         flush=Mock(),
         cleanup=Mock(),

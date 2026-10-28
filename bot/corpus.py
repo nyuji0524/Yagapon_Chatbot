@@ -231,7 +231,7 @@ RAG_LEXICAL_CONTEXT_HITS = 6
 RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS = 12
 RAG_GROUNDING_COVERAGE_THRESHOLD = _bounded_float_env(
     "YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD",
-    0.8,
+    0.6,
     0.5,
     1.0,
 )
@@ -3490,7 +3490,7 @@ class CorpusManager:
                         ),
                     )
 
-                response = await retry_rate_limit(
+                response = await retry_transient_api(
                     generate_with_file_search,
                     operation_name="rag_file_search",
                     attempts=4,
@@ -3568,11 +3568,32 @@ class CorpusManager:
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
                             recovery_context += self._untrusted_evidence(item.key, item.text)
-                        await recover_verified_evidence(
-                            recovery_context,
+                        fallback_answer = self._render_retrieved_evidence_fallback(
                             search_hits,
+                            firebase_evidence,
                             recovery_semantic_evidence,
                         )
+                        fallback_sources = self._lexical_sources(search_hits, [])
+                        fallback_sources.extend(
+                            self._firebase_sources(firebase_evidence, fallback_sources)
+                        )
+                        fallback_sources.extend(
+                            item.citation
+                            for item in recovery_semantic_evidence
+                            if item.citation and item.citation not in fallback_sources
+                        )
+                        if fallback_answer and fallback_sources:
+                            answer = fallback_answer
+                            sources = fallback_sources
+                            used_lexical_hits = search_hits
+                            has_answer = True
+                            extractive_fallback = True
+                        else:
+                            await recover_verified_evidence(
+                                recovery_context,
+                                search_hits,
+                                recovery_semantic_evidence,
+                            )
             no_answer = not sources or not has_answer
             if (
                 no_answer
@@ -3720,7 +3741,7 @@ class CorpusManager:
                     ),
                 )
 
-            response = await retry_rate_limit(
+            response = await retry_transient_api(
                 generate_recovery,
                 operation_name="rag_lexical_recovery",
                 attempts=4,
@@ -3836,6 +3857,41 @@ class CorpusManager:
         return (
             f"**{subject}**について、確認できた根拠を種類ごとに整理するぽん。\n\n"
             + "\n\n".join(sections)
+        )
+
+    @staticmethod
+    def _render_retrieved_evidence_fallback(
+        hits: list[LexicalHit],
+        runtime_evidence: list[FirebaseEvidence],
+        semantic_evidence: tuple[_GroundingEvidence, ...],
+    ) -> str:
+        """Render admitted evidence when free-form synthesis is rejected."""
+        lines: list[str] = []
+        seen: set[str] = set()
+
+        def add(label: str, value: str) -> None:
+            normalized = re.sub(r"\s+", " ", value).strip()
+            if not normalized or normalized.casefold() in seen:
+                return
+            seen.add(normalized.casefold())
+            if len(normalized) > 650:
+                normalized = normalized[:649].rstrip() + "…"
+            lines.append(f"- **{label}** — {normalized}")
+
+        for item in runtime_evidence[:5]:
+            add(item.title or "Firebase現在値", item.body)
+        for hit in hits[:6]:
+            period = f" / {hit.festival}th" if hit.festival is not None else ""
+            add(f"{hit.channel_name}{period}", hit.excerpt)
+        for index, item in enumerate(semantic_evidence[:6], start=1):
+            add(f"検索結果 {index}", item.text)
+
+        if not lines:
+            return ""
+        return (
+            "要約文と根拠の対応を十分に確認できなかったため、"
+            "検索で確認できた記録をそのまま示すぽん。\n\n"
+            + "\n".join(lines)
         )
 
     @staticmethod

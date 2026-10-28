@@ -2085,6 +2085,34 @@ def test_entity_overview_fallback_is_generic_and_extracts_authorized_sources():
     assert "文書・コード上の記録" in rendered
 
 
+def test_retrieved_evidence_fallback_preserves_useful_search_results():
+    hit = LexicalHit(
+        document_key="discord:it-lab",
+        channel_name="ITラボ",
+        festival=27,
+        source_url="https://discord.com/channels/1/2/3",
+        excerpt="ITラボでは技術展示と体験企画を実施した。",
+        score=10,
+        authority="conversation",
+        status="historical",
+    )
+    semantic = corpus_module._GroundingEvidence(
+        key="semantic:0",
+        citation="[企画資料](https://example.com/it-lab)",
+        text="来場者向けに展示内容を案内する企画である。",
+    )
+
+    rendered = CorpusManager._render_retrieved_evidence_fallback(
+        [hit],
+        [],
+        (semantic,),
+    )
+
+    assert "根拠の対応を十分に確認できなかった" in rendered
+    assert "ITラボでは技術展示" in rendered
+    assert "来場者向け" in rendered
+
+
 def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():
     assert evidence_confidence(
         answered=False,
@@ -4004,10 +4032,9 @@ async def test_missing_grounding_supports_recovers_from_only_locally_allowed_chu
     assert result.citations == (
         "[確定仕様: 公開手順 [active]](https://knowledge.example/procedure)",
     )
-    assert corpus_manager._client.aio.models.generate_content.await_count == 2
-    recovery_call = corpus_manager._client.aio.models.generate_content.await_args_list[1]
-    assert "ALLOWED-BODY" in recovery_call.kwargs["contents"]
-    assert "DENIED-BODY" not in recovery_call.kwargs["contents"]
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    assert "ALLOWED-BODY" in result.text
+    assert "DENIED-BODY" not in result.text
 
 
 def test_recovered_claims_must_be_supported_by_the_selected_evidence_body(
@@ -5094,16 +5121,13 @@ async def test_mixed_allowed_and_rejected_supports_retry_with_only_allowed_evide
     assert result.citations == (
         "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
     )
-    assert corpus_manager._client.aio.models.generate_content.await_count == 2
-    recovery_prompt = corpus_manager._client.aio.models.generate_content.await_args_list[1].kwargs[
-        "contents"
-    ]
-    assert "ALLOWED-CURRENT-YEAR" in recovery_prompt
-    assert "REJECTED-WRONG-YEAR" not in recovery_prompt
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    assert "ALLOWED-CURRENT-YEAR" in result.text
+    assert "REJECTED-WRONG-YEAR" not in result.text
 
 
 @pytest.mark.asyncio
-async def test_uncovered_answer_claim_forces_safe_retry_and_final_no_answer(corpus_manager):
+async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(corpus_manager):
     corpus_manager.rag_store.query_terms = Mock(return_value=[])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
     context = SimpleNamespace(
@@ -5155,10 +5179,13 @@ async def test_uncovered_answer_claim_forces_safe_retry_and_final_no_answer(corp
         guild_id=1,
     )
 
-    assert result.no_answer is True
-    assert result.citations == ()
+    assert result.no_answer is False
+    assert "西館" in result.text
+    assert result.citations == (
+        "[確定仕様: 28th会場 [28th / active]](https://knowledge.example/28-venue)",
+    )
     assert "9時" not in result.text
-    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):
@@ -5629,8 +5656,7 @@ async def test_query_recovers_from_exact_excerpts_when_file_search_refuses(corpu
     assert "AI鬼ごっこ" in result.text
     assert result.citations == ("[完全一致: #ITラボ](https://discord.example/it-lab)",)
     calls = corpus_manager._client.aio.models.generate_content.await_args_list
-    assert len(calls) == 2
-    assert calls[1].kwargs["config"].tools is None
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio

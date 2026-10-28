@@ -52,6 +52,7 @@ RECOVERABLE_STATUSES = {
     "recovery_processing",
 }
 TERMINAL_STATUSES = {
+    "recording_saved",
     "delivered",
     "delivered_audio_deleted",
     "delivered_recording_retained",
