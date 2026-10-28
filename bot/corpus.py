@@ -4709,7 +4709,14 @@ class CorpusManager:
         cls,
         groups: tuple[_FirebaseListGroup, ...],
     ) -> str:
-        """Render every projected field without an LLM or an output-token cap."""
+        """Render complete Firebase lists without an LLM or an output-token cap.
+
+        A list request asks for every matching record, not for a raw schema dump.
+        Notifications therefore use a compact, stable projection that remains
+        readable in Discord while retaining all titles and operational metadata.
+        Other collection types keep the lossless generic representation because
+        their useful summary fields vary by schema.
+        """
         lines: list[str] = []
         if len(groups) > 1:
             lines.extend(("# Firebase現在値一覧", ""))
@@ -4717,10 +4724,15 @@ class CorpusManager:
             safe_title = cls._escape_untrusted_markdown(group.title)
             lines.append(f"## {safe_title}一覧（{group.returned}件）")
             if group.completeness == "complete":
-                lines.append(
-                    f"Firebaseで質問条件に一致した{group.matched}件を、"
-                    "省略せずすべて掲載するぽん。"
-                )
+                if group.source_type == "notifications":
+                    lines.append(
+                        f"Firebaseで質問条件に一致した全{group.matched}件を掲載するぽん。"
+                    )
+                else:
+                    lines.append(
+                        f"Firebaseで質問条件に一致した{group.matched}件を、"
+                        "省略せずすべて掲載するぽん。"
+                    )
             else:
                 lines.append(
                     f"取得上限（{group.reader_limit}件）に到達したため、取得できた"
@@ -4740,6 +4752,44 @@ class CorpusManager:
                     ),
                     f"項目 {item.position}",
                 )
+                if group.source_type == "notifications":
+                    timestamp = item.fields.get("publishedAt") or item.fields.get(
+                        "createdAt"
+                    )
+                    metadata = []
+                    if timestamp:
+                        metadata.append(str(timestamp))
+                    category = item.fields.get("category")
+                    if category:
+                        metadata.append(str(category))
+                    targets = item.fields.get("displayTargets")
+                    if isinstance(targets, list) and targets:
+                        metadata.append("対象: " + "/".join(map(str, targets)))
+                    if "sendPush" in item.fields:
+                        metadata.append(
+                            "Push: あり" if item.fields.get("sendPush") else "Push: なし"
+                        )
+                    suffix = (
+                        " — "
+                        + cls._escape_untrusted_markdown(" / ".join(metadata))
+                        if metadata
+                        else ""
+                    )
+                    lines.append(
+                        f"{item.position}. **{cls._escape_untrusted_markdown(display_name)}**"
+                        f"{suffix}"
+                    )
+                    action = item.fields.get("action")
+                    if isinstance(action, dict):
+                        label = action.get("label")
+                        url = action.get("url")
+                        action_parts = [str(value) for value in (label, url) if value]
+                        if action_parts:
+                            lines.append(
+                                "   - アクション: "
+                                + cls._escape_untrusted_markdown(" — ".join(action_parts))
+                            )
+                    continue
                 lines.append(
                     f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}"
                 )
@@ -4755,6 +4805,13 @@ class CorpusManager:
                         f"{cls._escape_untrusted_markdown(rendered_value)}"
                     )
                 lines.append("")
+            if group.source_type == "notifications":
+                lines.extend(
+                    (
+                        "",
+                        "一覧では本文を省略しているぽん。通知名を指定すれば本文も確認できるぽん。",
+                    )
+                )
             if group_index + 1 < len(groups):
                 lines.append("---")
                 lines.append("")
