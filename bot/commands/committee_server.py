@@ -411,9 +411,7 @@ class ProjectLeaderApplicationButton(discord.ui.Button):
         if not guild or not isinstance(member, discord.Member):
             await _respond_ephemeral(interaction, "サーバー内で実行してほしいぽん。")
             return
-        registration = interaction.client.config.get_member(guild.id, member.id) or {}
-        bureau = registration.get("bureau")
-        if not bureau or registration.get("email_verified") is not True:
+        if not _has_completed_registration(interaction.client.config, guild.id, member):
             await _respond_ephemeral(interaction, "先に慶應メール認証まで完了してほしいぽん。")
             return
         await interaction.response.defer(ephemeral=True)

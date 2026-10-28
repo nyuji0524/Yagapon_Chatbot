@@ -41,6 +41,7 @@ async def test_google_auth_failures_are_exposed_as_backend_unavailable():
     assert caught.value.status == 503
 
 
+@pytest.mark.asyncio
 async def test_registration_and_application_payloads_are_server_bound():
     backend = RecordingBackend()
 
