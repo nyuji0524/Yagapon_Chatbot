@@ -2178,9 +2178,9 @@ def test_answer_requirement_labels_removes_trailing_particle_before_evidence_cla
 def test_system_instruction_preserves_rich_structure_without_forcing_it_on_simple_answers():
     instruction = corpus_module.SYSTEM_INSTRUCTION
     assert "単純な質問は結論を先に1〜3段落で簡潔に" in instruction
-    assert "`### 1. 見出し`" in instruction
-    assert "定義・全体像" in instruction
-    assert "すべての章を機械的に作らず" in instruction
+    assert "回答形式は質問に合わせて選ぶ" in instruction
+    assert "経緯や概要は自然な段落" in instruction
+    assert "見出しや箇条書きを機械的に作らない" in instruction
     assert "検索結果の断片、メタデータ、diffをそのまま回答として貼らず" in instruction
 
 
@@ -2996,8 +2996,8 @@ async def test_detailed_exhaustive_notification_request_keeps_requested_body(cor
     corpus_manager.rag_store.record_query = Mock(return_value="firebase-detailed-list")
 
     result = await corpus_manager.query_with_trace(
-        "27thに発行された公開通知を省略せず、総件数と各通知のタイトル・"
-        "公開日時・カテゴリ・本文・リンクまで一覧にして",
+        "27thに発行された公開通知を、タイトル・公開日時・カテゴリ・本文・"
+        "リンクを省略せず一覧で出してください",
         "fileSearchStores/test",
         guild_id=1,
     )
@@ -5844,7 +5844,7 @@ async def test_uncovered_answer_claim_returns_only_the_supported_partial_record(
 
 
 @pytest.mark.asyncio
-async def test_comprehensive_answer_regenerates_when_local_verification_removed_claims(
+async def test_comprehensive_answer_keeps_locally_verified_partial_without_regeneration(
     corpus_manager,
 ):
     corpus_manager.rag_store.query_terms = Mock(return_value=[])
@@ -5906,7 +5906,10 @@ async def test_comprehensive_answer_regenerates_when_local_verification_removed_
     assert "西館" in result.text
     assert "以下の3つ" not in result.text
     assert "9時" not in result.text
-    assert corpus_manager._client.aio.models.generate_content.await_count == 2
+    # Unsupported claims are removed from the model-provided support mapping
+    # locally. A second paid generation used to make this path slower and
+    # could replace a good partial answer with a raw-record fallback.
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,11 @@ log = logging.getLogger("yagapon.scheduled_backfill")
 
 DEFAULT_INTERVAL_SECONDS = 6 * 60 * 60
 MIN_INTERVAL_SECONDS = 6 * 60 * 60
-DEFAULT_INITIAL_DELAY_SECONDS = 5 * 60
+# Keep the first refresh outside the deployment health/rollback window. A
+# five-minute delay made the initial high-I/O replacement cycle start while
+# deployment was still verifying the new container, starving health checks and
+# extending an otherwise healthy rollout by several minutes.
+DEFAULT_INITIAL_DELAY_SECONDS = 15 * 60
 DEFAULT_RETRY_SECONDS = 15 * 60
 CHECKPOINT_WRITER_RETRY_SECONDS = 0.1
 CHECKPOINT_SCHEMA_VERSION = 2

@@ -248,6 +248,17 @@ RAG_SEARCH_TOP_K = _bounded_int_env("YAGAPON_RAG_SEARCH_TOP_K", 8, 4, 20)
 RAG_COMPREHENSIVE_SEARCH_TOP_K = _bounded_int_env(
     "YAGAPON_RAG_COMPREHENSIVE_SEARCH_TOP_K", 12, 8, 30
 )
+# Claim-by-claim lexical verification was introduced as a temporary safety
+# net while File Search metadata was unreliable. In practice it caused a
+# useful grounded answer to be discarded, regenerated, sentence-filtered and
+# sometimes replaced by a raw evidence dump. Keep the old behaviour available
+# for incident diagnosis, but make the production path rely on the actual
+# security boundaries (ACL/authority/citation/secret checks) and expose
+# uncertainty through the confidence score instead of suppressing the answer.
+RAG_STRICT_CLAIM_VERIFICATION = (
+    os.environ.get("YAGAPON_RAG_STRICT_CLAIM_VERIFICATION", "false").strip().lower()
+    == "true"
+)
 RAG_LEXICAL_CANDIDATES = 16
 RAG_COMPREHENSIVE_LEXICAL_CANDIDATES = 32
 RAG_LEXICAL_CONTEXT_HITS = 6
@@ -928,13 +939,10 @@ SYSTEM_INSTRUCTION = (
     "【回答スタイル】\n"
     "- 断片的な情報の羅列ではなく、自然な文章として回答をまとめるぽん。\n"
     "- 一問一答や用語の読み方など、単純な質問は結論を先に1〜3段落で簡潔に答えるぽん。\n"
-    "- 説明・比較・一覧・複数論点への回答では、冒頭で質問へ直接答えたあと、"
-    "`### 1. 見出し`、`### 2. 見出し`のような番号付き見出しで整理するぽん。\n"
-    "- 番号付き見出しは質問に合わせて、原則として「定義・全体像」「構成・仕組み」"
-    "「具体的な仕様・例」「現在の状態・未確認事項」の順を参考にするぽん。"
-    "すべての章を機械的に作らず、質問に必要な章だけを使うぽん。\n"
-    "- 各見出しでは最初に要点を文章で説明し、その後に箇条書き、番号、表を使って"
-    "具体的な名称・識別子・数値・選択肢を示すぽん。単語だけの箇条書きにはしないぽん。\n"
+    "- 回答形式は質問に合わせて選ぶぽん。経緯や概要は自然な段落、項目の一覧は箇条書き、"
+    "対応関係の比較は表、複数の独立した論点は見出しを使うぽん。\n"
+    "- 見出しや箇条書きを機械的に作らないぽん。文章だけで明瞭に説明できる質問は文章で答え、"
+    "列挙すべき具体的な名称・数値・選択肢があるときだけ箇条書きを使うぽん。\n"
     "- 実装名、Firestoreのフィールド、コレクション、設定値などは、根拠にある表記を"
     "バッククォートで示し、一般向けの意味も併記するぽん。\n"
     "- 確認済みの事実と、検討中・未実装・記録不足を同じ確度で混ぜないぽん。"
@@ -3816,6 +3824,7 @@ class CorpusManager:
             used_lexical_hits: list[LexicalHit] = []
             semantic_candidate_count = 0
             extractive_fallback = False
+            claim_verification_complete = True
             remaining_output_tokens = max_output_tokens
             best_partial_answer = ""
             best_partial_sources: list[str] = []
@@ -3827,14 +3836,28 @@ class CorpusManager:
                 hits: list[LexicalHit],
                 parsed: ParsedModelAnswer,
             ) -> list[LexicalHit]:
-                if not parsed.explicit_status or not parsed.evidence_keys:
-                    return hits
-                selected = set(parsed.evidence_keys)
-                return [
+                if parsed.evidence_keys:
+                    selected = set(parsed.evidence_keys)
+                    return [
+                        hit
+                        for hit in hits
+                        if hit.document_key in selected or f"exact:{hit.document_key}" in selected
+                    ]
+                claims = self._grounding_claims(parsed.text)
+                inferred = [
                     hit
                     for hit in hits
-                    if hit.document_key in selected or f"exact:{hit.document_key}" in selected
+                    if any(
+                        self._recovered_claims_supported(
+                            claim,
+                            selected_evidence_texts([hit], [], []),
+                        )
+                        for claim in claims
+                    )
                 ]
+                if not inferred:
+                    return hits
+                return inferred
 
             def selected_firebase_evidence(
                 evidence: list[FirebaseEvidence],
@@ -3857,23 +3880,48 @@ class CorpusManager:
                         or schema_fallback_allowed
                     )
                 ]
-                if not parsed.explicit_status or not parsed.evidence_keys:
-                    return evidence
-                selected = set(parsed.evidence_keys)
-                return [
+                if parsed.evidence_keys:
+                    selected = set(parsed.evidence_keys)
+                    return [
+                        item
+                        for item in evidence
+                        if item.document_key in selected or f"runtime:{item.document_key}" in selected
+                    ]
+                claims = self._grounding_claims(parsed.text)
+                inferred = [
                     item
                     for item in evidence
-                    if item.document_key in selected or f"runtime:{item.document_key}" in selected
+                    if any(
+                        self._recovered_claims_supported(
+                            claim,
+                            selected_evidence_texts([], [item], []),
+                        )
+                        for claim in claims
+                    )
                 ]
+                if not inferred:
+                    return evidence
+                return inferred
 
             def selected_semantic_evidence(
                 evidence: tuple[_GroundingEvidence, ...],
                 parsed: ParsedModelAnswer,
             ) -> list[_GroundingEvidence]:
-                if not parsed.explicit_status or not parsed.evidence_keys:
+                if parsed.evidence_keys:
+                    selected = set(parsed.evidence_keys)
+                    return [item for item in evidence if item.key in selected]
+                claims = self._grounding_claims(parsed.text)
+                inferred = [
+                    item
+                    for item in evidence
+                    if any(
+                        self._recovered_claims_supported(claim, [item.text])
+                        for claim in claims
+                    )
+                ]
+                if not inferred:
                     return list(evidence)
-                selected = set(parsed.evidence_keys)
-                return [item for item in evidence if item.key in selected]
+                return inferred
 
             def selected_evidence_texts(
                 hits: list[LexicalHit],
@@ -3928,7 +3976,7 @@ class CorpusManager:
             ) -> bool:
                 """Retry using only evidence that passed local authorization filters."""
                 nonlocal answer, has_answer, sources, used_lexical_hits
-                nonlocal extractive_fallback
+                nonlocal extractive_fallback, claim_verification_complete
                 recovered_answer = await self._recover_from_lexical_hits(
                     question=question,
                     system_instruction=system,
@@ -3968,9 +4016,10 @@ class CorpusManager:
                     used_firebase,
                     used_semantic,
                 )
-                verified_text = self._verified_recovered_answer(
-                    recovered.text,
-                    selected_texts,
+                verified_text = (
+                    self._verified_recovered_answer(recovered.text, selected_texts)
+                    if RAG_STRICT_CLAIM_VERIFICATION
+                    else recovered.text
                 )
                 if not verified_text:
                     log.warning(
@@ -4044,6 +4093,8 @@ class CorpusManager:
                         len(used_semantic),
                     )
                     extractive_fallback = True
+                if not RAG_STRICT_CLAIM_VERIFICATION:
+                    claim_verification_complete = False
 
                 # The retry used only locally filtered exact/runtime evidence,
                 # plus semantic excerpts that passed the grounding audit.
@@ -4066,7 +4117,11 @@ class CorpusManager:
             # with multiple independent candidates. A single history hit still
             # goes through File Search so safety stops and semantic expansion
             # keep their existing fail-closed behavior.
-            if comprehensive and len(lexical_hits) >= 2:
+            if (
+                RAG_STRICT_CLAIM_VERIFICATION
+                and comprehensive
+                and len(lexical_hits) >= 2
+            ):
                 local_first_context = with_lexical_context(
                     evidence_context,
                     lexical_hits,
@@ -4141,14 +4196,15 @@ class CorpusManager:
                     used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
                     sources = self._lexical_sources(used_lexical_hits, [])
                     sources.extend(self._firebase_sources(used_firebase, sources))
-                    if sources and self._recovered_claims_supported(
+                    direct_claims_supported = self._recovered_claims_supported(
                         parsed.text,
                         selected_evidence_texts(
                             used_lexical_hits,
                             used_firebase,
                             [],
                         ),
-                    ):
+                    )
+                    if sources and direct_claims_supported:
                         answer = parsed.text
                         has_answer = True
                     elif sources:
@@ -4282,9 +4338,16 @@ class CorpusManager:
                     sources = [*semantic_sources]
                     sources.extend(self._lexical_sources(used_lexical_hits, sources))
                     sources.extend(self._firebase_sources(used_firebase, sources))
-                    if semantic_audit.requires_recovery:
+                    semantic_security_failure = bool(
+                        semantic_audit.rejected_supported_chunks
+                    )
+                    strict_metadata_failure = bool(
+                        REQUIRE_GROUNDING_SUPPORTS
+                        and semantic_audit.invalid_supports
+                    )
+                    if semantic_security_failure or strict_metadata_failure:
                         log.warning(
-                            "Rejected File Search answer grounding "
+                            "Rejected File Search answer using unauthorized grounding "
                             "(rejected_chunks=%s invalid_supports=%s coverage=%s)",
                             semantic_audit.rejected_supported_chunks,
                             semantic_audit.invalid_supports,
@@ -4294,6 +4357,16 @@ class CorpusManager:
                         # Never preserve it merely because another citation survived.
                         has_answer = False
                         sources = []
+                    elif (
+                        semantic_audit.invalid_supports
+                        or not semantic_audit.claim_coverage_complete
+                    ):
+                        # Grounding metadata is useful for confidence, but it is
+                        # not a reason to erase a readable answer when every
+                        # retrieved source passed the local ACL and authority
+                        # boundary. Small models frequently omit some support
+                        # spans even though the cited material is present.
+                        claim_verification_complete = False
 
                     recovery_semantic_evidence = tuple(
                         item for item in semantic_audit.evidence if item.text
@@ -4341,27 +4414,31 @@ class CorpusManager:
                                 extractive_fallback
                                 or locally_verified_primary != parsed.text
                             )
-                    # A broad answer must not be finalized after local
-                    # verification removed one or more claims. The surviving
-                    # sentences are safe, but they no longer cover the user's
-                    # requested facets and can leave dangling list preambles.
-                    # Regenerate once from all locally authorized evidence.
+                    # The legacy strict mode can still regenerate a broad
+                    # answer after local filtering for incident comparison.
+                    # Normal production keeps the readable verified partial
+                    # and reports reduced coverage, avoiding a second paid call.
                     comprehensive_primary_was_reduced = bool(
-                        comprehensive
+                        RAG_STRICT_CLAIM_VERIFICATION
+                        and comprehensive
                         and locally_verified_primary
                         and locally_verified_primary != parsed.text
                     )
-                    comprehensive_coverage_too_narrow = requires_comprehensive_recovery(
-                        comprehensive=comprehensive,
-                        source_count=len(sources),
-                        candidate_count=(
-                            len(search_hits)
-                            + len(recovery_semantic_evidence)
-                            + len(firebase_evidence)
-                        ),
+                    comprehensive_coverage_too_narrow = bool(
+                        RAG_STRICT_CLAIM_VERIFICATION
+                        and requires_comprehensive_recovery(
+                            comprehensive=comprehensive,
+                            source_count=len(sources),
+                            candidate_count=(
+                                len(search_hits)
+                                + len(recovery_semantic_evidence)
+                                + len(firebase_evidence)
+                            ),
+                        )
                     )
                     comprehensive_requirements_incomplete = bool(
-                        has_answer
+                        RAG_STRICT_CLAIM_VERIFICATION
+                        and has_answer
                         and requires_requirement_recovery(
                             question,
                             answer,
@@ -4382,7 +4459,8 @@ class CorpusManager:
                     if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                         not has_answer
                         or not (semantic_sources or used_lexical_hits or used_firebase)
-                        or (semantic_audit.requires_recovery and not has_answer)
+                        or semantic_security_failure
+                        or strict_metadata_failure
                         or comprehensive_coverage_too_narrow
                         or comprehensive_primary_was_reduced
                         or comprehensive_requirements_incomplete
@@ -4552,7 +4630,7 @@ class CorpusManager:
                     + len(firebase_evidence)
                     + semantic_candidate_count
                 ),
-                locally_verified=not no_answer,
+                locally_verified=not no_answer and claim_verification_complete,
                 extractive_fallback=extractive_fallback,
             )
             return RagAnswer(
@@ -4702,12 +4780,13 @@ class CorpusManager:
             "runtime:<document_key>、semantic:<index> の提示形式どおりに列挙した"
             " [[YAGAPON_EVIDENCE_KEYS:key1,key2]] 行を回答状態行の直前へ必ず出すぽん。"
             "使っていないkeyや提示されていないkeyは列挙しないぽん。"
-            "要約は1つの段落または箇条書きにつき1つの根拠だけから作り、複数の記録を"
-            "1つの事実へ合成しないぽん。人名・数値・日付・状態・役職は根拠の"
+            "複数の記録は、時系列や相互関係が分かる自然な説明へ統合してよいぽん。"
+            "記録同士が矛盾する場合は一方へ決めつけず、両方と更新時期を示すぽん。"
+            "人名・数値・日付・状態・役職は根拠の"
             "表記をそのまま使うぽん。根拠に明記されていない件数や『主に』などの"
             "評価を付け足さないぽん。各文は、主語と内容が分かる1つの完全な"
-            "文章にするぽん。複数の回答項目が明示されている場合は、その項目名を"
-            "`### 番号. 項目名`の見出しにして、確認できない項目もその旨を明記するぽん。"
+            "文章にするぽん。段落・見出し・箇条書き・表は質問に最も読みやすい形式を選び、"
+            "複数の回答項目があるだけで箇条書きへ固定しないぽん。"
             "発言者名だけの行、『内容:』だけを分離した行、回答する・まとめるという"
             "前置きや、根拠検証の内部方針は出力しないぽん。"
             "提示された根拠が質問と無関係、または不足する場合は、"

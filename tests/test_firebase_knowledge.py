@@ -63,8 +63,8 @@ def _ranking_document(
 
 def test_detailed_notification_columns_still_select_deterministic_list_path():
     assert is_explicit_firebase_list_query(
-        "27thに発行された公開通知を省略せず、総件数と各通知のタイトル・"
-        "公開日時・カテゴリ・本文・リンクまで一覧にして"
+        "27thに発行された公開通知を、タイトル・公開日時・カテゴリ・本文・"
+        "リンクを省略せず一覧で出してください"
     )
 def test_allowlist_never_contains_personal_collections():
     rendered = " ".join(str(config["path"]) for config in COLLECTIONS.values())
