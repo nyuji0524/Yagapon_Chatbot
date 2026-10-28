@@ -94,6 +94,12 @@ def _has_completed_registration(config, guild_id: int, member) -> bool:
     )
 
 
+def _bot_can_run_committee_setup(member) -> bool:
+    """Whether the bot can create and grant an Administrator role."""
+    permissions = getattr(member, "guild_permissions", None)
+    return bool(permissions and permissions.administrator)
+
+
 def _roles_after_position_approval(
     roles: Iterable[discord.Role],
     approved_role: discord.Role,
@@ -1149,8 +1155,12 @@ def register(bot):
         if not await require_guild_admin(ctx):
             return
         me = ctx.guild.me
-        if not me.guild_permissions.manage_roles:
-            await ctx.respond("やがぽんにロール管理権限を付けてほしいぽん。", ephemeral=True)
+        if not _bot_can_run_committee_setup(me):
+            await ctx.respond(
+                "セットアップには、やがぽん自身のAdministrator権限が必要だぽん。"
+                "権限を付けてからもう一度実行してほしいぽん。",
+                ephemeral=True,
+            )
             return
         managed_role_names = {
             *GRADE_ROLES,
@@ -1213,11 +1223,18 @@ def register(bot):
                 "`#ロール選択` がないため、チャンネルを作成してから"
                 "もう一度 `/committee_setup` を実行してほしいぽん。"
             )
+        request_channel = _find_named(ctx.guild.text_channels, ROLE_REQUEST_CHANNEL)
+        request_message = (
+            "役職申請の承認先は `#ロール申請🔑` だぽん。"
+            if request_channel is not None
+            else "`#ロール申請🔑` がないため、企画長・役員申請を始める前に作成してほしいぽん。"
+        )
         await ctx.followup.send(
             "\n".join(
                 [
                     f"✅ 委員登録基盤を整備したぽん（新規ロール {created_count}件）。",
                     panel_message,
+                    request_message,
                     "カテゴリやチャンネルの一括作成・変更は行っていないぽん。",
                     "このコマンドの実行者には「サーバー管理者」ロールを付与したぽん。",
                 ]

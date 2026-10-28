@@ -15,6 +15,7 @@ from bot.commands.committee_server import (
     ProjectOrganizationSelect,
     RegistrationModal,
     SelfRolePanelView,
+    _bot_can_run_committee_setup,
     _bot_guide_embed,
     _embed_field_id,
     _ensure_setup_actor_is_server_admin,
@@ -39,6 +40,19 @@ def test_registration_roles_use_only_bureau_grade_and_declared_positions():
     assert "一般委員" not in POSITION_ROLES
     assert "28th委員" not in POSITION_ROLES
     assert SERVER_ADMIN_ROLE == "サーバー管理者"
+
+
+def test_committee_setup_requires_bot_administrator_permission():
+    administrator = SimpleNamespace(
+        guild_permissions=SimpleNamespace(administrator=True),
+    )
+    role_manager_only = SimpleNamespace(
+        guild_permissions=SimpleNamespace(administrator=False, manage_roles=True),
+    )
+
+    assert _bot_can_run_committee_setup(administrator) is True
+    assert _bot_can_run_committee_setup(role_manager_only) is False
+    assert _bot_can_run_committee_setup(None) is False
 
 
 @pytest.mark.asyncio
