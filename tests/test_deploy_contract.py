@@ -49,6 +49,15 @@ def test_deploy_retries_only_transient_ssh_failures():
     assert "sleep $((attempt * 10))" in workflow
 
 
+def test_remote_bootstrap_retries_immutable_image_pull():
+    bootstrap = (ROOT / "deploy/remote-bootstrap.sh").read_text(encoding="utf-8")
+
+    assert "for attempt in 1 2 3" in bootstrap
+    assert 'if docker pull "$image"; then' in bootstrap
+    assert "Transient image pull failure" in bootstrap
+    assert "Image pull failed after $attempt attempts" in bootstrap
+
+
 def test_remote_preflights_remain_fail_fast_and_report_timing():
     deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
 
