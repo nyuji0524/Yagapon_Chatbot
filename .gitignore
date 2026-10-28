@@ -12,3 +12,4 @@ venv/
 service_account.json
 gha-creds-*.json
 voiceprints/
+.DS_Store
