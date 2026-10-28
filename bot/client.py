@@ -186,6 +186,28 @@ def _rag_confidence_line(
     return f"**根拠信頼度（検索・監査）: {bounded_score}/100（{label}）**{suffix}"
 
 
+def _rag_visibility_scope(guild, member, channel) -> tuple[tuple[int, ...], bool]:
+    """Resolve evidence scope without widening the response audience."""
+    from bot.discord_visibility import (
+        channel_audience_has_guildwide_rag_access,
+        has_guildwide_rag_access,
+        readable_channel_ids,
+    )
+
+    guildwide_access = bool(
+        has_guildwide_rag_access(guild, member)
+        and channel_audience_has_guildwide_rag_access(guild, channel)
+    )
+    if guildwide_access:
+        return readable_channel_ids(guild, member), True
+    return readable_channel_ids(
+        guild,
+        member,
+        current_channel=channel,
+        limit=1,
+    ), False
+
+
 def _split_discord_text(text: str, *, limit: int = 1900) -> list[str]:
     """Split arbitrary text without dropping oversized lines or breaking fences.
 
@@ -923,27 +945,22 @@ class YagaPon(discord.Bot):
 
         members_info = self._build_members_info(guild_id) if guild_id else ""
         glossary_text = self.config.get_glossary_text(guild_id) if guild_id else ""
-        from bot.discord_visibility import (
-            has_guildwide_rag_access,
-            readable_channel_ids,
-        )
-
         guild = message.guild or self.get_guild(guild_id)
         member = message.author if message.guild else (guild.get_member(message.author.id) if guild else None)
         if message.guild:
-            # A normal message is visible to everyone who can read its output
-            # channel. Restrict raw evidence to that same channel so a member
-            # cannot relay a private channel into a broader audience.
-            visible_channels = readable_channel_ids(
+            visible_channels, guildwide_access = _rag_visibility_scope(
                 guild,
                 member,
-                current_channel=message.channel,
-                limit=1,
+                message.channel,
             )
-            guildwide_access = False
         else:
             # A DM response is visible only to the requester, so it may use the
             # requester's current Discord read permissions across the guild.
+            from bot.discord_visibility import (
+                has_guildwide_rag_access,
+                readable_channel_ids,
+            )
+
             visible_channels = readable_channel_ids(guild, member)
             guildwide_access = has_guildwide_rag_access(guild, member)
 
