@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+import main as main_module
 from main import (
     CoordinatedUvicornServer,
     ShutdownCoordinator,
@@ -189,3 +190,17 @@ def test_durable_cleanup_does_not_extend_an_earlier_watchdog(monkeypatch):
     _tighten_watchdog_after_durable_cleanup()
 
     activate.assert_not_called()
+
+
+def test_run_leaves_process_watchdog_armed_through_interpreter_teardown(monkeypatch):
+    run_async = Mock()
+    disarm = Mock()
+    monkeypatch.setattr(main_module.asyncio, "run", run_async)
+    monkeypatch.setattr(main_module, "_disarm_process_watchdog", disarm)
+
+    main_module.run()
+
+    run_async.assert_called_once()
+    # Close the un-awaited coroutine created for the mocked runner.
+    run_async.call_args.args[0].close()
+    disarm.assert_not_called()
