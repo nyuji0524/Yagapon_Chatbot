@@ -19,7 +19,6 @@ from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
-from google import genai
 from google.genai import types
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
@@ -28,6 +27,7 @@ from bot.ai_retry import (
     RateLimitExceeded,
     is_ai_unavailable_error,
     is_transient_api_error,
+    new_genai_client,
     retry_rate_limit,
     retry_transient_api,
 )
@@ -232,13 +232,16 @@ RAG_LEXICAL_CONTEXT_HITS = 6
 RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS = 12
 RAG_GROUNDING_COVERAGE_THRESHOLD = _bounded_float_env(
     "YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD",
-    0.6,
-    0.5,
+    0.35,
+    0.25,
     1.0,
 )
 GLOBAL_NO_EVIDENCE_MARKER = "[[YAGAPON_NO_RELEVANT_EVIDENCE]]"
 
-# A modest coverage allowance is for connective/style text, not factual values.
+# Natural summaries paraphrase discussion records heavily, so ordinary
+# explanatory claims only need partial character coverage from the model's
+# authorized grounding segments. This allowance is for connective/style text,
+# not factual values.
 # Claims containing these high-impact facts must remain completely covered by a
 # locally authorized grounding segment even when the aggregate threshold passes.
 _CRITICAL_GROUNDING_CLAIM_RE = re.compile(
@@ -601,6 +604,67 @@ def _select_lexical_context_hits(
     rank = {hit.document_key: index for index, hit in enumerate(ranked)}
     selected.sort(key=lambda hit: rank[hit.document_key])
     return selected
+
+
+_RETRIEVAL_PLUMBING_PATHS = (
+    ":bot/corpus.py",
+    ":bot/rag_store.py",
+    ":bot/knowledge_authority.py",
+    ":bot/firebase_knowledge.py",
+)
+
+
+def _question_is_about_retrieval_system(question: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:おしゃべり)?やがぽん|\bRAG\b|ナレッジ|File\s*Search|"
+            r"検索(?:処理|基盤|ロジック|実装|精度)|根拠(?:不足|判定)|retrieval|corpus",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _filter_retrieval_plumbing_hits(
+    question: str,
+    hits: list[LexicalHit],
+) -> list[LexicalHit]:
+    """Keep search implementation vocabulary from becoming topic evidence.
+
+    The retrieval source itself contains vocabulary regexes such as
+    ``新歓Web|外部|他局|要求``.  A topical question containing those words used
+    to rank that regex above the Discord records it was meant to find.  The
+    implementation remains searchable for questions about YagaPon/RAG itself;
+    only unrelated topic answers exclude these plumbing modules.
+    """
+    if _question_is_about_retrieval_system(question):
+        return hits
+    return [
+        hit
+        for hit in hits
+        if not (
+            hit.source_type in {"source_code", "source_code_history"}
+            and any(marker in hit.channel_name for marker in _RETRIEVAL_PLUMBING_PATHS)
+        )
+    ]
+
+
+def _rank_extract_fallback_hits(
+    hits: list[LexicalHit],
+    question_kind: QuestionKind,
+) -> list[LexicalHit]:
+    """Put explanatory records first when rendering a non-generative answer."""
+    if question_kind is not QuestionKind.HISTORY:
+        return hits
+    return sorted(
+        hits,
+        key=lambda hit: (
+            is_history_narrative_source(hit.source_type),
+            hit.score,
+            authority_score(question_kind, hit.authority, hit.status),
+        ),
+        reverse=True,
+    )
 
 
 def backfill_channel_concurrency() -> int:
@@ -1627,7 +1691,12 @@ class _GroundingAudit:
 class CorpusManager:
     def __init__(self):
         api_key = os.environ.get("GOOGLE_API_KEY", "")
-        self._client = genai.Client(api_key=api_key)
+        # Keep Gemini's generated-client retries out of the RAG request path.
+        # In particular, the SDK default retried permanent HTTP 402 billing
+        # failures for tens of seconds before our deterministic evidence
+        # fallback could run. The shared client retries only short-lived
+        # network/server statuses and leaves 402/429 policy to this service.
+        self._client = new_genai_client(api_key)
         self.rag_store = RagStore()
         self.firebase_knowledge = FirebaseKnowledgeReader()
         self._seed_trusted_knowledge()
@@ -3084,6 +3153,87 @@ class CorpusManager:
             allowed_channel_ids=allowed_channel_ids,
             allow_unrestricted_conversations=allow_unrestricted_conversations,
         )
+        overview_subject = entity_overview_subject(question)
+        firebase_evidence: list[FirebaseEvidence] = []
+        firebase_loaded = False
+
+        async def load_firebase_evidence() -> list[FirebaseEvidence]:
+            runtime_evidence = await self.firebase_knowledge.evidence_for(
+                question,
+                question_kind,
+                festival=festival,
+            )
+            if overview_subject and festival is None:
+                # Broad entity questions often refer to a recurring festival
+                # project before the current year's event document exists.
+                previous_festival = max(1, current_festival() - 1)
+                previous_evidence = await self.firebase_knowledge.evidence_for(
+                    question,
+                    question_kind,
+                    festival=previous_festival,
+                )
+                previous_evidence = [
+                    replace(
+                        item,
+                        document_key=(
+                            f"firebase:{previous_festival}:"
+                            f"{item.document_key.removeprefix('firebase:')}"
+                        ),
+                    )
+                    for item in previous_evidence
+                ]
+                runtime_evidence = list(
+                    {
+                        item.document_key + "\0" + item.title: item
+                        for item in [*runtime_evidence, *previous_evidence]
+                    }.values()
+                )
+            return runtime_evidence
+
+        # For a generic entity overview, live structured records are both more
+        # authoritative and dramatically cheaper than a broad SQLite/File
+        # Search scan.  This rule applies to every entity with an authorized
+        # Firebase projection; entities without one continue through the full
+        # knowledge pipeline.
+        if overview_subject and question_kind is QuestionKind.GENERAL:
+            try:
+                firebase_evidence = await load_firebase_evidence()
+                firebase_loaded = True
+            except Exception:
+                log.warning(
+                    "Structured entity overview lookup failed; using normal retrieval",
+                    exc_info=True,
+                )
+            fallback_runtime = [
+                item
+                for item in firebase_evidence
+                if can_answer_directly(question_kind, item.authority, item.status)
+            ]
+            fallback_answer = self._render_entity_overview_fallback(
+                overview_subject,
+                [],
+                fallback_runtime,
+            )
+            fallback_sources = self._firebase_sources(fallback_runtime, [])
+            if fallback_answer and fallback_sources:
+                confidence = evidence_confidence(
+                    answered=True,
+                    evidence_count=len(fallback_sources),
+                    source_family_count=citation_source_family_count(fallback_sources),
+                    candidate_count=len(fallback_runtime),
+                    locally_verified=True,
+                    extractive_fallback=True,
+                )
+                return RagAnswer(
+                    text=fallback_answer,
+                    citations=tuple(fallback_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                    confidence_score=confidence[0],
+                    confidence_label=confidence[1],
+                    confidence_detail=confidence[2],
+                )
         terms = self.rag_store.query_terms(question, glossary)
         # ``search_exact`` performs a bounded but potentially expensive SQLite
         # scan.  Running it on the Discord event loop can delay heartbeats and
@@ -3105,6 +3255,7 @@ class CorpusManager:
             if guild_id
             else []
         )
+        lexical_hits = _filter_retrieval_plumbing_hits(question, lexical_hits)
         if not allows_unreviewed_evidence(question_kind):
             lexical_hits = [
                 hit
@@ -3126,8 +3277,6 @@ class CorpusManager:
         schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
         schema_sources: list[str] = []
         schema_fallback_allowed = False
-        firebase_evidence: list[FirebaseEvidence] = []
-        overview_subject = entity_overview_subject(question)
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -3155,38 +3304,9 @@ class CorpusManager:
             if glossary_text:
                 evidence_context += self._untrusted_evidence("glossary", glossary_text)
 
-            firebase_evidence = await self.firebase_knowledge.evidence_for(
-                question,
-                question_kind,
-                festival=festival,
-            )
-            if overview_subject and festival is None:
-                # Broad entity questions often refer to a recurring festival
-                # project before the current year's event document exists.
-                # Read the immediately previous festival as well and keep the
-                # year label in every evidence body/citation.
-                previous_festival = max(1, current_festival() - 1)
-                previous_evidence = await self.firebase_knowledge.evidence_for(
-                    question,
-                    question_kind,
-                    festival=previous_festival,
-                )
-                previous_evidence = [
-                    replace(
-                        item,
-                        document_key=(
-                            f"firebase:{previous_festival}:"
-                            f"{item.document_key.removeprefix('firebase:')}"
-                        ),
-                    )
-                    for item in previous_evidence
-                ]
-                firebase_evidence = list(
-                    {
-                        item.document_key + "\0" + item.title: item
-                        for item in [*firebase_evidence, *previous_evidence]
-                    }.values()
-                )
+            if not firebase_loaded:
+                firebase_evidence = await load_firebase_evidence()
+                firebase_loaded = True
             if question_kind is QuestionKind.DATA_CONTRACT:
                 schema_contracts = self._parse_firebase_schema_contracts(
                     firebase_evidence,
@@ -3201,6 +3321,40 @@ class CorpusManager:
             else:
                 schema_contracts = ()
                 schema_sources = []
+            current_implementation_hits = [
+                hit
+                for hit in authoritative_hits
+                if hit.authority in CURRENT_IMPLEMENTATION_AUTHORITIES
+                and hit.status in CURRENT_STATUSES
+            ]
+            if (
+                schema_fallback_allowed
+                and schema_contracts
+                and schema_sources
+                and not current_implementation_hits
+            ):
+                # Public Firestore projection questions already have a fully
+                # validated, deterministic answer. Calling File Search first
+                # made every schema question wait on Gemini (and on depleted
+                # billing) without being able to improve the safe projection.
+                confidence = evidence_confidence(
+                    answered=True,
+                    evidence_count=len(schema_sources),
+                    source_family_count=citation_source_family_count(schema_sources),
+                    candidate_count=len(schema_contracts),
+                    locally_verified=True,
+                    extractive_fallback=True,
+                )
+                return RagAnswer(
+                    text=self._render_firebase_schema_contracts(schema_contracts),
+                    citations=tuple(schema_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                    confidence_score=confidence[0],
+                    confidence_label=confidence[1],
+                    confidence_detail=confidence[2],
+                )
             if comprehensive and self._is_firebase_only_exhaustive_request(question):
                 firebase_groups = self._parse_firebase_list_groups(firebase_evidence)
                 firebase_sources = self._firebase_sources(firebase_evidence, [])
@@ -3593,16 +3747,23 @@ class CorpusManager:
                         # projection below.  Do not let the generic raw-record
                         # fallback pre-empt it merely because File Search's
                         # claim mapping was incomplete.
+                        fallback_search_hits = _rank_extract_fallback_hits(
+                            search_hits,
+                            question_kind,
+                        )
                         fallback_answer = (
                             ""
                             if overview_subject and (firebase_evidence or search_hits)
                             else self._render_retrieved_evidence_fallback(
-                                search_hits,
+                                fallback_search_hits,
                                 firebase_evidence,
                                 recovery_semantic_evidence,
                             )
                         )
-                        fallback_sources = self._lexical_sources(search_hits, [])
+                        fallback_sources = self._lexical_sources(
+                            fallback_search_hits,
+                            [],
+                        )
                         fallback_sources.extend(
                             self._firebase_sources(firebase_evidence, fallback_sources)
                         )
@@ -3622,7 +3783,7 @@ class CorpusManager:
                         ):
                             answer = fallback_answer
                             sources = fallback_sources
-                            used_lexical_hits = search_hits
+                            used_lexical_hits = fallback_search_hits
                             has_answer = True
                             extractive_fallback = True
                         else:
@@ -3736,9 +3897,16 @@ class CorpusManager:
             if is_ai_unavailable_error(exc):
                 fallback_hits = [
                     hit
-                    for hit in authoritative_hits
-                    if can_answer_directly(question_kind, hit.authority, hit.status)
+                    for hit in lexical_hits
+                    if (
+                        can_answer_directly(question_kind, hit.authority, hit.status)
+                        or allows_unreviewed_evidence(question_kind)
+                    )
                 ]
+                fallback_hits = _rank_extract_fallback_hits(
+                    fallback_hits,
+                    question_kind,
+                )
                 fallback_runtime = [
                     item
                     for item in firebase_evidence
@@ -3784,6 +3952,19 @@ class CorpusManager:
                         confidence_label=confidence[1],
                         confidence_detail=confidence[2],
                     )
+                return RagAnswer(
+                    text=(
+                        "AI回答生成は現在利用できないため、許可された範囲を検索したものの、"
+                        "質問へ直接答えられる根拠を確認できなかったぽん。"
+                        "年度・期間・企画名などを加えると絞り込みやすいぽん。"
+                    ),
+                    festival=festival,
+                    no_answer=True,
+                    metadata_filter=metadata_filter,
+                    confidence_score=0,
+                    confidence_label="根拠なし",
+                    confidence_detail="AI利用不可時のローカル・Firebase検索で一致する根拠が0件",
+                )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,

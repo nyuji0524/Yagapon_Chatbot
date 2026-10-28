@@ -21,13 +21,26 @@ def main() -> None:
     probe.unlink()
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is missing")
+    full_sqlite_check = (
+        os.environ.get("YAGAPON_PREFLIGHT_FULL_SQLITE_CHECK", "false").lower()
+        == "true"
+    )
     for variable in ("YAGAPON_RAG_DB_PATH", "YAGAPON_OPERATIONS_DB_PATH", "YAGAPON_KEY_DB_PATH"):
         path = Path(os.environ.get(variable, "")) if os.environ.get(variable) else None
         if path and path.exists():
-            with sqlite3.connect(path) as connection:
-                result = connection.execute("PRAGMA quick_check").fetchone()[0]
-                if result != "ok":
-                    raise RuntimeError(f"SQLite integrity check failed: {path}: {result}")
+            if full_sqlite_check:
+                with sqlite3.connect(path) as connection:
+                    result = connection.execute("PRAGMA quick_check").fetchone()[0]
+                    if result != "ok":
+                        raise RuntimeError(f"SQLite integrity check failed: {path}: {result}")
+            else:
+                # Avoid taking a SQLite read lock while the old generation is
+                # still serving. The fixed header proves this is a SQLite file
+                # without scanning pages or competing with live writers.
+                with path.open("rb") as database:
+                    header = database.read(16)
+                if header != b"SQLite format 3\x00":
+                    raise RuntimeError(f"SQLite header is unreadable: {path}")
     print("preflight ok")
 
 

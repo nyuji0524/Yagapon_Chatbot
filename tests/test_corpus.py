@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -16,6 +17,8 @@ from bot.corpus import (
     DOCUMENT_MAX_MESSAGES,
     AnswerStatus,
     CorpusManager,
+    _filter_retrieval_plumbing_hits,
+    _rank_extract_fallback_hits,
     _select_lexical_context_hits,
     answer_declares_missing_knowledge,
     backfill_channel_concurrency,
@@ -57,7 +60,7 @@ def corpus_manager(tmp_path, monkeypatch):
         "YAGAPON_RAG_DB_PATH",
         str(tmp_path / "fixture-rag.sqlite3"),
     )
-    with patch("bot.corpus.genai.Client"):
+    with patch("bot.corpus.new_genai_client"):
         yield CorpusManager()
 
 
@@ -81,6 +84,58 @@ def lexical_hit(
         status=status,
         source_type=source_type,
     )
+
+
+def test_topic_query_excludes_rag_query_parser_as_evidence():
+    plumbing = lexical_hit(
+        "rag-store",
+        score=900,
+        authority="deployed_implementation",
+        source_type="source_code",
+        excerpt="新歓Web|外部|他局|要求",
+    )
+    plumbing = replace(
+        plumbing,
+        channel_name="nyuji0524/Yagapon_Chatbot:bot/rag_store.py",
+    )
+    discussion = lexical_hit(
+        "discord-request",
+        score=500,
+        authority="conversation",
+        source_type="discord_conversation",
+        excerpt="総務から新歓Webへの掲載依頼があった。",
+    )
+
+    assert _filter_retrieval_plumbing_hits(
+        "新歓webで外部や他局から要求があった内容をまとめて",
+        [plumbing, discussion],
+    ) == [discussion]
+    assert _filter_retrieval_plumbing_hits(
+        "やがぽんのRAG検索実装を教えて",
+        [plumbing, discussion],
+    ) == [plumbing, discussion]
+
+
+def test_history_extractive_fallback_puts_discussion_before_source_code():
+    implementation = lexical_hit(
+        "implementation",
+        score=900,
+        authority="repository_context",
+        source_type="source_code",
+    )
+    discussion = lexical_hit(
+        "discussion",
+        score=300,
+        authority="conversation",
+        source_type="discord_conversation",
+    )
+
+    ranked = _rank_extract_fallback_hits(
+        [implementation, discussion],
+        QuestionKind.HISTORY,
+    )
+
+    assert [hit.document_key for hit in ranked] == ["discussion", "implementation"]
 
 
 def test_history_context_reserves_narrative_sources_after_authority_ranking():
@@ -2210,6 +2265,8 @@ async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
     assert "Firebaseの企画データ" in result.text
     assert "AI鬼ごっこなどの体験企画" in result.text
     assert "fields:" not in result.text
+    corpus_manager.rag_store.search_exact.assert_not_called()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2249,7 +2306,8 @@ async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
     assert "ITラボ" in result.text
     assert "場所: 11-21" in result.text
     assert "fields:" not in result.text
-    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    corpus_manager.rag_store.search_exact.assert_not_called()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
 def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():
@@ -2912,7 +2970,7 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
     assert len(result.citations) == 1
     assert "やがぽん公開読み取り投影" in result.citations[0]
     assert "Firebase現在値" not in result.citations[0]
-    corpus_manager._client.aio.models.generate_content.assert_awaited()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2961,7 +3019,7 @@ async def test_ranking_data_contract_falls_back_to_collection_and_config_paths(
     assert "結果公開前の得票値を出さない" in result.text
     assert "99" not in result.text
     assert len(result.citations) == 2
-    corpus_manager._client.aio.models.generate_content.assert_awaited()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3878,6 +3936,15 @@ def test_grounding_coverage_threshold_is_configurable_and_safely_bounded(monkeyp
         assert corpus_module._bounded_float_env(
             "YAGAPON_TEST_GROUNDING_THRESHOLD", 0.8, 0.5, 1.0
         ) == pytest.approx(0.8)
+
+
+def test_default_grounding_threshold_keeps_paraphrases_without_weakening_facts():
+    assert corpus_module.RAG_GROUNDING_COVERAGE_THRESHOLD == pytest.approx(0.35)
+    assert CorpusManager._grounding_claims_covered("abcdefghij", ["abcd"]) is True
+    assert CorpusManager._grounding_claims_covered(
+        "申請フォームを開くぽん。受付は9時開始だぽん。",
+        ["申請フォームを開くぽん。"],
+    ) is False
 
 
 def test_grounding_coverage_allows_small_noncritical_gap(corpus_manager, monkeypatch):
@@ -5513,6 +5580,75 @@ async def test_calendar_window_is_applied_to_exact_search_and_prompt(
     config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
     assert "2025-10-01から2025-10-31" in config.system_instruction
     assert config.tools[0].file_search.top_k == 20
+
+
+@pytest.mark.asyncio
+async def test_history_uses_unreviewed_conversation_when_ai_is_unavailable(
+    corpus_manager,
+    monkeypatch,
+):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    monkeypatch.setattr(
+        corpus_module,
+        "calendar_window_from_query",
+        lambda *_args, **_kwargs: CalendarWindow(
+            starts_on=date(2025, 10, 1),
+            ends_on=date(2025, 10, 31),
+        ),
+    )
+    hit = lexical_hit(
+        "discord-history",
+        score=800,
+        authority="conversation",
+        source_type="discord_conversation",
+        excerpt="10月は新歓Webの要件整理と次年度の役職設計を進めた。",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[hit])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted("prepayment credits are depleted")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "去年の今頃って何してた？",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "新歓Webの要件整理" in result.text
+    assert result.lexical_keys == ("discord-history",)
+    assert result.confidence_label != "根拠なし"
+
+
+@pytest.mark.asyncio
+async def test_ai_unavailable_without_evidence_is_reported_as_no_evidence(
+    corpus_manager,
+):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["未知語"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted("prepayment credits are depleted")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "未知語について教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is True
+    assert "AI回答生成は現在利用できない" in result.text
+    assert "質問の処理中にエラー" not in result.text
+    assert result.confidence_label == "根拠なし"
 
 
 @pytest.mark.asyncio

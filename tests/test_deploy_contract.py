@@ -40,6 +40,15 @@ def test_deploy_uses_image_assets_instead_of_iap_scp():
     assert 'docker cp "$container_id:/opt/yagapon-deploy/." "$staging_dir/"' in bootstrap
 
 
+def test_deploy_retries_only_transient_ssh_failures():
+    workflow = (ROOT / ".github/workflows/deploy-gce.yml").read_text(encoding="utf-8")
+
+    assert "for attempt in 1 2 3" in workflow
+    assert 'if [[ "$deploy_status" != 255 ]]' in workflow
+    assert "Transient SSH/OS Login failure" in workflow
+    assert "sleep $((attempt * 10))" in workflow
+
+
 def test_remote_preflights_remain_fail_fast_and_report_timing():
     deploy = (ROOT / "deploy/remote-deploy.sh").read_text(encoding="utf-8")
 

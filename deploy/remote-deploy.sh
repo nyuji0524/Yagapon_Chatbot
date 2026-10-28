@@ -401,20 +401,34 @@ data_path=${data_path:-/var/lib/yagapon}
 install -d -o 10001 -g 10001 -m 0750 "$data_path/releases"
 recording_snapshot_marker="$data_path/releases/recording-retention-v1.json"
 preflight_started=$SECONDS
-timeout --signal=TERM --kill-after=30s 420s docker run --rm \
-  --env-file /etc/yagapon/yagapon.env \
-  --volume "$data_path:/data" \
-  --tmpfs /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096 \
-  --tmpfs /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096 \
-  --tmpfs /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096 \
-  --tmpfs /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096 \
-  "$image" python -m bot.preflight
-timeout --signal=TERM --kill-after=30s 420s docker compose \
-  --project-directory "$app_dir" \
-  --env-file "$deploy_env" \
-  run --rm --no-deps source-index-watch \
-  python -m source_index --preflight
-echo "Deploy timing: preflight=$((SECONDS - preflight_started))s"
+runtime_preflight=$(sed -n 's/^YAGAPON_DEPLOY_RUNTIME_PREFLIGHT=//p' "$deploy_env" | tail -1)
+runtime_preflight=${runtime_preflight:-false}
+if [[ "$runtime_preflight" == true ]]; then
+  # This maintenance-only path validates mutable production data and remote
+  # source credentials. CI already validates the complete runtime import graph,
+  # ffmpeg, Compose config, manifest and source-index behavior for every image.
+  # Repeating both cold Python startups on the 1 GiB VM added almost three
+  # minutes and starved the healthy Discord process before every release.
+  timeout --signal=TERM --kill-after=30s 420s docker run --rm \
+    --env-file /etc/yagapon/yagapon.env \
+    --volume "$data_path:/data" \
+    --tmpfs /data/recordings:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+    --tmpfs /data/transcripts:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+    --tmpfs /data/replays:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+    --tmpfs /data/voiceprints:rw,noexec,nosuid,nodev,mode=000,size=4096 \
+    "$image" python -m bot.preflight
+  timeout --signal=TERM --kill-after=30s 420s docker compose \
+    --project-directory "$app_dir" \
+    --env-file "$deploy_env" \
+    run --rm --no-deps source-index-watch \
+    python -m source_index --preflight
+  echo "Deploy timing: preflight=$((SECONDS - preflight_started))s"
+elif [[ "$runtime_preflight" == false ]]; then
+  echo "Deploy timing: preflight=0s (CI-validated image; runtime preflight disabled)"
+else
+  echo "YAGAPON_DEPLOY_RUNTIME_PREFLIGHT must be true or false" >&2
+  false
+fi
 
 # The image deployed before permanent retention removed terminal PCM during
 # cleanup. A failed first migration can therefore roll back to code that would
