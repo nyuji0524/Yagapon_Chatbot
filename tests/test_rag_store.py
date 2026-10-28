@@ -1,9 +1,11 @@
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
+import bot.rag_store as rag_store_module
 from bot.rag_store import RagStore
 
 
@@ -141,6 +143,75 @@ def test_trigram_index_tracks_document_replacements(tmp_path):
 
     assert store.search_exact(1, ["総務系申請"], festival=27) == []
     assert store.search_exact(1, ["新歓Web"], festival=27)
+
+
+def test_large_legacy_index_build_does_not_block_startup_or_search(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "rag.sqlite3"
+    seed = RagStore(path)
+    seed.upsert_document(
+        "documents/current",
+        "総務系申請の提出方法を説明する",
+        metadata(27),
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "DELETE FROM rag_store_meta WHERE key = 'documents_fts_version'"
+        )
+
+    rebuild_started = threading.Event()
+    release_rebuild = threading.Event()
+
+    def blocked_rebuild(_store):
+        rebuild_started.set()
+        release_rebuild.wait(5)
+
+    monkeypatch.setattr(
+        rag_store_module,
+        "DOCUMENTS_FTS_SYNC_REBUILD_MAX_CHARS",
+        0,
+    )
+    monkeypatch.setattr(RagStore, "_rebuild_fts_in_background", blocked_rebuild)
+
+    store = RagStore(path)
+    assert rebuild_started.wait(1)
+    assert store.wait_for_fts_index(0) is False
+    # An index that has not atomically committed must never hide documents.
+    assert store.search_exact(1, ["総務系申請"], festival=27)
+
+    release_rebuild.set()
+    store._fts_rebuild_thread.join(timeout=1)
+
+
+def test_large_legacy_index_build_commits_in_background(tmp_path, monkeypatch):
+    path = tmp_path / "rag.sqlite3"
+    seed = RagStore(path)
+    seed.upsert_document(
+        "documents/current",
+        "新歓Webの更新方法を説明する",
+        metadata(27),
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "DELETE FROM rag_store_meta WHERE key = 'documents_fts_version'"
+        )
+
+    monkeypatch.setattr(
+        rag_store_module,
+        "DOCUMENTS_FTS_SYNC_REBUILD_MAX_CHARS",
+        0,
+    )
+    store = RagStore(path)
+
+    assert store.wait_for_fts_index(5)
+    assert store.search_exact(1, ["新歓Web"], festival=27)
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM rag_store_meta WHERE key = 'documents_fts_version'"
+        ).fetchone()
+    assert version == ("1",)
 
 
 def test_upload_operation_survives_restart_and_completes_atomically(tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -30,6 +31,9 @@ SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_WRITE_ATTEMPTS = 3
 SQLITE_RETRY_BASE_SECONDS = 0.05
 DOCUMENTS_FTS_INDEX_VERSION = "1"
+DOCUMENTS_FTS_SYNC_REBUILD_MAX_CHARS = 1_000_000
+
+log = logging.getLogger("yagapon.rag_store")
 
 _LOW_INFORMATION_QUERY_TERMS = {
     "あった内容",
@@ -131,6 +135,8 @@ class RagStore:
     def __init__(self, path: Path | None = None):
         self.path = path or default_rag_db_path()
         self._lock = threading.RLock()
+        self._fts_ready = threading.Event()
+        self._fts_rebuild_thread: threading.Thread | None = None
         self._initialize()
 
     def _connect(self):
@@ -320,23 +326,71 @@ class RagStore:
                 "SELECT value FROM rag_store_meta WHERE key = 'documents_fts_version'"
             ).fetchone()
             if indexed_version is None or indexed_version["value"] != DOCUMENTS_FTS_INDEX_VERSION:
-                # Existing installations predate the FTS triggers. Rebuild the
-                # index exactly once; subsequent writes are maintained by the
-                # triggers above. This turns every RAG question from a full
-                # lower(body) scan into an indexed lookup.
-                connection.execute(
-                    "INSERT INTO documents_fts(documents_fts) VALUES ('rebuild')"
+                document_chars = int(
+                    connection.execute(
+                        "SELECT coalesce(sum(length(body)), 0) FROM documents"
+                    ).fetchone()[0]
                 )
-                connection.execute(
-                    """
-                    INSERT INTO rag_store_meta(key, value)
-                    VALUES ('documents_fts_version', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    (DOCUMENTS_FTS_INDEX_VERSION,),
-                )
+                if document_chars <= DOCUMENTS_FTS_SYNC_REBUILD_MAX_CHARS:
+                    self._rebuild_fts_in_connection(connection)
+                    return True
+                return False
+            return True
 
-        self._write(initialize)
+        ready = bool(self._write(initialize))
+        if ready:
+            self._fts_ready.set()
+            return
+
+        # A production corpus can contain tens of megabytes of long Discord,
+        # meeting, and repository-history documents. Building every trigram in
+        # the constructor held the HTTP readiness server off for several
+        # minutes and caused an otherwise healthy release to roll back. Keep
+        # the bot available and build the one-time index on a dedicated SQLite
+        # connection. Until it commits, readers retain the complete legacy
+        # substring scan rather than observing a partial index.
+        self._fts_rebuild_thread = threading.Thread(
+            target=self._rebuild_fts_in_background,
+            name="rag-fts-rebuild",
+            daemon=True,
+        )
+        self._fts_rebuild_thread.start()
+
+    @staticmethod
+    def _rebuild_fts_in_connection(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "INSERT INTO documents_fts(documents_fts) VALUES ('rebuild')"
+        )
+        connection.execute(
+            """
+            INSERT INTO rag_store_meta(key, value)
+            VALUES ('documents_fts_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (DOCUMENTS_FTS_INDEX_VERSION,),
+        )
+
+    def _rebuild_fts_in_background(self) -> None:
+        started = time.monotonic()
+        log.info("Building RAG trigram index in background")
+        try:
+            # Deliberately do not take self._lock here. WAL readers can keep
+            # serving the old documents table while this one-time transaction
+            # builds and atomically commits the complete index.
+            with self._connect() as connection:
+                self._rebuild_fts_in_connection(connection)
+        except Exception:
+            log.exception("Background RAG trigram index build failed")
+            return
+        self._fts_ready.set()
+        log.info(
+            "Background RAG trigram index ready elapsed_seconds=%.1f",
+            time.monotonic() - started,
+        )
+
+    def wait_for_fts_index(self, timeout: float | None = None) -> bool:
+        """Wait for the optional one-time index migration (mainly diagnostics/tests)."""
+        return self._fts_ready.wait(timeout)
 
     def upsert_document(
         self,
@@ -1127,7 +1181,7 @@ class RagStore:
         # shorter than three characters cannot be represented by the trigram
         # index; retain the legacy scan only when no indexed term is available.
         indexed_terms = [term for term in clean_terms if len(term) >= 3]
-        use_fts = bool(indexed_terms)
+        use_fts = bool(indexed_terms) and self._fts_ready.is_set()
         if use_fts:
             fts_query = " OR ".join(
                 f'"{term.replace(chr(34), chr(34) * 2)}"' for term in indexed_terms
