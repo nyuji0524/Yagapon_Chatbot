@@ -91,7 +91,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/recording_status` | 録音経過時間・受信音声量・トラック数と欠落警告を確認 |
 | `/leave` | VCから退出（議事録生成） |
 | `/recording list` | 再生可能な保存録音・文字起こしを確認（Bot所有者のみ） |
-| `/recording minutes <session_id> [quality]` | 保存録音から議事録を作成。既定は専用Transcribeの高精度、低コストも選択可能 |
+| `/recording minutes <session_id> [quality]` | 保存録音から議事録を作成。既定は低コスト、重要会議は専用Transcribeも選択可能 |
 | `/recording replay <session_id>` | `/leave` 相当の議事録生成を元データ非破壊で再実行 |
 | `/member sync` | サーバーメンバーをロールから自動登録 |
 | `/member roles` | 役職・担当・学年のロールを分類 |

@@ -2270,7 +2270,7 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
         "やがみさい",
         "矢実",
     ]
-    assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
+    assert generated.await_args.kwargs["model"] == "gemini-3.5-flash-lite"
     assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
     prompt = generated.await_args.kwargs["contents"]
     assert "## 今日の議題" in prompt
@@ -2377,10 +2377,10 @@ async def test_final_reprocess_replaces_incremental_transcript_only_after_full_s
 
 def test_final_transcription_quality_can_opt_into_dedicated_model(monkeypatch):
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
-    assert session._prefer_dedicated_final_transcription() is True
-
-    session.prefer_dedicated_transcription = False
     assert session._prefer_dedicated_final_transcription() is False
+
+    session.prefer_dedicated_transcription = True
+    assert session._prefer_dedicated_final_transcription() is True
 
     session.prefer_dedicated_transcription = None
     monkeypatch.setenv("YAGAPON_TRANSCRIPTION_QUALITY", "high_accuracy")

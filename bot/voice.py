@@ -232,9 +232,9 @@ class VoiceSession:
         self._reference_docs: list[str] = []  # VCテキストチャットに投稿された参考資料
         self._meeting_materials: list[dict[str, str]] = []
         self._voiceprint_paths: dict[str, str] | None = None
-        # Archived recordings default to the dedicated diarization endpoint.
-        # `/recording minutes` can explicitly opt one job into the cheaper
-        # multimodal fallback without changing the global model profile.
+        # Capture remains independent from transcription. Archived recordings
+        # default to the cost-efficient model; an operator can explicitly opt
+        # one important meeting into the dedicated diarization endpoint.
         self.prefer_dedicated_transcription: bool | None = None
         self._stt_workers: set[asyncio.Future] = set()
         self._stt_request_lock = asyncio.Lock()
@@ -2839,14 +2839,14 @@ class VoiceSession:
             return self.prefer_dedicated_transcription
         configured = os.environ.get(
             "YAGAPON_TRANSCRIPTION_QUALITY",
-            "high_accuracy",
+            "standard",
         ).strip().casefold()
         if configured not in {"standard", "high_accuracy"}:
             log.warning(
-                "Unknown YAGAPON_TRANSCRIPTION_QUALITY=%s; using high_accuracy",
+                "Unknown YAGAPON_TRANSCRIPTION_QUALITY=%s; using standard",
                 configured,
             )
-            return True
+            return False
         return configured == "high_accuracy"
 
     @staticmethod

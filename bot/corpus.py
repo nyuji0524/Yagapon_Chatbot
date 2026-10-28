@@ -4186,7 +4186,7 @@ class CorpusManager:
                         and not semantic_audit.invalid_supports
                         and not semantic_audit.rejected_supported_chunks
                     ):
-                        locally_verified_primary = self._verified_recovered_answer(
+                        locally_verified_primary = self._verified_retrieved_answer(
                             parsed.text,
                             selected_evidence_texts(
                                 used_lexical_hits,
@@ -6057,6 +6057,50 @@ class CorpusManager:
 
         return (
             "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
+            + "\n".join(f"- {claim}" for claim in verified)
+        )
+
+    @classmethod
+    def _verified_retrieved_answer(
+        cls,
+        answer_text: str,
+        evidence_texts: list[str],
+    ) -> str:
+        """Verify an original File Search answer without fuzzy paraphrase matching.
+
+        This path is used only when Gemini's ``grounding_supports`` omitted part
+        of the answer.  In that situation there is no provider assertion that a
+        paraphrase is supported, so accepting it via low-overlap bigrams can
+        reverse a predicate (for example ``開始`` into ``終了``).  Keep only
+        complete normalized claims that occur in one already-authorized chunk;
+        ordinary paraphrases continue through the independently generated and
+        audited recovery path below.
+        """
+        evidence = [
+            cls._normalized_grounding_text(value)
+            for value in evidence_texts
+            if cls._normalized_grounding_text(value)
+        ]
+        claims = cls._grounding_claims(answer_text)
+        if not evidence or not claims:
+            return ""
+
+        def exactly_supported(claim: str) -> bool:
+            normalized = cls._normalized_grounding_claim(claim)
+            return bool(normalized) and any(normalized in source for source in evidence)
+
+        if all(exactly_supported(claim) for claim in claims):
+            return answer_text
+
+        verified = [
+            claim
+            for claim in claims
+            if cls._recovered_claim_is_standalone(claim) and exactly_supported(claim)
+        ]
+        if not verified:
+            return ""
+        return (
+            "根拠本文と直接対応を確認できた内容だけを示すぽん。\n\n"
             + "\n".join(f"- {claim}" for claim in verified)
         )
 

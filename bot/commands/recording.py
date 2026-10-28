@@ -34,17 +34,17 @@ def register(bot):
     @discord.option("session_id", description="/leave で表示されたセッションID")
     @discord.option(
         "quality",
-        description="通常は高精度。費用を抑える場合だけ標準を選択",
+        description="通常は低コスト。重要会議だけ高精度を選択",
         choices=[
-            discord.OptionChoice("高精度（話者分離・推奨）", "high_accuracy"),
-            discord.OptionChoice("標準（低コスト）", "standard"),
+            discord.OptionChoice("標準（低コスト・推奨）", "standard"),
+            discord.OptionChoice("高精度（話者分離・高コスト）", "high_accuracy"),
         ],
-        default="high_accuracy",
+        default="standard",
     )
     async def recording_minutes(
         ctx: discord.ApplicationContext,
         session_id: str,
-        quality: str = "high_accuracy",
+        quality: str = "standard",
     ):
         if not await require_guild_admin(ctx):
             return
@@ -126,17 +126,17 @@ def register(bot):
         "quality",
         description="再文字起こし時の品質（既存文字起こし再利用時は課金なし）",
         choices=[
-            discord.OptionChoice("高精度（話者分離・推奨）", "high_accuracy"),
-            discord.OptionChoice("標準（低コスト）", "standard"),
+            discord.OptionChoice("標準（低コスト・推奨）", "standard"),
+            discord.OptionChoice("高精度（話者分離・高コスト）", "high_accuracy"),
         ],
-        default="high_accuracy",
+        default="standard",
     )
     async def recording_replay(
         ctx: discord.ApplicationContext,
         session_id: str,
         retranscribe: bool = False,
         review_only: bool = False,
-        quality: str = "high_accuracy",
+        quality: str = "standard",
     ):
         if not await _require_operator(ctx, bot):
             return

@@ -331,7 +331,7 @@ async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus
     assert result.no_answer is True
     call = corpus_manager._client.aio.models.generate_content.await_args
     assert call.kwargs["config"].tools is not None
-    assert call.kwargs["model"] == "gemini-3.8-flash"
+    assert call.kwargs["model"] == "gemini-3.5-flash-lite"
     assert call.kwargs["config"].thinking_config.thinking_level == "LOW"
     assert "implementation" in call.kwargs["contents"]
     assert "on-site-report" in call.kwargs["contents"]
@@ -5794,6 +5794,25 @@ async def test_incomplete_support_mapping_keeps_locally_verified_primary_answer(
         "[確定仕様: 28th開催案内 [28th / active]](https://knowledge.example/28-guide)",
     )
     assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
+def test_retrieved_answer_verifier_rejects_predicate_reversal():
+    assert CorpusManager._verified_retrieved_answer(
+        "受付は9時終了です。",
+        ["会場は西館です。受付は9時開始です。"],
+    ) == ""
+
+
+def test_retrieved_answer_verifier_keeps_only_exact_supported_claims():
+    answer = "会場は西館です。\n受付は9時終了です。"
+
+    verified = CorpusManager._verified_retrieved_answer(
+        answer,
+        ["会場は西館です。受付は9時開始です。"],
+    )
+
+    assert "会場は西館です。" in verified
+    assert "9時終了" not in verified
 
 
 def test_response_sources_allow_only_trusted_timeless_knowledge(corpus_manager):

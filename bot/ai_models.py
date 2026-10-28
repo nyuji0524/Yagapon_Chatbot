@@ -11,14 +11,13 @@ from google.genai import types
 
 _PROFILE_MODELS = {
     "budget": {
-        # Retrieval answers and final minutes are user-facing records, and both
-        # must follow long, fail-closed evidence contracts. Lite models caused
-        # valid retrievals to be discarded and omitted meeting decisions in
-        # production. Keep the budget profile for high-volume/background work,
-        # but retain a quality floor for these two critical paths.
-        "rag": "gemini-3.8-flash",
+        # Keep the normal profile below the monthly operating ceiling. Retrieval
+        # quality is enforced by deterministic evidence selection/auditing;
+        # operators can promote only the critical jobs through the model
+        # overrides or switch the whole service to the quality profile.
+        "rag": "gemini-3.5-flash-lite",
         "response": "gemini-3.1-flash-lite",
-        "minutes": "gemini-3.8-flash",
+        "minutes": "gemini-3.5-flash-lite",
         "fast": "gemini-3.1-flash-lite",
         "curation": "gemini-3.1-flash-lite",
         "knowledge": "gemini-3.1-flash-lite",
