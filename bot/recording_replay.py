@@ -250,7 +250,7 @@ class ReplayJob:
     target_guild_id: int
     target_channel_id: int
     retranscribe: bool
-    transcription_quality: str = "standard"
+    transcription_quality: str = "high_accuracy"
     review_only: bool = False
     status: str = "queued"
     stage: str = "queued"
@@ -743,7 +743,7 @@ class RecordingReplayManager:
         artifact: RecordingArtifact,
         target_channel,
         retranscribe: bool,
-        transcription_quality: str = "standard",
+        transcription_quality: str = "high_accuracy",
         review_only: bool = False,
         review_actor=None,
     ) -> ReplayJob:

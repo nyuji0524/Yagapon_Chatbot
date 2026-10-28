@@ -11,12 +11,14 @@ from google.genai import types
 
 _PROFILE_MODELS = {
     "budget": {
-        # RAG must synthesize several evidence families and follow the
-        # evidence-key contract.  3.5 keeps the low-cost tier while improving
-        # instruction following for compound questions.
-        "rag": "gemini-3.5-flash-lite",
+        # Retrieval answers and final minutes are user-facing records, and both
+        # must follow long, fail-closed evidence contracts. Lite models caused
+        # valid retrievals to be discarded and omitted meeting decisions in
+        # production. Keep the budget profile for high-volume/background work,
+        # but retain a quality floor for these two critical paths.
+        "rag": "gemini-3.8-flash",
         "response": "gemini-3.1-flash-lite",
-        "minutes": "gemini-3.5-flash-lite",
+        "minutes": "gemini-3.8-flash",
         "fast": "gemini-3.1-flash-lite",
         "curation": "gemini-3.1-flash-lite",
         "knowledge": "gemini-3.1-flash-lite",

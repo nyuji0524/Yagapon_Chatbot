@@ -5,16 +5,17 @@ File Searchが返す文書量、thinking token、音声の長さによって変�
 
 ## 採用構成
 
-通常運用は `YAGAPON_AI_PROFILE=budget` とし、Gemini API全体を月1,000円以内へ
-近づける。予算確保後は `YAGAPON_AI_PROFILE=quality` へ変更して再起動するだけで、
-RAG・音声回答・議事録を3.8中心へ戻せる。個別の `YAGAPON_*_MODEL` が設定されて
-いる場合は、profileよりその値を優先する。
+通常運用は `YAGAPON_AI_PROFILE=budget` とし、回数上限とバックグラウンド処理の
+Liteモデルで費用を抑える。RAG回答と最終議事録は、Liteモデルでは根拠契約や議題の
+保持に失敗した本番実績があるため、budgetでも3.8を品質下限とする。個別の
+`YAGAPON_*_MODEL` が設定されている場合は、profileよりその値を優先する。
 
 | 処理 | budget | quality | コスト制御 |
 | --- | --- | --- | --- |
-| RAG回答、音声会話 | `gemini-3.1-flash-lite` | `gemini-3.8-flash` | 通常2,048、総括6,144 tokenまで。budgetはthinkingをminimalに固定 |
-| 議事録の整形 | `gemini-3.5-flash-lite` | `gemini-3.8-flash` | 文字起こしとは独立して変更可能 |
-| 音声文字起こし | 通常 `gemini-3.5-flash-lite` / 高精度指定時 `gemini-3.5-transcribe` | 同左 | `/recording minutes` ごとに選択。通常は低コスト |
+| RAG回答 | `gemini-3.8-flash` | `gemini-3.8-flash` | 通常2,048、総括6,144 tokenまで。thinkingは`low` |
+| 音声会話 | `gemini-3.1-flash-lite` | `gemini-3.8-flash` | 短いリアルタイム応答 |
+| 議事録の整形 | `gemini-3.8-flash` | `gemini-3.8-flash` | 文字起こしとは独立して変更可能 |
+| 音声文字起こし | 通常 `gemini-3.5-transcribe` / 失敗時 `gemini-3.5-flash-lite` | 同左 | `/recording minutes` ごとに低コストへ変更可能 |
 | Knowledge整理 | `gemini-3.1-flash-lite` | `gemini-3.5-flash-lite` | Batch API、1回2判定・1生成まで |
 | GitHub AIレビュー | `gemini-3.1-flash-lite` | workflow inputで`gemini-3.8-flash` | 既定thinking `low` |
 | TTS | `edge-tts` | 同左 | Gemini API課金なし |
@@ -53,10 +54,10 @@ RAG・音声回答・議事録を3.8中心へ戻せる。個別の `YAGAPON_*_MO
 - 話者分離が失敗した場合は通常文字起こしへ一度だけ切り替える。
 - budget profileでも検索・Firebase・引用監査は維持し、モデルだけに事実判定を
   任せない。品質低下は定期RAG評価で検知する。
-- 予算が付いたらprofileをqualityへ変更する。コード変更や再ビルドは不要。
-- 録音はモデルを呼ばず常時保存し、`/recording minutes` の既定は `標準（低コスト）`。
-  重要会議だけ `高精度` を明示すると、話者分離対応の専用Transcribeを使用する。
-  全ジョブを一時的に高精度へ寄せる場合は `YAGAPON_TRANSCRIPTION_QUALITY=high_accuracy` とする。
+- 音声会話やKnowledge生成も品質優先にする場合はprofileをqualityへ変更する。
+- 録音はモデルを呼ばず常時保存し、`/recording minutes` の既定は `高精度`。
+  話者分離対応の専用Transcribeが429または不完全応答になった場合だけFlash-Liteへ
+  自動フォールバックする。費用を優先するジョブは `標準（低コスト）` を明示する。
 
 ## 価格資料
 

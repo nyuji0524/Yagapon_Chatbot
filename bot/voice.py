@@ -232,10 +232,9 @@ class VoiceSession:
         self._reference_docs: list[str] = []  # VCテキストチャットに投稿された参考資料
         self._meeting_materials: list[dict[str, str]] = []
         self._voiceprint_paths: dict[str, str] | None = None
-        # Archived recordings default to the cost-efficient multimodal model.
-        # `/recording minutes` can explicitly opt one job into the dedicated
-        # diarization endpoint without changing or redeploying the global model
-        # profile.
+        # Archived recordings default to the dedicated diarization endpoint.
+        # `/recording minutes` can explicitly opt one job into the cheaper
+        # multimodal fallback without changing the global model profile.
         self.prefer_dedicated_transcription: bool | None = None
         self._stt_workers: set[asyncio.Future] = set()
         self._stt_request_lock = asyncio.Lock()
@@ -1005,8 +1004,41 @@ class VoiceSession:
                         self._sink_workers_inflight - 1,
                     )
 
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def run_and_publish() -> None:
+            try:
+                outcome = (True, run())
+            except BaseException as exc:
+                outcome = (False, exc)
+
+            def publish() -> None:
+                if future.done():
+                    return
+                succeeded, value = outcome
+                if succeeded:
+                    future.set_result(value)
+                else:
+                    future.set_exception(value)
+
+            try:
+                loop.call_soon_threadsafe(publish)
+            except RuntimeError:
+                # The event loop is already closed during a hard shutdown.
+                # ``run`` still decremented the in-flight counter.
+                return
+
+        # Recording durability must not queue behind unrelated SQLite, Drive,
+        # or model work in asyncio's shared executor. Production recordings
+        # were marked ``durable-checkpoint-failed`` after spending the entire
+        # timeout waiting for a free pool slot even though fsync had not run.
         try:
-            future = asyncio.get_running_loop().run_in_executor(None, run)
+            threading.Thread(
+                target=run_and_publish,
+                name=f"yagapon-sink-{self.guild_id}",
+                daemon=True,
+            ).start()
         except BaseException:
             with self._sink_worker_lock:
                 self._sink_workers_inflight = max(
@@ -2807,14 +2839,14 @@ class VoiceSession:
             return self.prefer_dedicated_transcription
         configured = os.environ.get(
             "YAGAPON_TRANSCRIPTION_QUALITY",
-            "standard",
+            "high_accuracy",
         ).strip().casefold()
         if configured not in {"standard", "high_accuracy"}:
             log.warning(
-                "Unknown YAGAPON_TRANSCRIPTION_QUALITY=%s; using standard",
+                "Unknown YAGAPON_TRANSCRIPTION_QUALITY=%s; using high_accuracy",
                 configured,
             )
-            return False
+            return True
         return configured == "high_accuracy"
 
     @staticmethod

@@ -806,6 +806,21 @@ async def test_periodic_durability_checkpoint_fsyncs_while_recording(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_recording_sink_io_does_not_wait_for_shared_executor(monkeypatch):
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    loop = asyncio.get_running_loop()
+    shared_executor = Mock(side_effect=AssertionError("shared executor used"))
+    monkeypatch.setattr(loop, "run_in_executor", shared_executor)
+    operation = Mock(return_value="durable")
+
+    result = await session._run_sink_worker(operation, timeout=1)
+
+    assert result == "durable"
+    operation.assert_called_once_with()
+    shared_executor.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_periodic_durability_failure_warns_and_blocks_publication(monkeypatch):
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
     session.is_active = True
@@ -2255,7 +2270,7 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
         "やがみさい",
         "矢実",
     ]
-    assert generated.await_args.kwargs["model"] == "gemini-3.5-flash-lite"
+    assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
     assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
     prompt = generated.await_args.kwargs["contents"]
     assert "## 今日の議題" in prompt
@@ -2354,7 +2369,7 @@ async def test_final_reprocess_replaces_incremental_transcript_only_after_full_s
     assert session._last_audio_len == {10: 5, 20: 6}
     assert session._transcription_failed is False
     assert all(
-        call.kwargs["prefer_dedicated"] is False and call.kwargs["diarization"] is True
+        call.kwargs["prefer_dedicated"] is True and call.kwargs["diarization"] is True
         for call in session._transcribe_audio.await_args_list
     )
     assert session.recording_sink.checkpoint.call_args.kwargs["final_reprocess_strategy"] == "legacy-per-user"
@@ -2362,10 +2377,10 @@ async def test_final_reprocess_replaces_incremental_transcript_only_after_full_s
 
 def test_final_transcription_quality_can_opt_into_dedicated_model(monkeypatch):
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
-    assert session._prefer_dedicated_final_transcription() is False
-
-    session.prefer_dedicated_transcription = True
     assert session._prefer_dedicated_final_transcription() is True
+
+    session.prefer_dedicated_transcription = False
+    assert session._prefer_dedicated_final_transcription() is False
 
     session.prefer_dedicated_transcription = None
     monkeypatch.setenv("YAGAPON_TRANSCRIPTION_QUALITY", "high_accuracy")

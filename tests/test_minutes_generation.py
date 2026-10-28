@@ -217,6 +217,31 @@ async def test_minutes_rejects_empty_success_response():
 
 
 @pytest.mark.asyncio
+async def test_minutes_retries_transient_provider_failure(monkeypatch):
+    class TransientError(RuntimeError):
+        status_code = 503
+
+    generated = AsyncMock(
+        side_effect=[
+            TransientError("temporarily unavailable"),
+            SimpleNamespace(
+                text="# 復旧した議事録",
+                candidates=[SimpleNamespace(finish_reason="STOP")],
+            ),
+        ]
+    )
+    client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=generated))
+    )
+    monkeypatch.setattr("bot.ai_retry.asyncio.sleep", AsyncMock())
+
+    result = await generate_minutes(client, "Speaker 1: 会議を開始します")
+
+    assert result == "# 復旧した議事録"
+    assert generated.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_reference_material_is_chunked_without_losing_tail(monkeypatch):
     generated = AsyncMock(
         side_effect=[

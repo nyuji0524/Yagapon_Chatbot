@@ -34,9 +34,9 @@ def test_default_models(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
     assert ai_profile() == "budget"
-    assert rag_model() == "gemini-3.5-flash-lite"
+    assert rag_model() == "gemini-3.8-flash"
     assert response_model() == "gemini-3.1-flash-lite"
-    assert minutes_model() == "gemini-3.5-flash-lite"
+    assert minutes_model() == "gemini-3.8-flash"
     assert fast_model() == "gemini-3.1-flash-lite"
     assert knowledge_curation_model() == "gemini-3.1-flash-lite"
     assert knowledge_model() == "gemini-3.1-flash-lite"

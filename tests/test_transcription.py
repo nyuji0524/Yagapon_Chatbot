@@ -109,6 +109,42 @@ async def test_dedicated_transcription_falls_back_on_incomplete_interaction_stat
 
 
 @pytest.mark.asyncio
+async def test_dedicated_transcription_retries_transient_provider_failure(monkeypatch):
+    class TransientError(RuntimeError):
+        status_code = 503
+
+    uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
+    create = AsyncMock(
+        side_effect=[
+            TransientError("temporarily unavailable"),
+            SimpleNamespace(output_text="Speaker 1: 復旧しました"),
+        ]
+    )
+    client = SimpleNamespace(
+        aio=SimpleNamespace(
+            files=SimpleNamespace(
+                upload=AsyncMock(return_value=uploaded),
+                delete=AsyncMock(),
+            ),
+            interactions=SimpleNamespace(create=create),
+        )
+    )
+    monkeypatch.setattr("bot.ai_retry.asyncio.sleep", AsyncMock())
+
+    result = await transcribe_audio(
+        client,
+        b"RIFFtest",
+        mime_type="audio/wav",
+        display_name="meeting.wav",
+        diarization=True,
+    )
+
+    assert result == "Speaker 1: 復旧しました"
+    assert create.await_count == 2
+    client.aio.files.delete.assert_awaited_once_with(name="files/test")
+
+
+@pytest.mark.asyncio
 async def test_dedicated_transcription_falls_back_on_empty_stop_for_non_silent_audio():
     uploaded = SimpleNamespace(name="files/test", uri="gs://test/audio.wav")
     client = SimpleNamespace(
