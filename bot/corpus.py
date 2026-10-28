@@ -492,6 +492,18 @@ def requires_comprehensive_answer(question: str) -> bool:
         return True
     if len(normalized) >= 180 or len(re.findall(r"[?？]", normalized)) >= 2:
         return True
+    # A compact Japanese request can still contain several required outputs.
+    # Treat explicit middle-dot lists as comprehensive even when the sentence
+    # is short (``概要・担当局・状態`` or ``タイトル・日時・本文・リンク``).
+    # This prevents the single-record entity fast path from answering only the
+    # first item and silently dropping the rest.
+    if normalized.count("・") >= 2:
+        return True
+    if normalized.count("、") >= 2 and re.search(
+        r"(?:それぞれ|各(?:項目|通知|企画)|分けて|視点|順に|あわせて|合わせて)",
+        normalized,
+    ):
+        return True
     nonempty_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
     listed_lines = sum(
         bool(re.match(r"(?:[-*・]|\d+[.)、]|[（(]?\d+[）)])\s*", line))
@@ -501,6 +513,40 @@ def requires_comprehensive_answer(question: str) -> bool:
         listed_lines >= 2
         or sum(bool(re.search(r"(?:教えて|知りたい|まとめ|確認)", line)) for line in nonempty_lines) >= 2
     )
+
+
+def answer_requirement_labels(question: str) -> tuple[str, ...]:
+    """Extract explicit middle-dot deliverables without interpreting evidence.
+
+    Japanese product questions commonly compress a checklist into one noun
+    phrase (``概要・担当局・状態``).  The labels are used only to remind the
+    model what the user asked for; they never become evidence or facts.
+    """
+    candidates: list[tuple[str, ...]] = []
+    for sentence in re.split(r"[。！？!?\n]", question):
+        if sentence.count("・") < 2:
+            continue
+        parts = [part.strip(" 　、,:：") for part in sentence.split("・")]
+        cleaned: list[str] = []
+        for index, part in enumerate(parts):
+            if index == 0:
+                part = re.split(r"(?:について|に関して|としての)", part)[-1]
+                part = re.sub(r"^.*(?:各通知の|各項目の)", "", part)
+            if index == len(parts) - 1:
+                part = re.sub(
+                    r"(?:まで)?(?:を|について)?(?:一覧にして|一覧で|教えて|説明して|"
+                    r"まとめて|示して|出して)(?:ください|下さい|ほしい|欲しい)?$",
+                    "",
+                    part,
+                )
+            part = part.strip(" 　、,:：")
+            if 1 <= len(part) <= 80:
+                cleaned.append(part)
+        if len(cleaned) >= 3:
+            candidates.append(tuple(dict.fromkeys(cleaned)))
+    if not candidates:
+        return ()
+    return max(candidates, key=len)[:10]
 
 
 def requires_comprehensive_recovery(
@@ -1434,6 +1480,16 @@ def trusted_capability_response(question: str) -> str | None:
     ):
         return _TRUSTED_CAPABILITY_RESPONSE
     if re.fullmatch(bot_subject + identity_intent + r"[。！？!?、,.]*", normalized):
+        return _TRUSTED_CAPABILITY_RESPONSE
+    # A user may explicitly ask for a general self-introduction and explain
+    # that it should not depend on the knowledge base.  Match the stable intent
+    # anywhere in that compound sentence, while preserving the exclusions
+    # above for domain questions such as ``整理券では何ができる``.
+    if (
+        re.search(bot_subject, normalized)
+        and "自己紹介" in normalized
+        and not re.search(r"(?:ではなく|とは違う|別の(?:企画|担当者|意見))", normalized)
+    ):
         return _TRUSTED_CAPABILITY_RESPONSE
     return None
 
@@ -3294,7 +3350,11 @@ class CorpusManager:
         # Search scan.  This rule applies to every entity with an authorized
         # Firebase projection; entities without one continue through the full
         # knowledge pipeline.
-        if overview_subject and question_kind is QuestionKind.GENERAL:
+        if (
+            overview_subject
+            and question_kind is QuestionKind.GENERAL
+            and not requires_comprehensive_answer(question)
+        ):
             try:
                 firebase_evidence = await load_firebase_evidence()
                 firebase_loaded = True
@@ -3385,6 +3445,19 @@ class CorpusManager:
                 f"\n【今回の担当論点】{question_kind.value} の論点だけに回答するぽん。"
                 "質問中の別論点は、別の権限境界で処理されるので混ぜないぽん。"
             )
+            requirement_labels = answer_requirement_labels(question)
+            if requirement_labels:
+                rendered_requirements = " / ".join(
+                    f"{index}. {label}"
+                    for index, label in enumerate(requirement_labels, start=1)
+                )
+                system += (
+                    "\n【利用者が明示した回答項目】"
+                    + rendered_requirements
+                    + "。この担当論点に該当する各項目を個別に答えるぽん。"
+                    "根拠がない項目は黙って落とさず、その項目だけ確認できないと明示し、"
+                    "確認できた別項目は残すぽん。"
+                )
             if festival is not None:
                 system += f"\n\n【対象年度】{festival}thの記録だけを根拠に回答するぽん。"
             if target_date is not None:
@@ -3469,7 +3542,10 @@ class CorpusManager:
                         locally_verified=True,
                     )
                     return RagAnswer(
-                        text=self._render_firebase_list_groups(firebase_groups),
+                        text=self._render_firebase_list_groups(
+                            firebase_groups,
+                            question=question,
+                        ),
                         citations=tuple(firebase_sources),
                         festival=festival,
                         no_answer=False,
@@ -4420,14 +4496,29 @@ class CorpusManager:
         seen: set[str] = set()
 
         def add(label: str, value: str) -> None:
-            if len(lines) >= 6:
+            if len(lines) >= 4:
                 return
-            normalized = re.sub(r"\s+", " ", value).strip()
+            # Raw repository-history chunks contain transport metadata and
+            # unified diffs.  They are useful to retrieval, but echoing them
+            # verbatim is not a human-readable fallback and can swamp the
+            # actual question.  Keep only the document prose before the diff.
+            cleaned = re.sub(
+                r"(?m)^\s*(?:commit_sha|committed_at|commit_url|commit_message|"
+                r"changed_path|change_status|patch_state)\s*:[^\n]*(?:\n|$)",
+                " ",
+                str(value),
+                flags=re.IGNORECASE,
+            )
+            cleaned = re.split(r"(?:\bdiff\s*:|@@\s+-\d)", cleaned, maxsplit=1)[0]
+            normalized = re.sub(r"\s+", " ", cleaned).strip()
             if not normalized or normalized.casefold() in seen:
                 return
+            normalized = re.sub(r"\s+", " ", normalized).strip(" ,-")
+            if not normalized:
+                return
             seen.add(normalized.casefold())
-            if len(normalized) > 650:
-                normalized = normalized[:649].rstrip() + "…"
+            if len(normalized) > 280:
+                normalized = normalized[:279].rstrip() + "…"
             lines.append(f"- **{label}** — {normalized}")
 
         for item in runtime_evidence[:4]:
@@ -4446,8 +4537,8 @@ class CorpusManager:
         if not lines:
             return ""
         return (
-            "要約文と根拠の対応を十分に確認できなかったため、"
-            "検索で確認できた記録をそのまま示すぽん。\n\n"
+            "要約文と根拠の対応を十分に確認できなかったため、安全に統合した"
+            "確定回答ではなく、質問に近い候補記録だけを短く示すぽん。\n\n"
             + "\n".join(lines)
         )
 
@@ -4867,6 +4958,8 @@ class CorpusManager:
     def _render_firebase_list_groups(
         cls,
         groups: tuple[_FirebaseListGroup, ...],
+        *,
+        question: str = "",
     ) -> str:
         """Render complete Firebase lists without an LLM or an output-token cap.
 
@@ -4877,6 +4970,15 @@ class CorpusManager:
         their useful summary fields vary by schema.
         """
         lines: list[str] = []
+        include_notification_body = bool(
+            re.search(
+                r"(?:本文|内容|詳細|省略(?:せず|しない|なし)|全文)",
+                question,
+            )
+        )
+        include_notification_action = bool(
+            re.search(r"(?:リンク|URL|アクション|遷移先)", question, re.IGNORECASE)
+        )
         if len(groups) > 1:
             lines.extend(("# Firebase現在値一覧", ""))
         for group_index, group in enumerate(groups):
@@ -4939,6 +5041,7 @@ class CorpusManager:
                         f"{suffix}"
                     )
                     action = item.fields.get("action")
+                    action_rendered = False
                     if isinstance(action, dict):
                         label = action.get("label")
                         url = action.get("url")
@@ -4948,6 +5051,17 @@ class CorpusManager:
                                 "   - アクション: "
                                 + cls._escape_untrusted_markdown(" — ".join(action_parts))
                             )
+                            action_rendered = True
+                    if include_notification_action and not action_rendered:
+                        lines.append("   - アクション: なし")
+                    if include_notification_body:
+                        body = item.fields.get("body")
+                        if isinstance(body, str) and body.strip():
+                            rendered_body = cls._escape_untrusted_markdown(body.strip())
+                            rendered_body = rendered_body.replace("\n", "\n     ")
+                            lines.append(f"   - 本文: {rendered_body}")
+                        else:
+                            lines.append("   - 本文: （未設定）")
                     continue
                 lines.append(
                     f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}"
@@ -4965,12 +5079,13 @@ class CorpusManager:
                     )
                 lines.append("")
             if group.source_type == "notifications":
-                lines.extend(
-                    (
-                        "",
-                        "一覧では本文を省略しているぽん。通知名を指定すれば本文も確認できるぽん。",
+                lines.append("")
+                if include_notification_body:
+                    lines.append("指定に合わせて、取得できた本文も掲載したぽん。")
+                else:
+                    lines.append(
+                        "一覧では本文を省略しているぽん。通知名を指定すれば本文も確認できるぽん。"
                     )
-                )
             if group_index + 1 < len(groups):
                 lines.append("---")
                 lines.append("")

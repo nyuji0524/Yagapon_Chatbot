@@ -21,6 +21,7 @@ from bot.corpus import (
     _rank_extract_fallback_hits,
     _select_lexical_context_hits,
     answer_declares_missing_knowledge,
+    answer_requirement_labels,
     backfill_channel_concurrency,
     calculate_incremental_after,
     calculate_resumable_incremental_after,
@@ -2130,6 +2131,8 @@ def test_all_missing_headed_legacy_answer_is_not_treated_as_supported():
         "権限は誰にありますか？過去に何が問題になりましたか？",
         "10/9の会議内容では、IT局に関するフィードバックや指摘は何が出た？",
         "権限を教えて\n過去の障害も教えて",
+        "ITラボについて、企画としての概要・担当局・27thで確認できる状態を教えて",
+        "公開通知のタイトル・公開日時・カテゴリ・本文・リンクを出して",
         "長い質問 " + "詳細 " * 50,
     ],
 )
@@ -2139,6 +2142,23 @@ def test_requires_comprehensive_answer_detects_broad_requests(question):
 
 def test_requires_comprehensive_answer_keeps_single_fact_query_normal():
     assert requires_comprehensive_answer("11-21の読み方は？") is False
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "ITラボについて、企画としての概要・担当局・27thで確認できる状態を教えて",
+            ("概要", "担当局", "27thで確認できる状態"),
+        ),
+        (
+            "各通知のタイトル・公開日時・カテゴリ・本文・リンクまで一覧にして",
+            ("タイトル", "公開日時", "カテゴリ", "本文", "リンク"),
+        ),
+    ],
+)
+def test_answer_requirement_labels_extracts_explicit_deliverables(question, expected):
+    assert answer_requirement_labels(question) == expected
 
 
 def test_comprehensive_answer_retries_when_only_one_of_multiple_sources_was_used():
@@ -2241,6 +2261,26 @@ def test_retrieved_evidence_fallback_preserves_useful_search_results():
     assert "来場者向け" in rendered
     assert "fields:" not in rendered
     assert rendered.index("来場者向け") < rendered.index("ITラボでは技術展示")
+
+
+def test_retrieved_evidence_fallback_removes_metadata_without_erasing_prose():
+    semantic = corpus_module._GroundingEvidence(
+        key="semantic:0",
+        citation="[履歴](https://example.com/history)",
+        text=(
+            "commit_sha: abc123\n"
+            "changed_path: docs/plan.md\n"
+            "企画の実施理由と決定経緯はこの段落に残っている。\n"
+            "diff:\n@@ -1,2 +1,3 @@\n+秘密ではない変更"
+        ),
+    )
+
+    rendered = CorpusManager._render_retrieved_evidence_fallback([], [], (semantic,))
+
+    assert "企画の実施理由と決定経緯" in rendered
+    assert "commit_sha" not in rendered
+    assert "changed_path" not in rendered
+    assert "@@" not in rendered
 
 
 @pytest.mark.asyncio
@@ -2681,6 +2721,7 @@ def test_invisible_combining_character_cannot_hide_a_credential_request():
         "何ができる？",
         "おしゃべりやがぽんは何ができるの？",
         "このBotの機能一覧",
+        "あなたは何ができるボットですか。ナレッジがなくても答えられる一般的な自己紹介をしてください",
     ],
 )
 def test_trusted_capability_response_recognizes_only_bot_self_help(question):
@@ -2702,6 +2743,8 @@ def test_trusted_capability_response_does_not_capture_domain_question():
     assert trusted_capability_response("君とは別の担当者について教えて") is None
     assert trusted_capability_response("このBotの機能ではなく整理券について教えて") is None
     assert trusted_capability_response("おしゃべりやがぽんの使い方を教えて") is not None
+    assert trusted_capability_response("やがぽんのRAGでは何ができる？") is None
+    assert trusted_capability_response("やがぽんで鍵管理は何ができる？") is None
 
 
 @pytest.mark.asyncio
@@ -2865,6 +2908,42 @@ async def test_exhaustive_firebase_list_renders_every_item_without_a_model(corpu
     assert result.text.index("公開通知 1") < result.text.index("公開通知 23")
     assert len(result.citations) == 1
     assert result.query_id == "firebase-list-query"
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_detailed_exhaustive_notification_request_keeps_requested_body(corpus_manager):
+    evidence = exhaustive_notification_evidence(3)
+    evidence[0] = replace(
+        evidence[0],
+        body=evidence[0].body.replace("通知本文 1", "1行目\\n2行目"),
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=evidence)
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=AssertionError("detailed Firebase lists must remain deterministic")
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager.rag_store.record_query = Mock(return_value="firebase-detailed-list")
+
+    result = await corpus_manager.query_with_trace(
+        "27thに発行された公開通知を省略せず、総件数と各通知のタイトル・"
+        "公開日時・カテゴリ・本文・リンクまで一覧にして",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "27th 公開通知一覧（3件）" in result.text
+    for index in range(1, 4):
+        assert f"公開通知 {index}" in result.text
+        if index > 1:
+            assert f"通知本文 {index}" in result.text
+        assert f"2026-09-{index:02d}T00:00:00Z" in result.text
+        assert "important" in result.text
+    assert "本文: 1行目\n     2行目" in result.text
+    assert result.text.count("アクション: なし") == 3
+    assert "指定に合わせて、取得できた本文も掲載" in result.text
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
 

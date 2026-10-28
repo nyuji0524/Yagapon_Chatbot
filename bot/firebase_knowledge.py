@@ -323,7 +323,13 @@ def is_explicit_firebase_list_query(question: str) -> bool:
     if _FIREBASE_LIST_EXCLUDED_INTENT.search(question):
         return False
     noun_then_list = re.search(
-        rf"(?:{_FIREBASE_LIST_NOUN}).{{0,12}}(?:一覧|全件|列挙|すべて|全て|全部)",
+        # Users often specify the desired columns between the entity and the
+        # list verb (for example ``公開通知を省略せず、総件数と各通知のタイトル・
+        # 公開日時・本文・リンクまで一覧にして``).  Keep the match inside one
+        # sentence, but do not impose an arbitrary 12-character gap that sends
+        # those exhaustive requests through lossy free-form generation.
+        rf"(?:{_FIREBASE_LIST_NOUN})[^。！？!?\n]{{0,160}}"
+        rf"(?:一覧|全件|列挙|すべて|全て|全部)",
         question,
         re.IGNORECASE,
     )
