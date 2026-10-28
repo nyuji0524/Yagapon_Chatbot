@@ -295,6 +295,7 @@ _RUNTIME_SUMMARY_FIELDS = (
     ("shortDescription", "概要"),
     ("longDescription", "詳細"),
     ("body", "内容"),
+    ("organizationName", "団体名"),
     ("organizationDescription", "団体"),
     ("place", "場所"),
     ("placeRoom", "教室"),
@@ -3833,7 +3834,11 @@ class CorpusManager:
         fields, with conservative size bounds; the citation still links to the
         original record.
         """
-        fields_match = re.search(r"^fields:\s*(\{.*\})$", item.body, re.MULTILINE)
+        fields_match = re.search(
+            r"^fields:\s*(\{.*\})\s*$",
+            item.body,
+            re.MULTILINE,
+        )
         if not fields_match:
             return None
         try:

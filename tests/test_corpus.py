@@ -2128,9 +2128,11 @@ def test_retrieved_evidence_fallback_preserves_useful_search_results():
 
 @pytest.mark.asyncio
 async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
+    started = threading.Event()
     release = threading.Event()
 
     def blocking_search(*_args, **_kwargs):
+        started.set()
         assert release.wait(timeout=1)
         return []
 
@@ -2144,9 +2146,13 @@ async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
             candidates=[],
         )
     )
-    timer = threading.Timer(0.25, release.set)
-    timer.start()
-    started = time.monotonic()
+    loop_progressed = asyncio.Event()
+
+    async def observe_started_search():
+        assert await asyncio.to_thread(started.wait, 1)
+        loop_progressed.set()
+
+    observer = asyncio.create_task(observe_started_search())
     task = asyncio.create_task(
         corpus_manager.query_with_trace(
             "ITラボについて教えて",
@@ -2155,12 +2161,12 @@ async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
         )
     )
     try:
-        await asyncio.sleep(0.02)
-        assert time.monotonic() - started < 0.15
+        await asyncio.wait_for(loop_progressed.wait(), timeout=0.5)
+        release.set()
         await task
     finally:
         release.set()
-        timer.cancel()
+        await observer
 
 
 @pytest.mark.asyncio
