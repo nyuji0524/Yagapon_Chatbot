@@ -2161,6 +2161,15 @@ def test_answer_requirement_labels_extracts_explicit_deliverables(question, expe
     assert answer_requirement_labels(question) == expected
 
 
+def test_system_instruction_preserves_rich_structure_without_forcing_it_on_simple_answers():
+    instruction = corpus_module.SYSTEM_INSTRUCTION
+    assert "単純な質問は結論を先に1〜3段落で簡潔に" in instruction
+    assert "`### 1. 見出し`" in instruction
+    assert "定義・全体像" in instruction
+    assert "すべての章を機械的に作らず" in instruction
+    assert "検索結果の断片、メタデータ、diffをそのまま回答として貼らず" in instruction
+
+
 def test_comprehensive_answer_retries_when_only_one_of_multiple_sources_was_used():
     assert requires_comprehensive_recovery(
         comprehensive=True,

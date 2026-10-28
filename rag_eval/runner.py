@@ -19,6 +19,7 @@ class EvalCase(BaseModel):
     min_sources: int = Field(default=0, ge=0)
     expected_source_any: list[str] = Field(default_factory=list)
     max_latency_ms: int | None = Field(default=None, ge=1)
+    min_numbered_headings: int = Field(default=0, ge=0)
     category: str = "general"
     semantic_judge: bool = True
 
@@ -76,6 +77,13 @@ def evaluate_answer(case: EvalCase, response: dict, judgment: dict | None = None
         content_passed += len(matched_all)
         if len(matched_all) != len(case.expected_all):
             failures.append("expected_all")
+    if case.min_numbered_headings > 0:
+        content_checks += 1
+        numbered_headings = re.findall(r"(?m)^#{2,4}\s+\d+[.．]\s*\S", answer)
+        if len(numbered_headings) >= case.min_numbered_headings:
+            content_passed += 1
+        else:
+            failures.append("numbered_headings")
     matched_forbidden = [value for value in case.forbidden if forbidden_is_asserted(answer, value)]
     matched_forbidden.extend(
         value for value in case.forbidden_exact if value.casefold() in folded_answer
