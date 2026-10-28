@@ -3014,6 +3014,7 @@ def test_invisible_combining_character_cannot_hide_a_credential_request():
     [
         "あなたについて教えて",
         "何ができる？",
+        "あなたは何ができるBotですか？",
         "おしゃべりやがぽんは何ができるの？",
         "このBotの機能一覧",
         "あなたは何ができるBotですか？得意なことと、できないことを教えてください。",
