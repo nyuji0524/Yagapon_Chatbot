@@ -2168,6 +2168,12 @@ def test_answer_requirement_labels_extracts_explicit_deliverables(question, expe
     assert answer_requirement_labels(question) == expected
 
 
+def test_answer_requirement_labels_removes_trailing_particle_before_evidence_clause():
+    assert answer_requirement_labels(
+        "企画内容、担当、運用上の課題、関連システムを、根拠付きで詳しく教えてください"
+    ) == ("企画内容", "担当", "運用上の課題", "関連システム")
+
+
 def test_system_instruction_preserves_rich_structure_without_forcing_it_on_simple_answers():
     instruction = corpus_module.SYSTEM_INSTRUCTION
     assert "単純な質問は結論を先に1〜3段落で簡潔に" in instruction
@@ -2271,7 +2277,7 @@ def test_retrieved_evidence_fallback_preserves_useful_search_results():
         (semantic,),
     )
 
-    assert "根拠の対応を十分に確認できなかった" in rendered
+    assert "### 関連して確認できた記録" in rendered
     assert "場所: 11-21" in rendered
     assert "ITラボでは技術展示" in rendered
     assert "来場者向け" in rendered
@@ -3881,6 +3887,83 @@ async def test_explicit_evidence_keys_prevent_unused_lexical_citations(corpus_ma
     config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
     assert config.max_output_tokens == 2048
     assert config.tools is None
+
+
+@pytest.mark.asyncio
+async def test_supported_recovery_survives_when_small_model_omits_evidence_keys(
+    corpus_manager,
+):
+    used = SimpleNamespace(
+        document_key="knowledge:used",
+        channel_name="総務系申請仕様",
+        festival=None,
+        source_url="https://knowledge.example/somu",
+        excerpt="総務系申請は、机椅子や電力などをやがサポから提出する手続きです。",
+        score=500,
+        authority="curated",
+        status="verified",
+        source_type="knowledge_repository",
+        access_scope="guild",
+        channel_id=None,
+    )
+    used_second = SimpleNamespace(
+        document_key="knowledge:used-second",
+        channel_name="総務系申請の確認方法",
+        festival=None,
+        source_url="https://knowledge.example/somu-confirmation",
+        excerpt="提出後の内容は、やがサポの申請確認画面から確認できます。",
+        score=450,
+        authority="curated",
+        status="verified",
+        source_type="knowledge_repository",
+        access_scope="guild",
+        channel_id=None,
+    )
+    unrelated = SimpleNamespace(
+        document_key="knowledge:other",
+        channel_name="無関係資料",
+        festival=None,
+        source_url="https://knowledge.example/other",
+        excerpt="ステージ企画の転換時間は5分です。",
+        score=200,
+        authority="curated",
+        status="verified",
+        source_type="knowledge_repository",
+        access_scope="guild",
+        channel_id=None,
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["総務系申請"])
+    corpus_manager.rag_store.search_exact = Mock(
+        return_value=[used, used_second, unrelated]
+    )
+    corpus_manager.rag_store.record_query = Mock(return_value="query-missing-keys")
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text=(
+                "### 1. 概要\n"
+                "総務系申請は、机椅子や電力などをやがサポから提出する手続きです。\n"
+                "### 2. 提出後の確認\n"
+                "提出後の内容は、やがサポの申請確認画面から確認できます。\n"
+                "[[YAGAPON_ANSWER_STATUS:complete]]"
+            ),
+            usage_metadata=None,
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "総務系申請の概要、種類、提出方法を詳しく教えてください",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "総務系申請" in result.text
+    assert result.citations == (
+        "[確定仕様: #総務系申請仕様](https://knowledge.example/somu)",
+        "[確定仕様: #総務系申請の確認方法](https://knowledge.example/somu-confirmation)",
+    )
+    assert "無関係資料" not in " ".join(result.citations)
 
 
 @pytest.mark.asyncio

@@ -559,6 +559,10 @@ def answer_requirement_labels(question: str) -> tuple[str, ...]:
                 )
                 part = re.sub(r"(?:を|について)?(?:詳しく|詳細に)$", "", part)
             part = part.strip(" 　、,:：")
+            # Particles often attach to the last requested noun phrase before
+            # another comma (``関連システムを、根拠付きで…``). They are not
+            # part of the user-facing requirement label.
+            part = re.sub(r"(?:について|を)$", "", part).strip()
             if 1 <= len(part) <= 80:
                 cleaned.append(part)
         if len(cleaned) >= 3:
@@ -3793,7 +3797,7 @@ class CorpusManager:
                 hits: list[LexicalHit],
                 parsed: ParsedModelAnswer,
             ) -> list[LexicalHit]:
-                if not parsed.explicit_status:
+                if not parsed.explicit_status or not parsed.evidence_keys:
                     return hits
                 selected = set(parsed.evidence_keys)
                 return [
@@ -3823,7 +3827,7 @@ class CorpusManager:
                         or schema_fallback_allowed
                     )
                 ]
-                if not parsed.explicit_status:
+                if not parsed.explicit_status or not parsed.evidence_keys:
                     return evidence
                 selected = set(parsed.evidence_keys)
                 return [
@@ -3836,7 +3840,7 @@ class CorpusManager:
                 evidence: tuple[_GroundingEvidence, ...],
                 parsed: ParsedModelAnswer,
             ) -> list[_GroundingEvidence]:
-                if not parsed.explicit_status:
+                if not parsed.explicit_status or not parsed.evidence_keys:
                     return list(evidence)
                 selected = set(parsed.evidence_keys)
                 return [item for item in evidence if item.key in selected]
@@ -3951,6 +3955,53 @@ class CorpusManager:
                     has_answer = False
                     sources = []
                     return False
+
+                # Evidence-key control lines improve citation precision, but
+                # small/cheap models occasionally omit them even while
+                # producing a supported answer. All candidates here already
+                # passed local ACL and authority checks, so infer the actually
+                # supporting records from the verified claims instead of
+                # discarding the answer or exposing a raw-record dump.
+                verified_claims = self._grounding_claims(verified_text)
+
+                def supports_any_claim(value: str) -> bool:
+                    return any(
+                        self._recovered_claims_supported(claim, [value])
+                        for claim in verified_claims
+                    )
+
+                inferred_hits = [
+                    hit
+                    for hit in recovered_hits
+                    if supports_any_claim(selected_evidence_texts([hit], [], [])[0])
+                ]
+                inferred_firebase = [
+                    item
+                    for item in used_firebase
+                    if supports_any_claim(selected_evidence_texts([], [item], [])[0])
+                ]
+                inferred_semantic = [
+                    item
+                    for item in used_semantic
+                    if supports_any_claim(item.text)
+                ]
+                if inferred_hits or inferred_firebase or inferred_semantic:
+                    recovered_hits = inferred_hits
+                    used_firebase = inferred_firebase
+                    used_semantic = inferred_semantic
+                    recovered_sources = list(
+                        dict.fromkeys(
+                            item.citation
+                            for item in used_semantic
+                            if item.citation
+                        )
+                    )
+                    recovered_sources.extend(
+                        self._lexical_sources(recovered_hits, recovered_sources)
+                    )
+                    recovered_sources.extend(
+                        self._firebase_sources(used_firebase, recovered_sources)
+                    )
 
                 if verified_text != recovered.text:
                     log.info(
@@ -4580,12 +4631,14 @@ class CorpusManager:
             "runtime:<document_key>、semantic:<index> の提示形式どおりに列挙した"
             " [[YAGAPON_EVIDENCE_KEYS:key1,key2]] 行を回答状態行の直前へ必ず出すぽん。"
             "使っていないkeyや提示されていないkeyは列挙しないぽん。"
-            "要約は1つの箇条書きにつき1つの根拠だけから作り、複数の記録を"
+            "要約は1つの段落または箇条書きにつき1つの根拠だけから作り、複数の記録を"
             "1つの事実へ合成しないぽん。人名・数値・日付・状態・役職は根拠の"
             "表記をそのまま使うぽん。根拠に明記されていない件数や『主に』などの"
-            "評価を付け足さないぽん。各箇条書きは、主語と内容が分かる1つの完全な"
-            "文章にするぽん。見出し、発言者名だけの行、『内容:』だけを分離した行、"
-            "回答する・まとめるという前置きは出力しないぽん。"
+            "評価を付け足さないぽん。各文は、主語と内容が分かる1つの完全な"
+            "文章にするぽん。複数の回答項目が明示されている場合は、その項目名を"
+            "`### 番号. 項目名`の見出しにして、確認できない項目もその旨を明記するぽん。"
+            "発言者名だけの行、『内容:』だけを分離した行、回答する・まとめるという"
+            "前置きや、根拠検証の内部方針は出力しないぽん。"
             "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
             "提示されていない事実は補完しないぽん。"
@@ -4799,11 +4852,7 @@ class CorpusManager:
 
         if not lines:
             return ""
-        return (
-            "要約文と根拠の対応を十分に確認できなかったため、安全に統合した"
-            "確定回答ではなく、質問に近い候補記録だけを短く示すぽん。\n\n"
-            + "\n".join(lines)
-        )
+        return "### 関連して確認できた記録\n" + "\n".join(lines)
 
     @staticmethod
     def _is_firebase_only_exhaustive_request(question: str) -> bool:
