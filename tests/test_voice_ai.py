@@ -2255,7 +2255,7 @@ async def test_uploaded_minutes_separates_transcription_and_formatting(monkeypat
         "やがみさい",
         "矢実",
     ]
-    assert generated.await_args.kwargs["model"] == "gemini-3.8-flash"
+    assert generated.await_args.kwargs["model"] == "gemini-3.5-flash-lite"
     assert "Speaker 1: 提案します" in generated.await_args.kwargs["contents"]
     prompt = generated.await_args.kwargs["contents"]
     assert "## 今日の議題" in prompt

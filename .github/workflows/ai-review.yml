@@ -7,12 +7,12 @@ on:
         description: Gemini model ID
         required: false
         type: string
-        default: gemini-3.8-flash
+        default: gemini-3.1-flash-lite
       thinking_level:
         description: Gemini thinking level
         required: false
         type: string
-        default: medium
+        default: low
       reviewer_ref:
         description: Reviewed Yagapon_Chatbot ref containing the reviewer
         required: false

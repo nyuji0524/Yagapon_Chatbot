@@ -9,41 +9,85 @@ from typing import Any
 
 from google.genai import types
 
+_PROFILE_MODELS = {
+    "budget": {
+        "rag": "gemini-3.1-flash-lite",
+        "response": "gemini-3.1-flash-lite",
+        "minutes": "gemini-3.5-flash-lite",
+        "fast": "gemini-3.1-flash-lite",
+        "curation": "gemini-3.1-flash-lite",
+        "knowledge": "gemini-3.1-flash-lite",
+        "transcribe": "gemini-3.5-transcribe",
+        "transcribe_fallback": "gemini-3.1-flash-lite",
+        "audio": "gemini-3.1-flash-lite",
+    },
+    "quality": {
+        "rag": "gemini-3.8-flash",
+        "response": "gemini-3.8-flash",
+        "minutes": "gemini-3.8-flash",
+        "fast": "gemini-3.1-flash-lite",
+        "curation": "gemini-3.5-flash-lite",
+        "knowledge": "gemini-3.8-flash",
+        "transcribe": "gemini-3.5-transcribe",
+        "transcribe_fallback": "gemini-3.5-flash-lite",
+        "audio": "gemini-3.5-flash-lite",
+    },
+}
+
+
+def ai_profile() -> str:
+    profile = os.environ.get("YAGAPON_AI_PROFILE", "budget").strip().lower()
+    if profile not in _PROFILE_MODELS:
+        raise ValueError("YAGAPON_AI_PROFILE must be 'budget' or 'quality'")
+    return profile
+
+
+def _configured_model(variable: str, purpose: str) -> str:
+    override = os.environ.get(variable, "").strip()
+    if override:
+        return override
+    return _PROFILE_MODELS[ai_profile()][purpose]
+
 
 def rag_model() -> str:
-    return os.environ.get("YAGAPON_RAG_MODEL", "gemini-3.5-flash-lite")
+    return _configured_model("YAGAPON_RAG_MODEL", "rag")
 
 
 def response_model() -> str:
-    return os.environ.get("YAGAPON_RESPONSE_MODEL", "gemini-3.5-flash-lite")
+    return _configured_model("YAGAPON_RESPONSE_MODEL", "response")
 
 
 def minutes_model() -> str:
     """Long-form final minutes keep a separately tunable quality model."""
-    return os.environ.get("YAGAPON_MINUTES_MODEL", "gemini-3.8-flash")
+    return _configured_model("YAGAPON_MINUTES_MODEL", "minutes")
 
 
 def fast_model() -> str:
-    return os.environ.get("YAGAPON_FAST_MODEL", "gemini-3.1-flash-lite")
+    return _configured_model("YAGAPON_FAST_MODEL", "fast")
 
 
 def knowledge_curation_model() -> str:
     """Non-urgent Knowledge curation model submitted through the Batch API."""
-    return os.environ.get("YAGAPON_KNOWLEDGE_CURATION_MODEL", "gemini-3.5-flash-lite")
+    return _configured_model("YAGAPON_KNOWLEDGE_CURATION_MODEL", "curation")
+
+
+def knowledge_model() -> str:
+    """One-off Drive and Discord source structuring model."""
+    return _configured_model("YAGAPON_KNOWLEDGE_MODEL", "knowledge")
 
 
 def transcribe_model() -> str:
-    return os.environ.get("YAGAPON_TRANSCRIBE_MODEL", "gemini-3.5-transcribe")
+    return _configured_model("YAGAPON_TRANSCRIBE_MODEL", "transcribe")
 
 
 def transcribe_fallback_model() -> str:
     """Dedicated STT quota exhaustion and realtime voice fallback."""
-    return os.environ.get("YAGAPON_TRANSCRIBE_FALLBACK_MODEL", "gemini-3.5-flash-lite")
+    return _configured_model("YAGAPON_TRANSCRIBE_FALLBACK_MODEL", "transcribe_fallback")
 
 
 def audio_analysis_model() -> str:
     """音声サンプルの音質確認専用。本人識別の権限根拠には使用しない。"""
-    return os.environ.get("YAGAPON_AUDIO_MODEL", "gemini-3.5-flash-lite")
+    return _configured_model("YAGAPON_AUDIO_MODEL", "audio")
 
 
 def generation_config(model: str, *, thinking_level: str | None = "low", **kwargs):
