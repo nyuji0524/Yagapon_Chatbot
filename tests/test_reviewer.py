@@ -2,6 +2,8 @@ from reviewer.review import (
     Finding,
     ReviewResult,
     added_lines_from_patch,
+    bounded_excerpt,
+    build_review_context,
     build_review_payload,
     review_instruction,
     review_request,
@@ -28,6 +30,54 @@ def test_findings_are_limited_to_changed_lines_and_deduplicated():
     result = validate_findings([good, good, invalid_line], {"app.py": {11, 12}})
 
     assert result == [good]
+
+
+def test_bounded_excerpt_marks_omission_and_keeps_file_tail():
+    content = "A" * 50 + "SECTION-5.2\nSECTION-6\nSECTION-7"
+
+    excerpt = bounded_excerpt(content, 40, "head file migration.md")
+
+    assert excerpt.startswith("A" * 20)
+    assert "[REVIEW INPUT OMITTED:" in excerpt
+    assert "Do not treat either excerpt boundary as the file boundary" in excerpt
+    assert excerpt.endswith("SECTION-6\nSECTION-7")
+
+
+class _FakeGitHub:
+    def __init__(self, head_content: str):
+        self.head_content = head_content
+
+    def get_file_text(self, repository: str, path: str, ref: str):
+        if path == "docs/ai/ai-dev-migration.md" and ref == "head":
+            return self.head_content
+        return None
+
+
+def test_review_context_does_not_present_a_truncated_patch_as_file_end():
+    head_content = "\n".join(["# migration", *(f"line {i}" for i in range(2, 295)), "## 7"])
+    pull_request = {
+        "number": 65,
+        "title": "migration",
+        "body": "sections 5.2 through 7 are included",
+        "head": {"sha": "head"},
+        "base": {"sha": "base"},
+    }
+    files = [
+        {
+            "filename": "docs/ai/ai-dev-migration.md",
+            "status": "added",
+            "additions": 295,
+            "deletions": 0,
+            "patch": "@@ -0,0 +1,2 @@\n+# migration\n+line 2 cut off",
+        }
+    ]
+
+    context, _ = build_review_context(_FakeGitHub(head_content), "owner/repo", pull_request, files)
+
+    assert "GitHub PR patch (the API may truncate this field" in context
+    assert "Head file content" in context
+    assert context.endswith("## 7")
+    assert "Never infer that a file\nends" in context
 
 
 def test_review_payload_contains_inline_comment_and_idempotency_marker():
@@ -78,6 +128,19 @@ def test_non_blocking_review_is_lgtm_and_uses_imho_nits_labels():
     assert "✅ LGTM" in payload["body"]
     assert "[🟦imho]" in payload["comments"][0]["body"]
     assert "[🟩nits]" in payload["comments"][1]["body"]
+
+
+def test_review_payload_discards_unsubstantiated_summary_when_no_findings_survive():
+    result = ReviewResult(
+        summary="重大な欠落があるためマージできませんぽん。",
+        findings=[],
+    )
+
+    payload = build_review_payload(result, "abc123", "<!-- marker -->")
+
+    assert "重大な欠落" not in payload["body"]
+    assert "有効なインライン指摘はありませんでしたぽん。" in payload["body"]
+    assert "✅ LGTM" in payload["body"]
 
 
 def test_review_payload_does_not_duplicate_model_supplied_severity_labels():

@@ -14,7 +14,7 @@ from reviewer.github import GitHubClient
 
 MAX_FILES = 100
 MAX_CONTEXT_CHARS = 160_000
-MAX_FILE_CHARS = 16_000
+MAX_FILE_CHARS = 48_000
 MAX_INLINE_COMMENTS = 30
 MAX_NITS = 10
 
@@ -29,6 +29,13 @@ to an added line in the provided diff. Omit claims whose evidence is insufficien
 a finding. Respond in clear, friendly, concise Japanese and naturally end explanatory sentences with
 「ぽん」。Severity meanings: critical=release blocker, major=must fix before merge, minor=imho and
 non-blocking, trivial=nits and non-blocking."""
+
+INCOMPLETE_INPUT_INSTRUCTION = """The review context can contain excerpts. A marker beginning with
+"[REVIEW INPUT OMITTED" means that the omitted text exists but was not supplied. GitHub's Pull Request
+patch field can also be truncated by the API even when no marker is present. Never infer that a file
+ends, a section is missing, or content was deleted merely because an excerpt or patch stops. Such a
+claim requires the complete head file content or other affirmative evidence. If the available input is
+insufficient, omit the finding."""
 
 KNOWLEDGE_STRUCTURE_INSTRUCTION = """You review Pull Requests to the YagamiFes IT Knowledge
 repository. Review the repository structure and knowledge contract, not whether meeting statements or
@@ -61,6 +68,21 @@ class Finding(BaseModel):
 class ReviewResult(BaseModel):
     summary: str = Field(min_length=1, max_length=2000)
     findings: list[Finding] = Field(default_factory=list)
+
+
+def bounded_excerpt(text: str, limit: int, label: str) -> str:
+    """Return complete text when possible, otherwise a clearly marked head/tail excerpt."""
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    head_chars = limit // 2
+    tail_chars = limit - head_chars
+    marker = (
+        f"\n\n[REVIEW INPUT OMITTED: {label}; {omitted} of {len(text)} characters "
+        "are not shown. The text below resumes near the end. Do not treat either excerpt "
+        "boundary as the file boundary.]\n\n"
+    )
+    return f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
 
 
 def added_lines_from_patch(patch: str) -> set[int]:
@@ -104,13 +126,17 @@ def build_review_context(
         f"Base SHA: {base_sha}",
         f"Head SHA: {head_sha}",
         f"Description:\n{pull_request.get('body') or '(none)'}",
+        f"Review input rules:\n{INCOMPLETE_INPUT_INSTRUCTION}",
     ]
 
     # Repository instructions must come from the trusted base revision.
     for path in ("AGENTS.md", "README.md"):
         content = github.get_file_text(repository, path, base_sha)
         if content:
-            sections.append(f"Trusted base file: {path}\n{content[:MAX_FILE_CHARS]}")
+            sections.append(
+                f"Trusted base file: {path}\n"
+                f"{bounded_excerpt(content, MAX_FILE_CHARS, f'trusted base file {path}')}"
+            )
 
     for file in files[:MAX_FILES]:
         path = file["filename"]
@@ -119,17 +145,23 @@ def build_review_context(
         section = (
             f"Changed file: {path}\n"
             f"Status: {file.get('status')} +{file.get('additions', 0)} -{file.get('deletions', 0)}\n"
-            f"Patch:\n{patch or '(patch unavailable; do not create inline findings)'}"
+            "GitHub PR patch (the API may truncate this field; never use where it stops as "
+            "evidence that the head file stops):\n"
+            f"{patch or '(patch unavailable; do not create inline findings)'}"
         )
         if file.get("status") != "removed":
             content = github.get_file_text(repository, path, head_sha)
             if content:
-                section += f"\nHead file content:\n{content[:MAX_FILE_CHARS]}"
+                section += (
+                    f"\nHead file content ({len(content)} characters; authoritative for file "
+                    "contents only when no omission marker appears):\n"
+                    f"{bounded_excerpt(content, MAX_FILE_CHARS, f'head file {path}')}"
+                )
         sections.append(section)
 
     context = "\n\n---\n\n".join(sections)
     if len(context) > MAX_CONTEXT_CHARS:
-        context = context[:MAX_CONTEXT_CHARS] + "\n\n[context truncated]"
+        context = bounded_excerpt(context, MAX_CONTEXT_CHARS, "combined review context")
     return context, allowed_lines
 
 
@@ -157,8 +189,8 @@ def validate_findings(
 
 def review_instruction(profile: str) -> str:
     if profile == "knowledge-structure":
-        return KNOWLEDGE_STRUCTURE_INSTRUCTION
-    return SYSTEM_INSTRUCTION
+        return f"{KNOWLEDGE_STRUCTURE_INSTRUCTION}\n\n{INCOMPLETE_INPUT_INSTRUCTION}"
+    return f"{SYSTEM_INSTRUCTION}\n\n{INCOMPLETE_INPUT_INSTRUCTION}"
 
 
 def review_request(profile: str, context: str) -> str:
@@ -239,9 +271,14 @@ def build_review_payload(result: ReviewResult, head_sha: str, marker: str) -> di
         if has_blocker
         else "✅ LGTM — ブロッキングな問題は見つからなかったぽん。"
     )
+    summary = (
+        result.summary
+        if result.findings
+        else "変更内容を確認し、有効なインライン指摘はありませんでしたぽん。"
+    )
     body = (
         "## おしゃべりやがぽん AIレビュー\n\n"
-        f"### [tl;dr]\n\n{_ensure_pon(result.summary)}\n\n"
+        f"### [tl;dr]\n\n{_ensure_pon(summary)}\n\n"
         f"### 判定\n\n{verdict}\n\n"
         f"### 指摘内訳\n\n{count_text}\n\n"
         "AIの指摘は誤る可能性があるぽん。マージ判断では人間のレビューとテスト結果を優先してほしいぽん。\n\n"
