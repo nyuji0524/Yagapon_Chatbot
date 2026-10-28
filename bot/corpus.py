@@ -3084,6 +3084,87 @@ class CorpusManager:
             allowed_channel_ids=allowed_channel_ids,
             allow_unrestricted_conversations=allow_unrestricted_conversations,
         )
+        overview_subject = entity_overview_subject(question)
+        firebase_evidence: list[FirebaseEvidence] = []
+        firebase_loaded = False
+
+        async def load_firebase_evidence() -> list[FirebaseEvidence]:
+            runtime_evidence = await self.firebase_knowledge.evidence_for(
+                question,
+                question_kind,
+                festival=festival,
+            )
+            if overview_subject and festival is None:
+                # Broad entity questions often refer to a recurring festival
+                # project before the current year's event document exists.
+                previous_festival = max(1, current_festival() - 1)
+                previous_evidence = await self.firebase_knowledge.evidence_for(
+                    question,
+                    question_kind,
+                    festival=previous_festival,
+                )
+                previous_evidence = [
+                    replace(
+                        item,
+                        document_key=(
+                            f"firebase:{previous_festival}:"
+                            f"{item.document_key.removeprefix('firebase:')}"
+                        ),
+                    )
+                    for item in previous_evidence
+                ]
+                runtime_evidence = list(
+                    {
+                        item.document_key + "\0" + item.title: item
+                        for item in [*runtime_evidence, *previous_evidence]
+                    }.values()
+                )
+            return runtime_evidence
+
+        # For a generic entity overview, live structured records are both more
+        # authoritative and dramatically cheaper than a broad SQLite/File
+        # Search scan.  This rule applies to every entity with an authorized
+        # Firebase projection; entities without one continue through the full
+        # knowledge pipeline.
+        if overview_subject and question_kind is QuestionKind.GENERAL:
+            try:
+                firebase_evidence = await load_firebase_evidence()
+                firebase_loaded = True
+            except Exception:
+                log.warning(
+                    "Structured entity overview lookup failed; using normal retrieval",
+                    exc_info=True,
+                )
+            fallback_runtime = [
+                item
+                for item in firebase_evidence
+                if can_answer_directly(question_kind, item.authority, item.status)
+            ]
+            fallback_answer = self._render_entity_overview_fallback(
+                overview_subject,
+                [],
+                fallback_runtime,
+            )
+            fallback_sources = self._firebase_sources(fallback_runtime, [])
+            if fallback_answer and fallback_sources:
+                confidence = evidence_confidence(
+                    answered=True,
+                    evidence_count=len(fallback_sources),
+                    source_family_count=citation_source_family_count(fallback_sources),
+                    candidate_count=len(fallback_runtime),
+                    locally_verified=True,
+                    extractive_fallback=True,
+                )
+                return RagAnswer(
+                    text=fallback_answer,
+                    citations=tuple(fallback_sources),
+                    festival=festival,
+                    no_answer=False,
+                    metadata_filter=metadata_filter,
+                    confidence_score=confidence[0],
+                    confidence_label=confidence[1],
+                    confidence_detail=confidence[2],
+                )
         terms = self.rag_store.query_terms(question, glossary)
         # ``search_exact`` performs a bounded but potentially expensive SQLite
         # scan.  Running it on the Discord event loop can delay heartbeats and
@@ -3126,8 +3207,6 @@ class CorpusManager:
         schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
         schema_sources: list[str] = []
         schema_fallback_allowed = False
-        firebase_evidence: list[FirebaseEvidence] = []
-        overview_subject = entity_overview_subject(question)
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -3155,38 +3234,9 @@ class CorpusManager:
             if glossary_text:
                 evidence_context += self._untrusted_evidence("glossary", glossary_text)
 
-            firebase_evidence = await self.firebase_knowledge.evidence_for(
-                question,
-                question_kind,
-                festival=festival,
-            )
-            if overview_subject and festival is None:
-                # Broad entity questions often refer to a recurring festival
-                # project before the current year's event document exists.
-                # Read the immediately previous festival as well and keep the
-                # year label in every evidence body/citation.
-                previous_festival = max(1, current_festival() - 1)
-                previous_evidence = await self.firebase_knowledge.evidence_for(
-                    question,
-                    question_kind,
-                    festival=previous_festival,
-                )
-                previous_evidence = [
-                    replace(
-                        item,
-                        document_key=(
-                            f"firebase:{previous_festival}:"
-                            f"{item.document_key.removeprefix('firebase:')}"
-                        ),
-                    )
-                    for item in previous_evidence
-                ]
-                firebase_evidence = list(
-                    {
-                        item.document_key + "\0" + item.title: item
-                        for item in [*firebase_evidence, *previous_evidence]
-                    }.values()
-                )
+            if not firebase_loaded:
+                firebase_evidence = await load_firebase_evidence()
+                firebase_loaded = True
             if question_kind is QuestionKind.DATA_CONTRACT:
                 schema_contracts = self._parse_firebase_schema_contracts(
                     firebase_evidence,
