@@ -48,7 +48,21 @@ def entity_overview_subject(question: str) -> str | None:
     """Return a concrete subject from a broad entity-overview question."""
     match = _ENTITY_OVERVIEW_RE.fullmatch(question.strip())
     if not match:
-        return None
+        # Detailed overview requests commonly continue after the first
+        # sentence (``ITラボについて教えて。担当と課題も``).  Preserve the
+        # entity identity so live Firestore evidence can be prioritized while
+        # the remaining clauses still expand retrieval breadth.
+        match = re.match(
+            r"^\s*(?P<subject>.{2,48}?)\s*について(?P<request>.*)$",
+            question.strip(),
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match or not re.search(
+            r"教えて|説明|まとめ|知りたい|概要|内容|担当|課題|関連|状態|場所",
+            match.group("request"),
+            re.IGNORECASE,
+        ):
+            return None
     subject = match.group("subject").strip(" \t\r\n「」『』\"'")
     if subject.casefold() in {item.casefold() for item in _ENTITY_OVERVIEW_STOP_SUBJECTS}:
         return None

@@ -102,6 +102,15 @@ def test_compound_question_keeps_authority_facets_separate():
     )
 
 
+def test_relative_history_calendar_anchor_does_not_create_runtime_facet():
+    assert classify_question_facets(
+        "去年の今頃、IT局では何をしていましたか？現在日を基準に教えて"
+    ) == (QuestionKind.HISTORY,)
+    assert set(
+        classify_question_facets("現在と去年の今頃の活動の違いを比較して")
+    ) == {QuestionKind.RUNTIME, QuestionKind.HISTORY}
+
+
 @pytest.mark.parametrize(
     "question",
     (
