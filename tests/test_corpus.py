@@ -2813,7 +2813,7 @@ async def test_exhaustive_firebase_list_renders_every_item_without_a_model(corpu
     corpus_manager.rag_store.record_query = Mock(return_value="firebase-list-query")
 
     result = await corpus_manager.query_with_trace(
-        "27thの公開通知一覧を教えて",
+        "27thに発行された通知を一覧で出してほしい",
         "fileSearchStores/test",
         guild_id=1,
     )
@@ -3127,6 +3127,80 @@ async def test_data_contract_prefers_current_repository_contract_over_projection
     assert "`calibrations`" in result.text
     assert "完全なスキーマではない" not in result.text
     assert result.lexical_keys == ("repo-map-contract",)
+    corpus_manager._recover_from_lexical_hits.assert_awaited_once()
+    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_data_contract_uses_projection_immediately_when_direct_source_is_rejected(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    corpus_manager.firebase_knowledge = reader
+    ranking = reader._schema_contract_evidence(
+        "ranking",
+        27,
+        [],
+        observation="withheld-until-public-result",
+    )
+    config = reader._schema_contract_evidence(
+        "rankingConfig",
+        27,
+        [{
+            "name": (
+                "projects/demo-project/databases/(default)/documents/"
+                "yagamy/27/config/ranking"
+            ),
+            "fields": {"status": {"stringValue": "voting"}},
+        }],
+        observation="public-documents-observed",
+    )
+    source_hit = LexicalHit(
+        document_key="repo-ranking-contract",
+        channel_name="Yagamifes_Web_2025:src/app/27/ranking/page.tsx",
+        festival=27,
+        source_url=(
+            "https://github.com/YagamiFes-IT/Yagamifes_Web_2025/"
+            "blob/main/src/app/27/ranking/page.tsx"
+        ),
+        excerpt="The current ranking page reads yagamy/27/ranking.",
+        score=500,
+        authority="repository_context",
+        status="current",
+        source_type="source_code",
+        access_scope="guild",
+    )
+    reader.evidence_for = AsyncMock(return_value=[ranking, config])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ranking", "構造"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[source_hit])
+    corpus_manager._recover_from_lexical_hits = AsyncMock(
+        return_value=(
+            "ランキングは `yagamy/27/ranking` にあるぽん。\n"
+            "[[YAGAPON_EVIDENCE_KEYS:exact:repo-ranking-contract]]\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        )
+    )
+    corpus_manager._recovered_claims_supported = Mock(return_value=False)
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=AssertionError("rejected direct schema answer must not use File Search")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのrankingの構造はどうなっていた？",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "`yagamy/27/ranking`" in result.text
+    assert "`yagamy/27/config/ranking`" in result.text
+    assert "`eventId`" in result.text
+    assert "`eventName`" in result.text
+    assert "`category`" in result.text
+    assert "`score`" in result.text
+    assert len(result.citations) == 2
     corpus_manager._recover_from_lexical_hits.assert_awaited_once()
     corpus_manager._client.aio.models.generate_content.assert_not_awaited()
 
