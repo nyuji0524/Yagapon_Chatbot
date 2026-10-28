@@ -39,7 +39,7 @@ def register(bot):
         "mode",
         description="モードを選ぶぽん",
         choices=[
-            discord.OptionChoice("聞き専 (議事録のみ)", "listen"),
+            discord.OptionChoice("録音のみ (後から議事録作成)", "listen"),
             discord.OptionChoice("参加者 (議事録 + 質問対応)", "meeting"),
             discord.OptionChoice("おしゃべり (雑談モード)", "chat"),
         ],
@@ -162,7 +162,10 @@ def register(bot):
             await session.add_meeting_material(material)
 
         mode_desc = {
-            VoiceMode.LISTEN: "聞き専モード 🎧\n録音から議事録を作成するぽん。終わったら `/leave` で退出してねぽん！",
+            VoiceMode.LISTEN: (
+                "録音専用モード 🎧\nAI処理は行わず音声の保存に専念するぽん。"
+                "終わったら `/leave`、保存後に `/recording minutes` で議事録を作れるぽん！"
+            ),
             VoiceMode.MEETING: "参加者モード 🎤\n録音から議事録を作りつつ、質問にも答えるぽん！",
             VoiceMode.CHAT: "おしゃべりモード 💬\n会話を録音しながら、いっぱいおしゃべりするぽん！",
         }
@@ -299,9 +302,15 @@ def register(bot):
             return
         channel_name = session.channel.name if session else "unknown"
         category_name = getattr(getattr(session.channel, "category", None), "name", "") if session else ""
+        capture_only = session.mode == VoiceMode.LISTEN
         has_audio = bool(session and session.mode in (VoiceMode.LISTEN, VoiceMode.MEETING))
 
-        if has_audio:
+        if capture_only:
+            await ctx.followup.send(
+                "💾 録音を停止し、ディスクへ確実に保存しているぽん...",
+                ephemeral=True,
+            )
+        elif has_audio:
             await ctx.followup.send(
                 "🎙️ 音声を文字起こし中だぽん...少し待ってねぽん ⏳",
                 ephemeral=True,
@@ -350,6 +359,20 @@ def register(bot):
                 )
             await ctx.followup.send(
                 message,
+                ephemeral=True,
+            )
+            return
+
+        if capture_only:
+            await ctx.followup.send(
+                "\n".join(
+                    [
+                        "✅ 録音を保存したぽん。AI処理はまだ行っていないぽん。",
+                        f"セッションID: `{session.session_id}`",
+                        "議事録を作るときは、管理者が次を実行してねぽん：",
+                        f"`/recording minutes session_id:{session.session_id}`",
+                    ]
+                ),
                 ephemeral=True,
             )
             return

@@ -2391,7 +2391,11 @@ class VoiceSession:
                 capture_warning_reason="no-pcm-unresolved",
             )
 
-        if not await self._wait_for_inflight_stt():
+        # LISTEN is intentionally capture-only.  It must be possible to stop a
+        # long recording quickly and durably even when every AI provider is
+        # unavailable.  Transcription/minutes are started later with
+        # `/recording minutes` from the finalized PCM artifact.
+        if self.mode != VoiceMode.LISTEN and not await self._wait_for_inflight_stt():
             self._transcription_failed = True
             raise RuntimeError(
                 "Transcription worker did not stop; recording retained for recovery"
@@ -2450,8 +2454,17 @@ class VoiceSession:
                 "Recording storage limit was reached; automatic publication is unsafe"
             )
 
+        if self.recording_sink and self.mode == VoiceMode.LISTEN:
+            await self._mark_recording_sink(
+                "recording_saved",
+                raw_recording_retained=True,
+                transcript_complete=False,
+                post_processing_requested=False,
+            )
+            return None
+
         if self.recording_sink:
-            if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
+            if self.mode == VoiceMode.MEETING:
                 # Final whole-recording pass is authoritative. Avoid first
                 # transcribing the same long meeting through `_drain_recording`.
                 # A Discord interaction cannot wait forever for a provider;
@@ -2502,7 +2515,7 @@ class VoiceSession:
         if self._transcription_failed:
             raise RuntimeError("Transcription is incomplete; recording retained for recovery")
 
-        if self.mode in (VoiceMode.LISTEN, VoiceMode.MEETING):
+        if self.mode == VoiceMode.MEETING:
             try:
                 minutes = await self._generate_minutes()
             except Exception as exc:

@@ -10,6 +10,7 @@ import discord
 
 from bot.config import ConfigManager
 from bot.corpus import CorpusManager
+from bot.discord_visibility import resolve_minutes_notification_channel
 from bot.key_management import KeyManagementManager
 from bot.knowledge_policy import (
     automatic_knowledge_promotion_allowed,
@@ -507,6 +508,26 @@ class YagaPon(discord.Bot):
                 log.exception("Automatic voice leave failed for guild %s", member.guild.id)
                 return
 
+            if session.mode == VoiceMode.LISTEN:
+                destination = resolve_minutes_notification_channel(
+                    self.config,
+                    member.guild,
+                    session.channel,
+                )
+                if destination is not None:
+                    await destination.send(
+                        "\n".join(
+                            [
+                                "✅ 録音を停止して保存したぽん。AI処理はまだ行っていないぽん。",
+                                f"セッションID: `{session.session_id}`",
+                                f"管理者は `/recording minutes session_id:{session.session_id}` で議事録を作れるぽん。",
+                            ]
+                        ),
+                        silent=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                return
+
             # Durable delivery must not depend on whether Discord has a
             # writable notification channel.  Any failure before
             # mark_delivered keeps the PCM recoverable for the retry worker.
@@ -644,8 +665,6 @@ class YagaPon(discord.Bot):
 
             # Notification is best-effort and happens only after every durable
             # output has been saved and indexed.
-            from bot.discord_visibility import resolve_minutes_notification_channel
-
             notify_ch = resolve_minutes_notification_channel(
                 self.config,
                 member.guild,
