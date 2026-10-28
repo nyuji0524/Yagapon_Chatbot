@@ -165,7 +165,7 @@ def _tts_safe_rag_answer(answer: str, *, max_chars: int = 360) -> str:
 
 
 class VoiceMode(Enum):
-    LISTEN = "listen"  # 聞き専: 議事録作成のみ
+    LISTEN = "listen"  # 聞き専: 録音保存のみ（AI処理は別コマンド）
     MEETING = "meeting"  # 参加者: 議事録 + リアルタイム応答
     CHAT = "chat"  # おしゃべり: リアルタイム応答（議事録なし）
 
@@ -1466,6 +1466,12 @@ class VoiceSession:
 
     async def _process_realtime_chunk(self):
         """Read one bounded chunk per speaker from durable PCM storage."""
+        # LISTEN is a hard capture-only boundary. Its durable PCM is consumed
+        # only by the explicit `/recording minutes` workflow after capture has
+        # stopped. Keep this guard here as well as in `start()` so a future
+        # scheduler change cannot silently re-enable paid STT during recording.
+        if self.mode == VoiceMode.LISTEN:
+            return
         if not self.voice_client or not self.voice_client.is_connected():
             return
         if not self.recording_sink:
@@ -1504,22 +1510,6 @@ class VoiceSession:
             next_offsets[user_id] = next_offset
 
         if not audio_chunks:
-            return
-
-        # listenモード: 文字起こしのみ。受信トラック自体がDiscord
-        # user_idで分離済みなので、確定ラベルを維持する。
-        if self.mode == VoiceMode.LISTEN:
-            for user_id, (name, new_audio) in audio_chunks.items():
-                log.info(f"Transcribing {len(new_audio)} bytes from {name}")
-                text = await self._transcribe_audio(new_audio, name, diarization=False)
-                if text is None:
-                    continue
-                self._last_audio_len[user_id] = next_offsets[user_id]
-                if text.strip():
-                    formatted = self._format_transcribed_text(user_id, text, diarized=False)
-                    await self._append_transcript(formatted)
-                    log.info("Transcribed stream=%s: %s...", user_id, formatted[:50])
-                await self._checkpoint_state()
             return
 
         # chat/meetingモード: 専用STTで文字起こし後、回答モデルへ渡す

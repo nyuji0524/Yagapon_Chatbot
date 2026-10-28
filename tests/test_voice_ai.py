@@ -491,6 +491,21 @@ async def test_listen_monitor_never_runs_stt_during_capture(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_listen_realtime_processor_is_a_hard_noop():
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session.voice_client = SimpleNamespace(is_connected=Mock(return_value=True))
+    session.recording_sink = SimpleNamespace(read_chunks=Mock())
+    session._transcribe_audio = AsyncMock()
+    session._append_transcript = AsyncMock()
+
+    await session._process_realtime_chunk()
+
+    session.recording_sink.read_chunks.assert_not_called()
+    session._transcribe_audio.assert_not_awaited()
+    session._append_transcript.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_meeting_capture_monitor_runs_while_realtime_stt_is_blocked(monkeypatch):
     monitor_probe = asyncio.Event()
     release_stt = asyncio.Event()
