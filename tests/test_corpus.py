@@ -2548,6 +2548,38 @@ async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
 
 
 @pytest.mark.asyncio
+async def test_optional_query_telemetry_failure_does_not_discard_answer(
+    corpus_manager,
+):
+    evidence = FirebaseEvidence(
+        document_key="firebase:festival/27/events/it-lab",
+        title="27th 企画",
+        body=(
+            "Firestore現在値（27th / events）\n"
+            'fields: {"eventName": "ITラボ", "place": "11-21", '
+            '"shortDescription": "AI鬼ごっこなどの体験企画"}'
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(
+        side_effect=[[evidence], []]
+    )
+    corpus_manager.rag_store.record_query = Mock(
+        side_effect=sqlite3.OperationalError("database is locked")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボについて教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert result.query_id is None
+    assert "AI鬼ごっこなどの体験企画" in result.text
+
+
+@pytest.mark.asyncio
 async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
     class PrepaidCreditDepleted(RuntimeError):
         code = 402

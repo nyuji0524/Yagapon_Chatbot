@@ -143,14 +143,18 @@ class RagStore:
         self._fts_rebuild_thread: threading.Thread | None = None
         self._initialize()
 
-    def _connect(self):
+    def _connect(self, *, timeout_seconds: float = SQLITE_CONNECT_TIMEOUT_SECONDS):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.path,
-            timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
         connection.row_factory = sqlite3.Row
-        connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        busy_timeout_ms = min(
+            SQLITE_BUSY_TIMEOUT_MS,
+            max(1, round(timeout_seconds * 1000)),
+        )
+        connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
         return connection
 
     @staticmethod
@@ -1571,7 +1575,9 @@ class RagStore:
         def preview(value: str) -> str | None:
             return value[:1000] if keep_content else None
 
-        with self._lock, self._connect() as connection:
+        # Telemetry is not part of the answer transaction. Do not make a
+        # Discord response wait behind a long-running backfill writer.
+        with self._lock, self._connect(timeout_seconds=0.25) as connection:
             connection.execute(
                 """
                 INSERT INTO queries (
@@ -1600,7 +1606,7 @@ class RagStore:
         return query_id
 
     def bind_response_message(self, query_id: str, guild_id: int, channel_id: int, message_id: int):
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connect(timeout_seconds=0.25) as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO response_messages VALUES (?, ?, ?, ?)",
                 (message_id, query_id, guild_id, channel_id),

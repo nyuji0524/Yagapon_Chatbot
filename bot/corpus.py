@@ -3596,23 +3596,28 @@ class CorpusManager:
             if metadata_filters
             else None
         )
-        query_id = (
-            self.rag_store.record_query(
-                guild_id=guild_id,
-                actor_id=actor_id,
-                channel_id=channel_id,
-                question=question,
-                answer=answer,
-                festival=festival,
-                metadata_filter=metadata_filter,
-                citations=sources,
-                lexical_keys=list(lexical_keys),
-                latency_ms=round((time.monotonic() - started) * 1000),
-                no_answer=no_answer,
-            )
-            if guild_id
-            else None
-        )
+        query_id = None
+        if guild_id:
+            try:
+                query_id = self.rag_store.record_query(
+                    guild_id=guild_id,
+                    actor_id=actor_id,
+                    channel_id=channel_id,
+                    question=question,
+                    answer=answer,
+                    festival=festival,
+                    metadata_filter=metadata_filter,
+                    citations=sources,
+                    lexical_keys=list(lexical_keys),
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                    no_answer=no_answer,
+                )
+            except Exception:
+                # Query telemetry is intentionally best-effort. A concurrent
+                # backfill can briefly hold SQLite's writer lock; losing one
+                # quality sample must never discard an already generated user
+                # answer or turn a successful Discord request into a timeout.
+                log.exception("Failed to persist optional RAG query telemetry")
         return RagAnswer(
             text=answer,
             query_id=query_id,
