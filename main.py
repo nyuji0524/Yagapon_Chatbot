@@ -34,6 +34,8 @@ DEFAULT_API_SHUTDOWN_BUDGET_SECONDS = 5.0
 MAX_API_SHUTDOWN_BUDGET_SECONDS = 10.0
 DEFAULT_UVICORN_GRACEFUL_TIMEOUT_SECONDS = 10.0
 MAX_UVICORN_GRACEFUL_TIMEOUT_SECONDS = 15.0
+DEFAULT_EXECUTOR_SHUTDOWN_SECONDS = 5.0
+MAX_EXECUTOR_SHUTDOWN_SECONDS = 10.0
 _active_process_watchdog: HardShutdownWatchdog | None = None
 
 
@@ -71,6 +73,38 @@ def _disarm_process_watchdog() -> None:
     _active_process_watchdog = None
     if watchdog is not None:
         watchdog.disarm()
+
+
+def _tighten_watchdog_after_durable_cleanup() -> None:
+    """Bound Python executor teardown after all durable application cleanup.
+
+    ``asyncio.run`` waits for default-executor threads after the main coroutine
+    returns. Cancelling an ``asyncio.to_thread`` waiter cannot stop its worker,
+    so a completed voice checkpoint/corpus flush used to be followed by roughly
+    30 seconds of invisible container shutdown. At this point the application
+    has already rejected new work, fsynced active recordings, cancelled
+    background jobs, closed Discord, and flushed its corpus. It is therefore
+    safe to replace the broad signal deadline with a short process-teardown
+    deadline. The original (earlier) deadline always wins.
+
+    Direct async callers do not arm the process watchdog and are unaffected.
+    """
+    current = _active_process_watchdog
+    if current is None:
+        return
+    budget = _bounded_env_seconds(
+        "YAGAPON_EXECUTOR_SHUTDOWN_SECONDS",
+        DEFAULT_EXECUTOR_SHUTDOWN_SECONDS,
+        MAX_EXECUTOR_SHUTDOWN_SECONDS,
+    )
+    tightened_deadline = min(current.deadline, time.monotonic() + budget)
+    if tightened_deadline >= current.deadline:
+        return
+    log.info(
+        "Durable cleanup complete; executor teardown deadline is %.1fs",
+        max(0.0, tightened_deadline - time.monotonic()),
+    )
+    _activate_process_watchdog(HardShutdownWatchdog(tightened_deadline))
 
 
 class ShutdownCoordinator:
@@ -351,6 +385,7 @@ async def shutdown(bot, server, *, deadline: float | None = None):
         shutdown_deadline=deadline,
         voice_checkpointed=voice_checkpointed,
     )
+    _tighten_watchdog_after_durable_cleanup()
 
 
 def run() -> None:
