@@ -134,9 +134,7 @@ _FILE_SEARCH_METADATA_PRIORITY = (
     "end_line",
     "change_status",
 )
-_FILE_SEARCH_METADATA_PRIORITY_INDEX = {
-    key: index for index, key in enumerate(_FILE_SEARCH_METADATA_PRIORITY)
-}
+_FILE_SEARCH_METADATA_PRIORITY_INDEX = {key: index for index, key in enumerate(_FILE_SEARCH_METADATA_PRIORITY)}
 
 
 def _file_search_metadata(metadata: list[dict] | None) -> list[dict]:
@@ -155,10 +153,9 @@ def _file_search_metadata(metadata: list[dict] | None) -> list[dict]:
             indexed[0],
         ),
     )
-    selected_indices = {
-        index for index, _item in ranked[:FILE_SEARCH_CUSTOM_METADATA_LIMIT]
-    }
+    selected_indices = {index for index, _item in ranked[:FILE_SEARCH_CUSTOM_METADATA_LIMIT]}
     return [item for index, item in enumerate(items) if index in selected_indices]
+
 
 # レート制限
 DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "50"))
@@ -168,8 +165,7 @@ BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
 BUILTIN_SOURCE_TYPE = "builtin_reference"
 FESTIVAL_OPERATING_YEAR_DOCUMENT_KEY = "builtin:festival-operating-year"
 FESTIVAL_OPERATING_YEAR_SOURCE_URL = (
-    "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/"
-    "docs/festival-operating-year.md"
+    "https://github.com/nyuji0524/Yagapon_Chatbot/blob/main/docs/festival-operating-year.md"
 )
 
 
@@ -238,16 +234,10 @@ def file_search_ambiguous_start_grace_seconds() -> int:
     )
 
 
-RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env(
-    "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 2048, 512, 4096
-)
-RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS = _bounded_int_env(
-    "YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 6144, 2048, 16384
-)
+RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env("YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 2048, 512, 4096)
+RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS = _bounded_int_env("YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 6144, 2048, 16384)
 RAG_SEARCH_TOP_K = _bounded_int_env("YAGAPON_RAG_SEARCH_TOP_K", 8, 4, 20)
-RAG_COMPREHENSIVE_SEARCH_TOP_K = _bounded_int_env(
-    "YAGAPON_RAG_COMPREHENSIVE_SEARCH_TOP_K", 12, 8, 30
-)
+RAG_COMPREHENSIVE_SEARCH_TOP_K = _bounded_int_env("YAGAPON_RAG_COMPREHENSIVE_SEARCH_TOP_K", 12, 8, 30)
 RAG_LEXICAL_CANDIDATES = 16
 RAG_COMPREHENSIVE_LEXICAL_CANDIDATES = 32
 RAG_LEXICAL_CONTEXT_HITS = 6
@@ -364,12 +354,8 @@ _RECOVERY_ROLE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 _RECOVERY_QUOTED_VALUE_RE = re.compile(r"[「『]([^」』]{1,64})[」』]")
-_RECOVERY_ROLE_VALUE_SUFFIX_RE = re.compile(
-    r"(?:だ|です|である)?ぽん[。.!！?？]*$|(?:だ|です|である)[。.!！?？]*$"
-)
-_RECOVERY_ELLIPTICAL_NON_RETENTION_RE = re.compile(
-    r"(?:残らない|残りません|残存しない|保持されない|保存されない)$"
-)
+_RECOVERY_ROLE_VALUE_SUFFIX_RE = re.compile(r"(?:だ|です|である)?ぽん[。.!！?？]*$|(?:だ|です|である)[。.!！?？]*$")
+_RECOVERY_ELLIPTICAL_NON_RETENTION_RE = re.compile(r"(?:残らない|残りません|残存しない|保持されない|保存されない)$")
 _RECOVERY_NEGATED_DELETION_RE = re.compile(
     r"削除(?:(?:し|され)(?:て)?(?:い)?(?:ない|ません|ず)|せず|"
     r"(?:する|される)?(?:こと|わけ|もの)(?:は|では)?(?:ない|ありません)|"
@@ -458,9 +444,7 @@ def _explicit_answer_status_required(value: str | None) -> bool:
     return (value if value is not None else "false").strip().casefold() != "false"
 
 
-REQUIRE_EXPLICIT_ANSWER_STATUS = _explicit_answer_status_required(
-    os.environ.get("YAGAPON_RAG_REQUIRE_ANSWER_STATUS")
-)
+REQUIRE_EXPLICIT_ANSWER_STATUS = _explicit_answer_status_required(os.environ.get("YAGAPON_RAG_REQUIRE_ANSWER_STATUS"))
 
 
 def _grounding_supports_required(value: str | None) -> bool:
@@ -468,9 +452,7 @@ def _grounding_supports_required(value: str | None) -> bool:
     return (value if value is not None else "false").strip().casefold() != "false"
 
 
-REQUIRE_GROUNDING_SUPPORTS = _grounding_supports_required(
-    os.environ.get("YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS")
-)
+REQUIRE_GROUNDING_SUPPORTS = _grounding_supports_required(os.environ.get("YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS"))
 
 
 def requires_comprehensive_answer(question: str) -> bool:
@@ -507,10 +489,7 @@ def requires_comprehensive_answer(question: str) -> bool:
     ):
         return True
     nonempty_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-    listed_lines = sum(
-        bool(re.match(r"(?:[-*・]|\d+[.)、]|[（(]?\d+[）)])\s*", line))
-        for line in nonempty_lines
-    )
+    listed_lines = sum(bool(re.match(r"(?:[-*・]|\d+[.)、]|[（(]?\d+[）)])\s*", line)) for line in nonempty_lines)
     return len(nonempty_lines) >= 2 and (
         listed_lines >= 2
         or sum(bool(re.search(r"(?:教えて|知りたい|まとめ|確認)", line)) for line in nonempty_lines) >= 2
@@ -610,11 +589,14 @@ def _select_lexical_context_hits(
         selected_keys: set[str] = set()
         selected_authorities: set[str] = set()
         for hit in ranked:
-            if not can_answer_directly(
-                question_kind,
-                hit.authority,
-                hit.status,
-            ) or hit.authority in selected_authorities:
+            if (
+                not can_answer_directly(
+                    question_kind,
+                    hit.authority,
+                    hit.status,
+                )
+                or hit.authority in selected_authorities
+            ):
                 continue
             selected.append(hit)
             selected_keys.add(hit.document_key)
@@ -650,20 +632,14 @@ def _select_lexical_context_hits(
         reverse=True,
     )
     selected = ranked[:limit]
-    narrative_hits = [
-        hit for hit in ranked if is_history_narrative_source(hit.source_type)
-    ]
+    narrative_hits = [hit for hit in ranked if is_history_narrative_source(hit.source_type)]
     reserved = min(len(narrative_hits), max(1, limit // 3)) if limit >= 3 else 0
-    selected_narratives = sum(
-        is_history_narrative_source(hit.source_type) for hit in selected
-    )
+    selected_narratives = sum(is_history_narrative_source(hit.source_type) for hit in selected)
     if selected_narratives >= reserved:
         return selected
 
     selected_keys = {hit.document_key for hit in selected}
-    replacements = (
-        hit for hit in narrative_hits if hit.document_key not in selected_keys
-    )
+    replacements = (hit for hit in narrative_hits if hit.document_key not in selected_keys)
     for replacement in replacements:
         replace_at = next(
             (
@@ -814,25 +790,15 @@ def retrieval_metadata_filter(
     if target_date is not None:
         clauses.append(f'start_at = "{target_date}*"')
     direct = direct_authorities(question_kind)
-    current_implementation_authorities = sorted(
-        CURRENT_IMPLEMENTATION_AUTHORITIES.intersection(direct)
-    )
-    if (
-        not allows_unreviewed_evidence(question_kind)
-        and current_implementation_authorities
-    ):
+    current_implementation_authorities = sorted(CURRENT_IMPLEMENTATION_AUTHORITIES.intersection(direct))
+    if not allows_unreviewed_evidence(question_kind) and current_implementation_authorities:
         non_current_authorities = " AND ".join(
-            f'authority != "{authority}"'
-            for authority in current_implementation_authorities
+            f'authority != "{authority}"' for authority in current_implementation_authorities
         )
-        current_statuses = " OR ".join(
-            f'status = "{status}"' for status in sorted(CURRENT_STATUSES)
-        )
+        current_statuses = " OR ".join(f'status = "{status}"' for status in sorted(CURRENT_STATUSES))
         clauses.append(f"(({non_current_authorities}) OR ({current_statuses}))")
     if not allows_unreviewed_evidence(question_kind):
-        authorities = " OR ".join(
-            f'authority = "{authority}"' for authority in direct
-        )
+        authorities = " OR ".join(f'authority = "{authority}"' for authority in direct)
         clauses.append(f"({authorities})")
         clauses.extend(
             (
@@ -959,9 +925,7 @@ class ParsedModelAnswer:
 def _legacy_missing_knowledge(answer: str) -> bool:
     """Conservative compatibility fallback for pre-contract model responses."""
     inspected = answer.strip()
-    if inspected == GLOBAL_NO_EVIDENCE_MARKER or inspected.startswith(
-        GLOBAL_NO_EVIDENCE_MARKER + "\n"
-    ):
+    if inspected == GLOBAL_NO_EVIDENCE_MARKER or inspected.startswith(GLOBAL_NO_EVIDENCE_MARKER + "\n"):
         return True
     missing_expression = (
         r"(?:見当たら(?:ない|ず|なかった|なく|ません(?:でした)?)|"
@@ -1031,9 +995,7 @@ _CONTACT_EMAIL = re.compile(
     r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])",
     re.IGNORECASE,
 )
-_CONTACT_PHONE = re.compile(
-    r"(?<!\d)0\d{1,4}[-‐‑‒–—―ー− \t]\d{1,4}[-‐‑‒–—―ー− \t]\d{3,4}(?!\d)"
-)
+_CONTACT_PHONE = re.compile(r"(?<!\d)0\d{1,4}[-‐‑‒–—―ー− \t]\d{1,4}[-‐‑‒–—―ー− \t]\d{3,4}(?!\d)")
 _PLACEHOLDER_SECRET_TERMS = (
     "example",
     "placeholder",
@@ -1122,9 +1084,7 @@ def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
         for clause in clauses
     )
     contact_topic = bool(re.search(r"(?:メールアドレス|e-?mail|電話番号|連絡先|個人住所)", normalized))
-    public_contact = bool(
-        re.search(r"(?:公式|代表|公開|窓口|共有アドレス|実行委員会)", normalized)
-    )
+    public_contact = bool(re.search(r"(?:公式|代表|公開|窓口|共有アドレス|実行委員会)", normalized))
     individual_contact = bool(
         re.search(
             r"(?:個人|本人|メンバー|委員(?!会)|局長|副局長|企画長|担当者|さん|くん)",
@@ -1145,11 +1105,7 @@ def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
 
 def _public_contact_allowlist() -> set[str]:
     raw = os.environ.get("YAGAPON_RAG_PUBLIC_CONTACT_ALLOWLIST", "")
-    return {
-        value.strip().casefold()
-        for value in re.split(r"[,;\n]", raw)
-        if value.strip()
-    }
+    return {value.strip().casefold() for value in re.split(r"[,;\n]", raw) if value.strip()}
 
 
 def _looks_like_non_placeholder_secret(value: str) -> bool:
@@ -1170,11 +1126,7 @@ def generated_answer_is_sensitive(question: str, answer: str) -> bool:
         r"\bAIza[0-9A-Za-z_-]{20,}\b",
         r"\bAKIA[0-9A-Z]{16}\b",
     )
-    if any(
-        re.search(pattern, candidate)
-        for candidate in answer_variants
-        for pattern in opaque_secret_patterns
-    ):
+    if any(re.search(pattern, candidate) for candidate in answer_variants for pattern in opaque_secret_patterns):
         return True
     assignment_pattern = re.compile(
         r"(?:\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password|token|secret)\b|"
@@ -1262,38 +1214,19 @@ def citation_reference_is_safe(label: str, source_url: str = "") -> bool:
     decoded_url = unicodedata.normalize("NFKC", unquote(normalized_url))
     if any(unicodedata.category(character)[0] in {"C", "M"} for character in decoded_url):
         return False
-    decoded_labels = [
-        unicodedata.normalize("NFKC", unquote(candidate))
-        for candidate in _security_text_variants(label)
-    ]
-    if any(
-        unicodedata.category(character)[0] == "C"
-        for candidate in decoded_labels
-        for character in candidate
-    ):
+    decoded_labels = [unicodedata.normalize("NFKC", unquote(candidate)) for candidate in _security_text_variants(label)]
+    if any(unicodedata.category(character)[0] == "C" for candidate in decoded_labels for character in candidate):
         return False
     label_variants = tuple(
-        dict.fromkeys(
-            variant
-            for candidate in decoded_labels
-            for variant in _security_text_variants(candidate)
-        )
+        dict.fromkeys(variant for candidate in decoded_labels for variant in _security_text_variants(candidate))
     )
     materials = [f"{candidate}\n{decoded_url}" for candidate in label_variants]
-    if any(
-        re.search(r"(?<!\\)\]\s*\(\s*<?https?://", candidate, re.IGNORECASE)
-        for candidate in label_variants
-    ):
+    if any(re.search(r"(?<!\\)\]\s*\(\s*<?https?://", candidate, re.IGNORECASE) for candidate in label_variants):
+        return False
+    if any(re.search(pattern, material) for material in materials for pattern in _CITATION_OPAQUE_SECRET_PATTERNS):
         return False
     if any(
-        re.search(pattern, material)
-        for material in materials
-        for pattern in _CITATION_OPAQUE_SECRET_PATTERNS
-    ):
-        return False
-    if any(
-        _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material)
-        for material in materials
+        _CITATION_PRIVATE_EMAIL.search(material) or _CITATION_PRIVATE_PHONE.search(material) for material in materials
     ):
         return False
     if any(
@@ -1350,8 +1283,8 @@ _INSTRUCTION_OVERRIDE_PATTERN = re.compile(
 def _instruction_override_request(normalized: str) -> bool:
     """Distinguish an override command from a question about past overrides."""
     for match in _INSTRUCTION_OVERRIDE_PATTERN.finditer(normalized):
-        prefix = normalized[max(0, match.start() - 80):match.start()]
-        suffix = normalized[match.end():match.end() + 40]
+        prefix = normalized[max(0, match.start() - 80) : match.start()]
+        suffix = normalized[match.end() : match.end() + 40]
         japanese_retrospective = bool(
             re.match(
                 r"\s*(?:(?:した|された|していた|されていた|している|されている)"
@@ -1431,9 +1364,7 @@ def sensitive_request_response(question: str) -> str | None:
     if not policy.disclosure_request:
         return None
 
-    if policy.credential_topic and (
-        policy.unsafe_credential_clause or policy.actual_secret_request
-    ):
+    if policy.credential_topic and (policy.unsafe_credential_clause or policy.actual_secret_request):
         return (
             "Botトークン、APIキー、パスワードなどの認証情報や秘密情報は回答できないぽん。"
             "必要な場合は、権限を持つ管理者に安全な経路で確認してほしいぽん。"
@@ -1487,11 +1418,7 @@ def trusted_capability_response(question: str) -> str | None:
         r"とは(?:(?:何|なに)(?:ですか)?|どんな(?:ai|bot|ボット)(?:ですか)?)?)"
     )
     if re.fullmatch(
-        bot_subject
-        + r"(?:自身)?"
-        + capability_intent
-        + request_suffix
-        + r"[。！？!?、,.]*",
+        bot_subject + r"(?:自身)?" + capability_intent + request_suffix + r"[。！？!?、,.]*",
         normalized,
     ):
         return _TRUSTED_CAPABILITY_RESPONSE
@@ -1526,8 +1453,7 @@ def trusted_festival_mapping_response(question: str) -> tuple[str, tuple[int, ..
     for value, number in zip(subject_dates, mappings, strict=True):
         period = festival_period(number)
         lines.append(
-            f"- {value.isoformat()}: **{number}th** "
-            f"（{period.starts_on.isoformat()} 〜 {period.ends_on.isoformat()}）"
+            f"- {value.isoformat()}: **{number}th** （{period.starts_on.isoformat()} 〜 {period.ends_on.isoformat()}）"
         )
     return "\n".join(lines), mappings
 
@@ -1581,12 +1507,8 @@ class RemoteInventoryDocument:
 class RemoteInventoryIndex:
     """One-pass lookup index shared by every channel/year in a backfill."""
 
-    documents_by_channel: Mapping[
-        tuple[int, int], tuple[RemoteInventoryDocument, ...]
-    ]
-    legacy_documents_by_name: Mapping[
-        str, tuple[RemoteInventoryDocument, ...]
-    ]
+    documents_by_channel: Mapping[tuple[int, int], tuple[RemoteInventoryDocument, ...]]
+    legacy_documents_by_name: Mapping[str, tuple[RemoteInventoryDocument, ...]]
     channel_names_by_id: Mapping[tuple[int, int], frozenset[str]]
 
 
@@ -1711,6 +1633,115 @@ def evidence_confidence(
     )
 
 
+def answer_requirement_coverage(
+    question: str,
+    answer: str,
+    *,
+    citations: list[str] | tuple[str, ...] = (),
+    no_answer: bool = False,
+) -> tuple[int, str]:
+    """Estimate whether the answer actually covers the user's deliverables.
+
+    Evidence quality and answer completeness are independent.  A perfectly
+    grounded sentence can still answer only one item of a compound request.
+    Keep this verifier deterministic and conservative so it adds no model cost
+    and cannot be persuaded by a model-generated self-rating.
+    """
+    if no_answer or not answer.strip():
+        return 0, "質問へ回答できた項目が0件"
+
+    normalized_question = question.casefold()
+    normalized_answer = answer.casefold()
+    checks: list[tuple[str, bool]] = []
+
+    def add(label: str, passed: bool) -> None:
+        if label not in {item[0] for item in checks}:
+            checks.append((label, bool(passed)))
+
+    bullet_count = len(re.findall(r"(?m)^\s*(?:[-*・]|\d+[.)、])\s+", answer))
+    heading_count = len(re.findall(r"(?m)^#{2,4}\s+", answer))
+    dates = re.findall(
+        r"(?:20\d{2}[-/年]\d{1,2}(?:[-/月]\d{1,2}日?)?|\d{1,2}月\d{1,2}日)",
+        answer,
+    )
+
+    if re.search(r"(?:すべて|全て|全部|一覧|主な|内訳|洗い出)", normalized_question):
+        add("複数項目", bullet_count >= 2 or heading_count >= 2)
+    if re.search(r"(?:時系列|経緯|変遷|その後|以前と現在)", normalized_question):
+        add(
+            "時系列",
+            len(dates) >= 2 or bool(re.search(r"(?:まず|次に|その後|続いて|最終的|現在)", normalized_answer)),
+        )
+    if re.search(r"(?:コード|ソース|実装).{0,30}(?:対応|変更|反映|どう)", normalized_question):
+        add(
+            "実装上の対応",
+            bool(
+                re.search(
+                    r"(?:実装|コード|ファイル|コミット|commit|pr|変更|修正|反映)",
+                    normalized_answer,
+                )
+            ),
+        )
+    if re.search(r"(?:外部|他局).{0,40}(?:要求|要望|依頼|指摘|フィードバック)", normalized_question):
+        add(
+            "要求・フィードバック内容",
+            bool(
+                re.search(r"(?:要求|要望|依頼|指摘|フィードバック)", normalized_answer)
+                and re.search(r"(?:外部|他局|総務|広報|渉外|執行部)", normalized_answer)
+            ),
+        )
+    if re.search(r"(?:票数|得票)", normalized_question):
+        add("票数", bool(re.search(r"\d[\d,，]*\s*票", answer)))
+    if re.search(r"(?:順位|ランキング|ranking)", normalized_question):
+        add("順位", bool(re.search(r"(?:第?\s*\d+\s*位|順位|ランキング)", answer, re.IGNORECASE)))
+    if re.search(r"(?:firestore|スキーマ|データ構造|保存先|フィールド|コレクション)", normalized_question):
+        add(
+            "データ構造",
+            bool(re.search(r"(?:コレクション|ドキュメント|フィールド|パス|`[^`]+`)", answer)),
+        )
+    if re.search(r"(?:根拠|出典|引用元|参照)", normalized_question):
+        add("根拠・出典", bool(citations))
+    if re.search(r"(?:問題点|課題|改善点|修正点)", normalized_question):
+        add(
+            "課題と改善",
+            bool(re.search(r"(?:問題|課題|改善|修正|対策)", normalized_answer)),
+        )
+    if re.search(r"(?:未決|未定|要検討|決まっていない|検討段階)", normalized_question):
+        add(
+            "未決・要検討事項",
+            bool(re.search(r"(?:未決|未定|要検討|検討中|未確認|決まっていない)", normalized_answer)),
+        )
+
+    # Broad requests without a recognizable structured noun still need more
+    # than a single isolated fact.  This catches incomplete one-bullet answers
+    # without lowering confidence for ordinary one-fact questions.
+    if requires_comprehensive_answer(question) and not checks:
+        add("複数の観点", bullet_count >= 2 or heading_count >= 2)
+        add("複数の根拠", len(citations) >= 2)
+
+    if not checks:
+        return 100, "単一の依頼へ直接回答"
+    completed = sum(passed for _, passed in checks)
+    # A non-empty answer with an explicitly incomplete shape is low coverage,
+    # not the same as "no evidence".  Reserve zero for an actual no-answer.
+    score = max(20, round(100 * completed / len(checks)))
+    missing = [label for label, passed in checks if not passed]
+    detail = f"要求{completed}/{len(checks)}項目を確認"
+    if missing:
+        detail += "（不足: " + "、".join(missing) + "）"
+    return score, detail
+
+
+def combined_answer_confidence(
+    evidence_score: int,
+    coverage_score: int,
+) -> tuple[int, str]:
+    """Use the weaker dimension so a partial answer cannot look reliable."""
+    score = min(max(0, evidence_score), max(0, coverage_score))
+    label = "高" if score >= 80 else "中" if score >= 55 else "根拠なし" if score == 0 else "低"
+    return score, label
+
+
 def citation_source_family_count(citations: list[str] | tuple[str, ...]) -> int:
     """Count broad evidence families without trusting citation title text."""
     families: set[str] = set()
@@ -1789,10 +1820,7 @@ class _GroundingAudit:
         # claim-support mapping is entirely covered by other authorized chunks.
         # If a rejected chunk supported answer text, removing its segment makes
         # claim_coverage_complete false below and still fails closed.
-        return bool(
-            self.invalid_supports
-            or not self.claim_coverage_complete
-        )
+        return bool(self.invalid_supports or not self.claim_coverage_complete)
 
 
 class CorpusManager:
@@ -1809,12 +1837,8 @@ class CorpusManager:
         self._seed_trusted_knowledge()
         self._buffers: dict[tuple[int, int], MessageBuffer] = {}
         self._upload_semaphore = asyncio.Semaphore(5)
-        self._file_search_upload_start_timeout_seconds = (
-            file_search_upload_start_timeout_seconds()
-        )
-        self._file_search_ambiguous_start_grace_seconds = (
-            file_search_ambiguous_start_grace_seconds()
-        )
+        self._file_search_upload_start_timeout_seconds = file_search_upload_start_timeout_seconds()
+        self._file_search_ambiguous_start_grace_seconds = file_search_ambiguous_start_grace_seconds()
         self._file_search_index_timeout_seconds = file_search_index_timeout_seconds()
         self._flush_task: asyncio.Task | None = None
         self._inflight_flushes: set[asyncio.Task] = set()
@@ -1871,9 +1895,7 @@ class CorpusManager:
         """
         if timeout_seconds is None:
             try:
-                timeout_seconds = float(
-                    os.environ.get("YAGAPON_CORPUS_SHUTDOWN_TIMEOUT_SECONDS", "20")
-                )
+                timeout_seconds = float(os.environ.get("YAGAPON_CORPUS_SHUTDOWN_TIMEOUT_SECONDS", "20"))
             except ValueError:
                 timeout_seconds = 20.0
         deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -1998,6 +2020,7 @@ class CorpusManager:
             deleted = 0
             for doc in docs:
                 try:
+
                     async def delete_document(d=doc):
                         return await loop.run_in_executor(
                             None,
@@ -2061,6 +2084,7 @@ class CorpusManager:
     async def list_remote_documents(self, store_name: str) -> list[dict]:
         """Return File Search names and custom metadata for reconciliation."""
         loop = asyncio.get_running_loop()
+
         async def list_documents():
             return await loop.run_in_executor(
                 None,
@@ -2085,9 +2109,7 @@ class CorpusManager:
             result.append(
                 {
                     "name": str(getattr(document, "name", "") or ""),
-                    "display_name": str(
-                        getattr(document, "display_name", "") or ""
-                    ),
+                    "display_name": str(getattr(document, "display_name", "") or ""),
                     "metadata": self._metadata_map(document),
                     "state": str(state_value or ""),
                 }
@@ -2104,14 +2126,10 @@ class CorpusManager:
         mirrored_local_documents = [
             item
             for item in local_documents
-            if not (
-                item.get("source_type") == BUILTIN_SOURCE_TYPE
-                and not item.get("remote_name")
-            )
+            if not (item.get("source_type") == BUILTIN_SOURCE_TYPE and not item.get("remote_name"))
         ]
         local_by_key = {
-            str(item["document_key"]): str(item.get("remote_name") or "")
-            for item in mirrored_local_documents
+            str(item["document_key"]): str(item.get("remote_name") or "") for item in mirrored_local_documents
         }
         remote_by_key: dict[str, list[str]] = {}
         for item in remote_documents:
@@ -2176,11 +2194,7 @@ class CorpusManager:
             # including an old event delivered to on_message slightly late.
             # Keep that late event quarantined until success is known so a
             # cancelled snapshot can restore it instead of losing the fallback.
-            buffers = (
-                session.quarantined_buffers
-                if timestamp < session.cutoff
-                else session.deferred_buffers
-            )
+            buffers = session.quarantined_buffers if timestamp < session.cutoff else session.deferred_buffers
 
         if key not in buffers:
             buffers[key] = MessageBuffer(
@@ -2372,10 +2386,7 @@ class CorpusManager:
             if value is None:
                 value = item.get("numeric_value")
             values[str(item.get("key") or "")] = value
-        document_key = str(
-            values.get("document_key")
-            or hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
-        )
+        document_key = str(values.get("document_key") or hashlib.sha256(text.encode("utf-8")).hexdigest()[:24])
         additions = []
         if not values.get("document_key"):
             additions.append({"key": "document_key", "string_value": document_key})
@@ -2391,17 +2402,13 @@ class CorpusManager:
     @staticmethod
     def _pending_upload_metadata(pending: dict) -> list[dict]:
         metadata = json.loads(str(pending.get("metadata_json") or "[]"))
-        if not isinstance(metadata, list) or any(
-            not isinstance(item, dict) for item in metadata
-        ):
+        if not isinstance(metadata, list) or any(not isinstance(item, dict) for item in metadata):
             raise RuntimeError("Persisted File Search upload metadata is invalid")
         return metadata
 
     @staticmethod
     def _pending_superseded_names(pending: dict) -> list[str]:
-        names = json.loads(
-            str(pending.get("superseded_remote_names_json") or "[]")
-        )
+        names = json.loads(str(pending.get("superseded_remote_names_json") or "[]"))
         if not isinstance(names, list):
             raise RuntimeError("Persisted File Search cleanup intent is invalid")
         return list(dict.fromkeys(str(name) for name in names if name))
@@ -2419,11 +2426,7 @@ class CorpusManager:
 
     @staticmethod
     def _remote_document_is_active(document: object) -> bool:
-        state = (
-            document.get("state")
-            if isinstance(document, dict)
-            else getattr(document, "state", None)
-        )
+        state = document.get("state") if isinstance(document, dict) else getattr(document, "state", None)
         state_value = getattr(state, "value", state)
         return str(state_value or "") == types.DocumentState.STATE_ACTIVE.value
 
@@ -2451,9 +2454,7 @@ class CorpusManager:
         audience.
         """
         metadata = self._pending_upload_metadata(pending)
-        expected_metadata = self._metadata_items_map(
-            _file_search_metadata(metadata)
-        )
+        expected_metadata = self._metadata_items_map(_file_search_metadata(metadata))
         expected_display_name = str(pending["display_name"])
         matches = []
         for document in await self.list_remote_documents(str(pending["store_name"])):
@@ -2479,9 +2480,7 @@ class CorpusManager:
         async def get_document():
             return await loop.run_in_executor(
                 None,
-                lambda: self._client.file_search_stores.documents.get(
-                    name=remote_name
-                ),
+                lambda: self._client.file_search_stores.documents.get(name=remote_name),
             )
 
         try:
@@ -2500,9 +2499,7 @@ class CorpusManager:
             return False
         if str(getattr(document, "display_name", "") or "") != display_name:
             return False
-        expected_metadata = self._metadata_items_map(
-            _file_search_metadata(metadata)
-        )
+        expected_metadata = self._metadata_items_map(_file_search_metadata(metadata))
         return self._metadata_map(document) == expected_metadata
 
     async def _finalize_pending_upload(
@@ -2557,9 +2554,7 @@ class CorpusManager:
         if operation is None and operation_name:
             operation = types.UploadToFileSearchStoreOperation(name=operation_name)
         if operation is None:
-            remote_name, duplicates = await self._remote_document_matches_pending(
-                pending
-            )
+            remote_name, duplicates = await self._remote_document_matches_pending(pending)
             if remote_name:
                 await asyncio.to_thread(
                     self.rag_store.record_upload_result,
@@ -2584,26 +2579,17 @@ class CorpusManager:
                 self.rag_store.get_upload_operation,
                 document_key,
             )
-            if refreshed and (
-                refreshed.get("operation_name") or refreshed.get("remote_name")
-            ):
+            if refreshed and (refreshed.get("operation_name") or refreshed.get("remote_name")):
                 return await self._resume_pending_upload(refreshed)
-            timestamp_raw = str(
-                pending.get("updated_at") or pending.get("created_at") or ""
-            )
+            timestamp_raw = str(pending.get("updated_at") or pending.get("created_at") or "")
             try:
-                pending_since = datetime.fromisoformat(
-                    timestamp_raw.replace("Z", "+00:00")
-                )
+                pending_since = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
             except ValueError:
                 pending_since = None
             if pending_since is not None:
                 if pending_since.tzinfo is None:
                     pending_since = pending_since.replace(tzinfo=timezone.utc)
-                age_seconds = (
-                    datetime.now(timezone.utc)
-                    - pending_since.astimezone(timezone.utc)
-                ).total_seconds()
+                age_seconds = (datetime.now(timezone.utc) - pending_since.astimezone(timezone.utc)).total_seconds()
                 if age_seconds >= self._file_search_ambiguous_start_grace_seconds:
                     retired = await asyncio.to_thread(
                         self.rag_store.resolve_upload_operation,
@@ -2636,15 +2622,11 @@ class CorpusManager:
         while getattr(operation, "done", True) is not True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    f"Indexing timed out after {index_timeout_seconds}s"
-                )
+                raise TimeoutError(f"Indexing timed out after {index_timeout_seconds}s")
             await asyncio.sleep(min(UPLOAD_POLL_SECONDS, remaining))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    f"Indexing timed out after {index_timeout_seconds}s"
-                )
+                raise TimeoutError(f"Indexing timed out after {index_timeout_seconds}s")
 
             async def poll_operation():
                 return await loop.run_in_executor(
@@ -2665,9 +2647,7 @@ class CorpusManager:
                 )
             except TimeoutError:
                 if deadline - time.monotonic() <= 0:
-                    raise TimeoutError(
-                        f"Indexing timed out after {index_timeout_seconds}s"
-                    ) from None
+                    raise TimeoutError(f"Indexing timed out after {index_timeout_seconds}s") from None
                 raise
             except Exception as exc:
                 if not self._remote_document_absent(exc):
@@ -2675,9 +2655,7 @@ class CorpusManager:
                 # Long-running operation records may expire before a crashed
                 # worker resumes. Only an ACTIVE document with the complete
                 # original payload identity is safe to finalize.
-                remote_name, duplicates = (
-                    await self._remote_document_matches_pending(pending)
-                )
+                remote_name, duplicates = await self._remote_document_matches_pending(pending)
                 if not remote_name:
                     raise TimeoutError(
                         "File Search upload operation is no longer available "
@@ -2712,13 +2690,9 @@ class CorpusManager:
         response = getattr(operation, "response", None)
         remote_name = str(getattr(response, "document_name", None) or "")
         if not remote_name:
-            remote_name, duplicates = await self._remote_document_matches_pending(
-                pending
-            )
+            remote_name, duplicates = await self._remote_document_matches_pending(pending)
             if not remote_name:
-                raise RuntimeError(
-                    "Indexing completed without a reconcilable document name"
-                )
+                raise RuntimeError("Indexing completed without a reconcilable document name")
         else:
             duplicates = []
         await asyncio.to_thread(
@@ -2794,8 +2768,7 @@ class CorpusManager:
                     existing
                     and existing.get("remote_name")
                     and existing.get("body") == text
-                    and existing.get("upload_payload_sha256")
-                    in {None, "", payload_sha256}
+                    and existing.get("upload_payload_sha256") in {None, "", payload_sha256}
                     and await self._remote_document_matches_payload(
                         str(existing["remote_name"]),
                         display_name,
@@ -2825,9 +2798,7 @@ class CorpusManager:
                     metadata=metadata,
                     superseded_remote_names=superseded_remote_names,
                 )
-                requested_matches_pending = (
-                    str(pending["payload_sha256"]) == payload_sha256
-                )
+                requested_matches_pending = str(pending["payload_sha256"]) == payload_sha256
                 if not claimed:
                     recovered = await self._resume_pending_upload(pending)
                     if recovered is not None:
@@ -2850,8 +2821,7 @@ class CorpusManager:
                         recovered = await self._resume_pending_upload(pending)
                         if recovered is None:
                             raise RuntimeError(
-                                "File Search upload intent changed repeatedly while "
-                                "recovering a stale initiation"
+                                "File Search upload intent changed repeatedly while recovering a stale initiation"
                             )
                         if str(pending["payload_sha256"]) != payload_sha256:
                             raise RuntimeError(
@@ -2883,13 +2853,9 @@ class CorpusManager:
                                 },
                             },
                         )
-                        operation_name = str(
-                            getattr(operation, "name", None) or ""
-                        )
+                        operation_name = str(getattr(operation, "name", None) or "")
                         response = getattr(operation, "response", None)
-                        remote_name = str(
-                            getattr(response, "document_name", None) or ""
-                        )
+                        remote_name = str(getattr(response, "document_name", None) or "")
                         if operation_name:
                             self.rag_store.record_upload_operation(
                                 document_key,
@@ -2898,8 +2864,7 @@ class CorpusManager:
                             )
                         elif getattr(operation, "done", True) is not True:
                             raise RuntimeError(
-                                "File Search accepted an unnamed operation; "
-                                "refusing an unresumable upload"
+                                "File Search accepted an unnamed operation; refusing an unresumable upload"
                             )
                         if remote_name:
                             self.rag_store.record_upload_result(
@@ -2955,10 +2920,7 @@ class CorpusManager:
                 raise
             except Exception as e:
                 log.error(f"Upload error ({display_name}): {e}")
-                if (
-                    is_transient_api_error(e)
-                    or isinstance(e, (RateLimitExceeded, TimeoutError))
-                ):
+                if is_transient_api_error(e) or isinstance(e, (RateLimitExceeded, TimeoutError)):
                     # Preserve the safe root type for operator diagnostics and
                     # for a later idempotent channel-level rerun.
                     raise
@@ -2983,6 +2945,7 @@ class CorpusManager:
         deleted_names: list[str] = []
         for name in document_names:
             try:
+
                 async def delete_document(n=name):
                     return await loop.run_in_executor(
                         None,
@@ -3111,41 +3074,27 @@ class CorpusManager:
         festival_mapping = trusted_festival_mapping_response(question)
         if festival_mapping:
             mapping_text, mapped_festivals = festival_mapping
-            citation = (
-                "[確定仕様: #矢上祭の年度区分]"
-                f"({FESTIVAL_OPERATING_YEAR_SOURCE_URL})"
-            )
+            citation = f"[確定仕様: #矢上祭の年度区分]({FESTIVAL_OPERATING_YEAR_SOURCE_URL})"
             return RagAnswer(
                 text=mapping_text + "\n\n**参照**\n- " + citation,
                 citations=(citation,),
-                festival=(
-                    mapped_festivals[0]
-                    if len(set(mapped_festivals)) == 1
-                    else None
-                ),
+                festival=(mapped_festivals[0] if len(set(mapped_festivals)) == 1 else None),
                 no_answer=False,
                 lexical_keys=(FESTIVAL_OPERATING_YEAR_DOCUMENT_KEY,),
             )
         if guild_id and not self._check_rate_limit(guild_id):
             return RagAnswer(
                 text=(
-                    f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n"
-                    "明日またたくさん聞いてねぽん！🙏"
+                    f"今日の質問上限（{DAILY_QUERY_LIMIT}回）に達しちゃったぽん...\n明日またたくさん聞いてねぽん！🙏"
                 ),
                 no_answer=True,
             )
         started = time.monotonic()
         facets = classify_question_facets(question)
         comprehensive = (
-            requires_comprehensive_answer(question)
-            or entity_overview_subject(question) is not None
-            or len(facets) > 1
+            requires_comprehensive_answer(question) or entity_overview_subject(question) is not None or len(facets) > 1
         )
-        total_budget = (
-            RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS
-            if comprehensive
-            else RAG_NORMAL_OUTPUT_TOKENS
-        )
+        total_budget = RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS if comprehensive else RAG_NORMAL_OUTPUT_TOKENS
         facet_budget = max(512, total_budget // len(facets))
         results = []
         for facet in facets:
@@ -3175,9 +3124,7 @@ class CorpusManager:
                 actor_id,
             )
             sources = [source for source in sources if rendered_citation_is_safe(source)]
-        lexical_keys = tuple(
-            dict.fromkeys(key for result in results for key in result.lexical_keys)
-        )
+        lexical_keys = tuple(dict.fromkeys(key for result in results for key in result.lexical_keys))
         no_answer = all(result.no_answer for result in results)
         if len(results) == 1:
             answer = results[0].text
@@ -3193,14 +3140,12 @@ class CorpusManager:
                 QuestionKind.GENERAL: "関連情報",
             }
             answer = "\n\n".join(
-                f"## {facet_titles[facet]}\n{result.text}"
-                for facet, result in zip(facets, results, strict=True)
+                f"## {facet_titles[facet]}\n{result.text}" for facet, result in zip(facets, results, strict=True)
             )
         sensitive_blocked = generated_answer_is_sensitive(question, answer)
         if sensitive_blocked:
             log.warning(
-                "Blocked generated RAG answer containing credential/private-contact pattern "
-                "(guild=%s actor=%s)",
+                "Blocked generated RAG answer containing credential/private-contact pattern (guild=%s actor=%s)",
                 guild_id,
                 actor_id,
             )
@@ -3209,35 +3154,35 @@ class CorpusManager:
             lexical_keys = ()
             no_answer = True
 
-        confidence_results = [
-            result
-            for result in results
-            if result.confidence_score is not None
-        ]
+        confidence_results = [result for result in results if result.confidence_score is not None]
         if sensitive_blocked or not confidence_results:
             confidence_score = None
             confidence_label = None
             confidence_detail = None
         else:
             scores = [int(result.confidence_score or 0) for result in confidence_results]
-            confidence_score = max(scores) if no_answer else min(scores)
-            confidence_label = (
-                "高"
-                if confidence_score >= 80
-                else "中"
-                if confidence_score >= 55
-                else "根拠なし"
-                if confidence_score == 0
-                else "低"
+            evidence_score = max(scores) if no_answer else min(scores)
+            coverage_score, coverage_detail = answer_requirement_coverage(
+                question,
+                answer,
+                citations=sources,
+                no_answer=no_answer,
+            )
+            confidence_score, confidence_label = combined_answer_confidence(
+                evidence_score,
+                coverage_score,
             )
             if len(confidence_results) == 1:
-                confidence_detail = confidence_results[0].confidence_detail
+                evidence_detail = confidence_results[0].confidence_detail
             else:
-                confidence_detail = (
+                evidence_detail = (
                     f"{len(confidence_results)}論点のうち最も弱い根拠を表示"
                     if not no_answer
                     else f"{len(confidence_results)}論点を検索したが回答可能な根拠なし"
                 )
+            confidence_detail = f"根拠品質 {evidence_score} / 要求充足度 {coverage_score}（{coverage_detail}）"
+            if evidence_detail:
+                confidence_detail += f" / {evidence_detail}"
         if sources and not no_answer:
             answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
         elif no_answer:
@@ -3298,23 +3243,11 @@ class CorpusManager:
     ) -> RagAnswer:
         festival = festival_from_query(question)
         target_date = calendar_date_from_query(question, festival=festival)
-        target_window = (
-            None
-            if target_date is not None
-            else calendar_window_from_query(question, festival=festival)
-        )
-        target_date_from = (
-            target_window.starts_on.isoformat() if target_window is not None else None
-        )
-        target_date_to = (
-            target_window.ends_on.isoformat() if target_window is not None else None
-        )
-        lexical_candidate_limit = (
-            RAG_COMPREHENSIVE_LEXICAL_CANDIDATES if comprehensive else RAG_LEXICAL_CANDIDATES
-        )
-        lexical_context_limit = (
-            RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS if comprehensive else RAG_LEXICAL_CONTEXT_HITS
-        )
+        target_window = None if target_date is not None else calendar_window_from_query(question, festival=festival)
+        target_date_from = target_window.starts_on.isoformat() if target_window is not None else None
+        target_date_to = target_window.ends_on.isoformat() if target_window is not None else None
+        lexical_candidate_limit = RAG_COMPREHENSIVE_LEXICAL_CANDIDATES if comprehensive else RAG_LEXICAL_CANDIDATES
+        lexical_context_limit = RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS if comprehensive else RAG_LEXICAL_CONTEXT_HITS
         search_top_k = RAG_COMPREHENSIVE_SEARCH_TOP_K if comprehensive else RAG_SEARCH_TOP_K
         metadata_filter = retrieval_metadata_filter(
             question_kind,
@@ -3346,17 +3279,13 @@ class CorpusManager:
                 previous_evidence = [
                     replace(
                         item,
-                        document_key=(
-                            f"firebase:{previous_festival}:"
-                            f"{item.document_key.removeprefix('firebase:')}"
-                        ),
+                        document_key=(f"firebase:{previous_festival}:{item.document_key.removeprefix('firebase:')}"),
                     )
                     for item in previous_evidence
                 ]
                 runtime_evidence = list(
                     {
-                        item.document_key + "\0" + item.title: item
-                        for item in [*runtime_evidence, *previous_evidence]
+                        item.document_key + "\0" + item.title: item for item in [*runtime_evidence, *previous_evidence]
                     }.values()
                 )
             return runtime_evidence
@@ -3366,11 +3295,7 @@ class CorpusManager:
         # Search scan.  This rule applies to every entity with an authorized
         # Firebase projection; entities without one continue through the full
         # knowledge pipeline.
-        if (
-            overview_subject
-            and question_kind is QuestionKind.GENERAL
-            and not requires_comprehensive_answer(question)
-        ):
+        if overview_subject and question_kind is QuestionKind.GENERAL and not requires_comprehensive_answer(question):
             try:
                 firebase_evidence = await load_firebase_evidence()
                 firebase_loaded = True
@@ -3380,9 +3305,7 @@ class CorpusManager:
                     exc_info=True,
                 )
             fallback_runtime = [
-                item
-                for item in firebase_evidence
-                if can_answer_directly(question_kind, item.authority, item.status)
+                item for item in firebase_evidence if can_answer_directly(question_kind, item.authority, item.status)
             ]
             fallback_answer = self._render_entity_overview_fallback(
                 overview_subject,
@@ -3435,8 +3358,7 @@ class CorpusManager:
             lexical_hits = [
                 hit
                 for hit in lexical_hits
-                if hit.authority not in CURRENT_IMPLEMENTATION_AUTHORITIES
-                or hit.status in CURRENT_STATUSES
+                if hit.authority not in CURRENT_IMPLEMENTATION_AUTHORITIES or hit.status in CURRENT_STATUSES
             ]
         lexical_hits = _select_lexical_context_hits(
             lexical_hits,
@@ -3464,8 +3386,7 @@ class CorpusManager:
             requirement_labels = answer_requirement_labels(question)
             if requirement_labels:
                 rendered_requirements = " / ".join(
-                    f"{index}. {label}"
-                    for index, label in enumerate(requirement_labels, start=1)
+                    f"{index}. {label}" for index, label in enumerate(requirement_labels, start=1)
                 )
                 system += (
                     "\n【利用者が明示した回答項目】"
@@ -3515,15 +3436,9 @@ class CorpusManager:
             current_implementation_hits = [
                 hit
                 for hit in authoritative_hits
-                if hit.authority in CURRENT_IMPLEMENTATION_AUTHORITIES
-                and hit.status in CURRENT_STATUSES
+                if hit.authority in CURRENT_IMPLEMENTATION_AUTHORITIES and hit.status in CURRENT_STATUSES
             ]
-            if (
-                schema_fallback_allowed
-                and schema_contracts
-                and schema_sources
-                and not current_implementation_hits
-            ):
+            if schema_fallback_allowed and schema_contracts and schema_sources and not current_implementation_hits:
                 # Public Firestore projection questions already have a fully
                 # validated, deterministic answer. Calling File Search first
                 # made every schema question wait on Gemini (and on depleted
@@ -3600,11 +3515,7 @@ class CorpusManager:
                 if not parsed.explicit_status:
                     return hits
                 selected = set(parsed.evidence_keys)
-                return [
-                    hit
-                    for hit in hits
-                    if hit.document_key in selected or f"exact:{hit.document_key}" in selected
-                ]
+                return [hit for hit in hits if hit.document_key in selected or f"exact:{hit.document_key}" in selected]
 
             def selected_firebase_evidence(
                 evidence: list[FirebaseEvidence],
@@ -3622,10 +3533,7 @@ class CorpusManager:
                         item.authority,
                         item.status,
                     )
-                    and (
-                        not item.document_key.startswith("firebase:schema:")
-                        or schema_fallback_allowed
-                    )
+                    and (not item.document_key.startswith("firebase:schema:") or schema_fallback_allowed)
                 ]
                 if not parsed.explicit_status:
                     return evidence
@@ -3663,21 +3571,14 @@ class CorpusManager:
                     )
                     for hit in hits
                 ]
-                texts.extend(
-                    f"{item.title}\n{item.body}"
-                    for item in runtime_evidence
-                )
-                texts.extend(
-                    item.text
-                    for item in semantic_evidence
-                )
+                texts.extend(f"{item.title}\n{item.body}" for item in runtime_evidence)
+                texts.extend(item.text for item in semantic_evidence)
                 return texts
 
             def observe_answer_contract(parsed: ParsedModelAnswer, *, stage: str) -> None:
                 if not parsed.explicit_status:
                     log.warning(
-                        "RAG answer missing explicit status control line "
-                        "(stage=%s kind=%s guild=%s required=%s)",
+                        "RAG answer missing explicit status control line (stage=%s kind=%s guild=%s required=%s)",
                         stage,
                         question_kind.value,
                         guild_id,
@@ -3719,15 +3620,9 @@ class CorpusManager:
                     semantic_evidence,
                     recovered,
                 )
-                recovered_sources = list(
-                    dict.fromkeys(item.citation for item in used_semantic if item.citation)
-                )
-                recovered_sources.extend(
-                    self._lexical_sources(recovered_hits, recovered_sources)
-                )
-                recovered_sources.extend(
-                    self._firebase_sources(used_firebase, recovered_sources)
-                )
+                recovered_sources = list(dict.fromkeys(item.citation for item in used_semantic if item.citation))
+                recovered_sources.extend(self._lexical_sources(recovered_hits, recovered_sources))
+                recovered_sources.extend(self._firebase_sources(used_firebase, recovered_sources))
                 if not recovered_sources:
                     has_answer = False
                     sources = []
@@ -3816,11 +3711,7 @@ class CorpusManager:
                     sources = []
                     used_lexical_hits = []
 
-            if (
-                not comprehensive
-                and not cross_source_history
-                and (authoritative_hits or direct_runtime_evidence)
-            ):
+            if not comprehensive and not cross_source_history and (authoritative_hits or direct_runtime_evidence):
                 # Each attempt is an independent model call. Reserving most of
                 # the output allowance for a later retry made the first valid
                 # evidence path truncate, while subtracting a failed call's
@@ -3838,9 +3729,7 @@ class CorpusManager:
                 remaining_output_tokens = max_output_tokens
                 parsed = parse_model_answer(authoritative_answer or "")
                 observe_answer_contract(parsed, stage="direct")
-                direct_declared_no_evidence = (
-                    parsed.explicit_status and parsed.status is AnswerStatus.NO_EVIDENCE
-                )
+                direct_declared_no_evidence = parsed.explicit_status and parsed.status is AnswerStatus.NO_EVIDENCE
                 if usable(parsed):
                     used_lexical_hits = selected_lexical_hits(authoritative_hits, parsed)
                     used_firebase = selected_firebase_evidence(firebase_evidence, parsed)
@@ -3867,12 +3756,7 @@ class CorpusManager:
                         )
                         sources = []
 
-            if (
-                not has_answer
-                and schema_fallback_allowed
-                and schema_contracts
-                and schema_sources
-            ):
+            if not has_answer and schema_fallback_allowed and schema_contracts and schema_sources:
                 # A current repository hit may describe more than the reviewed
                 # public projection, so let the cheap direct recovery try once.
                 # If that answer cannot pass grounding, the deterministic
@@ -3903,16 +3787,12 @@ class CorpusManager:
                     lexical_hits
                     if comprehensive or cross_source_history
                     else [
-                        hit
-                        for hit in lexical_hits
-                        if not direct_declared_no_evidence or hit not in authoritative_hits
+                        hit for hit in lexical_hits if not direct_declared_no_evidence or hit not in authoritative_hits
                     ]
                 )
                 if not allows_unreviewed_evidence(question_kind):
                     search_hits = [
-                        hit
-                        for hit in search_hits
-                        if can_answer_directly(question_kind, hit.authority, hit.status)
+                        hit for hit in search_hits if can_answer_directly(question_kind, hit.authority, hit.status)
                     ]
                 search_context = with_lexical_context(evidence_context, search_hits)
                 search = types.FileSearch(
@@ -3921,6 +3801,7 @@ class CorpusManager:
                     metadata_filter=metadata_filter,
                 )
                 primary_budget = remaining_output_tokens
+
                 async def generate_with_file_search():
                     return await self._client.aio.models.generate_content(
                         model=model,
@@ -3928,10 +3809,10 @@ class CorpusManager:
                         config=generation_config(
                             model,
                             thinking_level=(
-                                "minimal"
-                                if ai_profile() == "budget"
-                                else "medium"
+                                "low"
                                 if comprehensive or cross_source_history
+                                else "minimal"
+                                if ai_profile() == "budget"
                                 else "low"
                             ),
                             max_output_tokens=primary_budget,
@@ -3955,9 +3836,7 @@ class CorpusManager:
                     # Firebase evidence were already filtered locally. Never
                     # use text or grounding from the truncated response. Other
                     # stops (for example SAFETY/BLOCKLIST) remain fail-closed.
-                    if exc.finish_reason != "MAX_TOKENS" or not (
-                        search_hits or firebase_evidence
-                    ):
+                    if exc.finish_reason != "MAX_TOKENS" or not (search_hits or firebase_evidence):
                         raise
                     log.warning(
                         "RAG File Search exhausted output tokens; retrying from "
@@ -4006,18 +3885,12 @@ class CorpusManager:
                         has_answer = False
                         sources = []
 
-                    recovery_semantic_evidence = tuple(
-                        item for item in semantic_audit.evidence if item.text
-                    )
+                    recovery_semantic_evidence = tuple(item for item in semantic_audit.evidence if item.text)
                     semantic_candidate_count = len(recovery_semantic_evidence)
                     comprehensive_coverage_too_narrow = requires_comprehensive_recovery(
                         comprehensive=comprehensive,
                         source_count=len(sources),
-                        candidate_count=(
-                            len(search_hits)
-                            + len(recovery_semantic_evidence)
-                            + len(firebase_evidence)
-                        ),
+                        candidate_count=(len(search_hits) + len(recovery_semantic_evidence) + len(firebase_evidence)),
                     )
                     if comprehensive_coverage_too_narrow:
                         log.warning(
@@ -4026,9 +3899,7 @@ class CorpusManager:
                             question_kind.value,
                             guild_id,
                             len(sources),
-                            len(search_hits)
-                            + len(recovery_semantic_evidence)
-                            + len(firebase_evidence),
+                            len(search_hits) + len(recovery_semantic_evidence) + len(firebase_evidence),
                         )
                     if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                         not has_answer
@@ -4109,11 +3980,7 @@ class CorpusManager:
                             if (
                                 fallback_answer
                                 and fallback_sources
-                                and not (
-                                    schema_fallback_allowed
-                                    and schema_contracts
-                                    and schema_sources
-                                )
+                                and not (schema_fallback_allowed and schema_contracts and schema_sources)
                             ):
                                 answer = fallback_answer
                                 sources = fallback_sources
@@ -4121,12 +3988,7 @@ class CorpusManager:
                                 has_answer = True
                                 extractive_fallback = True
             no_answer = not sources or not has_answer
-            if (
-                no_answer
-                and schema_fallback_allowed
-                and schema_contracts
-                and schema_sources
-            ):
+            if no_answer and schema_fallback_allowed and schema_contracts and schema_sources:
                 # Source code may describe nested collections and invariants
                 # that the public projection intentionally omits, so always
                 # give normal grounded retrieval the first chance to answer.
@@ -4138,9 +4000,7 @@ class CorpusManager:
                 no_answer = False
             elif no_answer and overview_subject:
                 fallback_hits = [
-                    hit
-                    for hit in authoritative_hits
-                    if can_answer_directly(question_kind, hit.authority, hit.status)
+                    hit for hit in authoritative_hits if can_answer_directly(question_kind, hit.authority, hit.status)
                 ]
                 fallback_runtime = [
                     item
@@ -4153,9 +4013,7 @@ class CorpusManager:
                     fallback_runtime,
                 )
                 fallback_sources = self._lexical_sources(fallback_hits, [])
-                fallback_sources.extend(
-                    self._firebase_sources(fallback_runtime, fallback_sources)
-                )
+                fallback_sources.extend(self._firebase_sources(fallback_runtime, fallback_sources))
                 if fallback_answer and fallback_sources:
                     answer = fallback_answer
                     sources = fallback_sources
@@ -4182,11 +4040,7 @@ class CorpusManager:
                 answered=not no_answer,
                 evidence_count=len(sources),
                 source_family_count=citation_source_family_count(sources),
-                candidate_count=(
-                    len(lexical_hits)
-                    + len(firebase_evidence)
-                    + semantic_candidate_count
-                ),
+                candidate_count=(len(lexical_hits) + len(firebase_evidence) + semantic_candidate_count),
                 locally_verified=not no_answer,
                 extractive_fallback=extractive_fallback,
             )
@@ -4239,10 +4093,7 @@ class CorpusManager:
                     item
                     for item in firebase_evidence
                     if can_answer_directly(question_kind, item.authority, item.status)
-                    and (
-                        not item.document_key.startswith("firebase:schema:")
-                        or schema_fallback_allowed
-                    )
+                    and (not item.document_key.startswith("firebase:schema:") or schema_fallback_allowed)
                 ]
                 if fallback_runtime:
                     fallback_answer = (
@@ -4273,9 +4124,7 @@ class CorpusManager:
                     )
                 fallback_sources = self._firebase_sources(fallback_runtime, [])
                 if not fallback_runtime:
-                    fallback_sources.extend(
-                        self._lexical_sources(fallback_hits, fallback_sources)
-                    )
+                    fallback_sources.extend(self._lexical_sources(fallback_hits, fallback_sources))
                 if fallback_answer and fallback_sources:
                     confidence = evidence_confidence(
                         answered=True,
@@ -4348,6 +4197,7 @@ class CorpusManager:
             "提示されていない事実は補完しないぽん。"
         )
         try:
+
             async def generate_recovery():
                 return await self._client.aio.models.generate_content(
                     model=model,
@@ -4355,7 +4205,11 @@ class CorpusManager:
                     config=generation_config(
                         model,
                         thinking_level=(
-                            "minimal" if ai_profile() == "budget" else "low"
+                            "low"
+                            if requires_comprehensive_answer(question)
+                            else "minimal"
+                            if ai_profile() == "budget"
+                            else "low"
                         ),
                         max_output_tokens=max_output_tokens,
                         system_instruction=recovery_instruction,
@@ -4426,9 +4280,7 @@ class CorpusManager:
         try:
             # ``raw_decode`` accepts compact or pretty-printed JSON and stops
             # before any later evidence metadata in the same body.
-            fields, _end = json.JSONDecoder().raw_decode(
-                item.body[fields_marker.end():].lstrip()
-            )
+            fields, _end = json.JSONDecoder().raw_decode(item.body[fields_marker.end() :].lstrip())
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
         if not isinstance(fields, dict):
@@ -4494,18 +4346,13 @@ class CorpusManager:
                 excerpt = excerpt[:419].rstrip() + "…"
             if excerpt:
                 period = f" / {hit.festival}th" if hit.festival is not None else ""
-                record_lines.append(
-                    f"- **{hit.channel_name}{period}** — {excerpt}"
-                )
+                record_lines.append(f"- **{hit.channel_name}{period}** — {excerpt}")
         if record_lines:
             sections.append("### 文書・コード上の記録\n" + "\n".join(record_lines))
 
         if not sections:
             return ""
-        return (
-            f"**{subject}**について、確認できた根拠を種類ごとに整理するぽん。\n\n"
-            + "\n\n".join(sections)
-        )
+        return f"**{subject}**について、確認できた根拠を種類ごとに整理するぽん。\n\n" + "\n\n".join(sections)
 
     @staticmethod
     def _render_retrieved_evidence_fallback(
@@ -4560,8 +4407,7 @@ class CorpusManager:
             return ""
         return (
             "要約文と根拠の対応を十分に確認できなかったため、安全に統合した"
-            "確定回答ではなく、質問に近い候補記録だけを短く示すぽん。\n\n"
-            + "\n".join(lines)
+            "確定回答ではなく、質問に近い候補記録だけを短く示すぽん。\n\n" + "\n".join(lines)
         )
 
     @staticmethod
@@ -4581,11 +4427,7 @@ class CorpusManager:
         exactly match the in-process reviewed registry; Firestore may only add
         a subset of safely projected, observed field names.
         """
-        schema_items = [
-            item
-            for item in evidence
-            if item.document_key.startswith("firebase:schema:")
-        ]
+        schema_items = [item for item in evidence if item.document_key.startswith("firebase:schema:")]
         if not schema_items:
             return ()
 
@@ -4626,24 +4468,16 @@ class CorpusManager:
                 or item.document_key != f"firebase:schema:{source_type}"
                 or item.authority != "deployed_implementation"
                 or item.status != "deployed"
-                or lines[1]
-                != f"schema_contract: {FIREBASE_SCHEMA_CONTRACT_VERSION}"
+                or lines[1] != f"schema_contract: {FIREBASE_SCHEMA_CONTRACT_VERSION}"
                 or lines[2] != f"reference: schema:{source_type}"
-                or lines[7]
-                != "scope: public-readonly-projection; not-a-complete-firestore-schema"
+                or lines[7] != "scope: public-readonly-projection; not-a-complete-firestore-schema"
             ):
                 return ()
 
             config = COLLECTIONS[source_type]
-            path_kind = (
-                "document_path"
-                if config.get("document") is True
-                else "collection_path"
-            )
+            path_kind = "document_path" if config.get("document") is True else "collection_path"
             path = str(config["path"]).format(festival=festival)
-            expected_title = (
-                f"{festival}th {source_labels[source_type]}の公開データ契約"
-            )
+            expected_title = f"{festival}th {source_labels[source_type]}の公開データ契約"
             expected_source_url = self.firebase_knowledge._console_url(path)
             if (
                 lines[3] != f"{path_kind}: {path}"
@@ -4652,9 +4486,7 @@ class CorpusManager:
             ):
                 return ()
 
-            if not lines[4].startswith("allowlisted_fields: ") or not lines[5].startswith(
-                "observed_fields: "
-            ):
+            if not lines[4].startswith("allowlisted_fields: ") or not lines[5].startswith("observed_fields: "):
                 return ()
             try:
                 allowlisted = json.loads(lines[4].removeprefix("allowlisted_fields: "))
@@ -4670,9 +4502,7 @@ class CorpusManager:
             ):
                 return ()
             observed_fields = tuple(observed)
-            expected_observed_order = tuple(
-                field for field in expected_allowlist if field in set(observed_fields)
-            )
+            expected_observed_order = tuple(field for field in expected_allowlist if field in set(observed_fields))
             if observed_fields != expected_observed_order:
                 return ()
 
@@ -4692,10 +4522,7 @@ class CorpusManager:
                     }
                     and observed_fields
                 )
-                or (
-                    observation == "withheld-until-public-result"
-                    and source_type != "ranking"
-                )
+                or (observation == "withheld-until-public-result" and source_type != "ranking")
             ):
                 return ()
 
@@ -4743,9 +4570,7 @@ class CorpusManager:
         ):
             return False
         source_types = {contract.source_type for contract in contracts}
-        asks_ranking = bool(
-            re.search(r"ranking|ランキング|大賞企画|y-?1(?:グランプリ)?", normalized)
-        )
+        asks_ranking = bool(re.search(r"ranking|ランキング|大賞企画|y-?1(?:グランプリ)?", normalized))
         asks_maps = bool(re.search(r"(?<![a-z])maps?(?![a-z])|地図|マップ", normalized))
         if asks_ranking and not source_types.issubset({"ranking", "rankingConfig"}):
             return False
@@ -4760,10 +4585,7 @@ class CorpusManager:
         """Render citations whose title and URL were rebuilt from the registry."""
         rendered: list[str] = []
         for contract in contracts:
-            label = (
-                "やがぽん公開読み取り投影: "
-                f"{_escape_citation_component(contract.title)}"
-            )
+            label = f"やがぽん公開読み取り投影: {_escape_citation_component(contract.title)}"
             if not citation_reference_is_safe(label, contract.source_url):
                 log.warning("Blocked unsafe Firebase schema citation metadata")
                 continue
@@ -4793,18 +4615,12 @@ class CorpusManager:
             "",
         ]
         for contract in contracts:
-            path_label = (
-                "ドキュメント"
-                if contract.path_kind == "document_path"
-                else "コレクション"
-            )
+            path_label = "ドキュメント" if contract.path_kind == "document_path" else "コレクション"
             lines.extend(
                 (
-                    f"## {contract.festival}th "
-                    f"{labels.get(contract.source_type, contract.source_type)}",
+                    f"## {contract.festival}th {labels.get(contract.source_type, contract.source_type)}",
                     f"- {path_label}: `{contract.path}`",
-                    "- 公開回答への投影allowlist: "
-                    + ", ".join(f"`{field}`" for field in contract.allowlisted_fields),
+                    "- 公開回答への投影allowlist: " + ", ".join(f"`{field}`" for field in contract.allowlisted_fields),
                 )
             )
             if contract.observed_fields:
@@ -4813,17 +4629,11 @@ class CorpusManager:
                     + ", ".join(f"`{field}`" for field in contract.observed_fields)
                 )
             elif contract.observation == "withheld-until-public-result":
-                lines.append(
-                    "- 現在の観測フィールド: 結果公開前の得票値を出さないため表示していないぽん。"
-                )
+                lines.append("- 現在の観測フィールド: 結果公開前の得票値を出さないため表示していないぽん。")
             elif contract.observation == "lookup-unavailable":
-                lines.append(
-                    "- 現在の観測フィールド: Firestoreを確認できなかったため未確認だぽん。"
-                )
+                lines.append("- 現在の観測フィールド: Firestoreを確認できなかったため未確認だぽん。")
             else:
-                lines.append(
-                    "- 現在の観測フィールド: 今回取得した公開データでは確認できなかったぽん。"
-                )
+                lines.append("- 現在の観測フィールド: 今回取得した公開データでは確認できなかったぽん。")
             lines.append("")
         lines.append(
             "※ これは現在の公開用allowlistと、取得できた場合の観測フィールド名の一覧だぽん。"
@@ -4928,10 +4738,7 @@ class CorpusManager:
 
                 reference = reference_match.group("reference").strip()
                 expected_reference = f"{source_type}:{offset + 1}"
-                if (
-                    reference != expected_reference
-                    or current.document_key != f"firebase:{expected_reference}"
-                ):
+                if reference != expected_reference or current.document_key != f"firebase:{expected_reference}":
                     return ()
                 try:
                     fields = json.loads(fields_match.group("fields"))
@@ -4998,9 +4805,7 @@ class CorpusManager:
                 question,
             )
         )
-        include_notification_action = bool(
-            re.search(r"(?:リンク|URL|アクション|遷移先)", question, re.IGNORECASE)
-        )
+        include_notification_action = bool(re.search(r"(?:リンク|URL|アクション|遷移先)", question, re.IGNORECASE))
         if len(groups) > 1:
             lines.extend(("# Firebase現在値一覧", ""))
         for group_index, group in enumerate(groups):
@@ -5008,23 +4813,16 @@ class CorpusManager:
             lines.append(f"## {safe_title}一覧（{group.returned}件）")
             if group.completeness == "complete":
                 if group.source_type == "notifications":
-                    lines.append(
-                        f"Firebaseで質問条件に一致した全{group.matched}件を掲載するぽん。"
-                    )
+                    lines.append(f"Firebaseで質問条件に一致した全{group.matched}件を掲載するぽん。")
                 else:
-                    lines.append(
-                        f"Firebaseで質問条件に一致した{group.matched}件を、"
-                        "省略せずすべて掲載するぽん。"
-                    )
+                    lines.append(f"Firebaseで質問条件に一致した{group.matched}件を、省略せずすべて掲載するぽん。")
             else:
                 lines.append(
                     f"取得上限（{group.reader_limit}件）に到達したため、取得できた"
                     f"{group.returned}件はすべて掲載するが、Firestore全体の全件性は"
                     "まだ確認できないぽん。"
                 )
-            lines.append(
-                f"並び順: {cls._escape_untrusted_markdown(group.order)}"
-            )
+            lines.append(f"並び順: {cls._escape_untrusted_markdown(group.order)}")
             lines.append("")
             for item in group.items:
                 display_name = next(
@@ -5036,9 +4834,7 @@ class CorpusManager:
                     f"項目 {item.position}",
                 )
                 if group.source_type == "notifications":
-                    timestamp = item.fields.get("publishedAt") or item.fields.get(
-                        "createdAt"
-                    )
+                    timestamp = item.fields.get("publishedAt") or item.fields.get("createdAt")
                     metadata = []
                     if timestamp:
                         metadata.append(str(timestamp))
@@ -5049,19 +4845,9 @@ class CorpusManager:
                     if isinstance(targets, list) and targets:
                         metadata.append("対象: " + "/".join(map(str, targets)))
                     if "sendPush" in item.fields:
-                        metadata.append(
-                            "Push: あり" if item.fields.get("sendPush") else "Push: なし"
-                        )
-                    suffix = (
-                        " — "
-                        + cls._escape_untrusted_markdown(" / ".join(metadata))
-                        if metadata
-                        else ""
-                    )
-                    lines.append(
-                        f"{item.position}. **{cls._escape_untrusted_markdown(display_name)}**"
-                        f"{suffix}"
-                    )
+                        metadata.append("Push: あり" if item.fields.get("sendPush") else "Push: なし")
+                    suffix = " — " + cls._escape_untrusted_markdown(" / ".join(metadata)) if metadata else ""
+                    lines.append(f"{item.position}. **{cls._escape_untrusted_markdown(display_name)}**{suffix}")
                     action = item.fields.get("action")
                     action_rendered = False
                     if isinstance(action, dict):
@@ -5069,10 +4855,7 @@ class CorpusManager:
                         url = action.get("url")
                         action_parts = [str(value) for value in (label, url) if value]
                         if action_parts:
-                            lines.append(
-                                "   - アクション: "
-                                + cls._escape_untrusted_markdown(" — ".join(action_parts))
-                            )
+                            lines.append("   - アクション: " + cls._escape_untrusted_markdown(" — ".join(action_parts)))
                             action_rendered = True
                     if include_notification_action and not action_rendered:
                         lines.append("   - アクション: なし")
@@ -5085,9 +4868,7 @@ class CorpusManager:
                         else:
                             lines.append("   - 本文: （未設定）")
                     continue
-                lines.append(
-                    f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}"
-                )
+                lines.append(f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}")
                 for key, value in item.fields.items():
                     rendered_value = json.dumps(
                         value,
@@ -5096,8 +4877,7 @@ class CorpusManager:
                         separators=(",", ":"),
                     )
                     lines.append(
-                        f"- `{cls._escape_untrusted_markdown(key)}`: "
-                        f"{cls._escape_untrusted_markdown(rendered_value)}"
+                        f"- `{cls._escape_untrusted_markdown(key)}`: {cls._escape_untrusted_markdown(rendered_value)}"
                     )
                 lines.append("")
             if group.source_type == "notifications":
@@ -5105,9 +4885,7 @@ class CorpusManager:
                 if include_notification_body:
                     lines.append("指定に合わせて、取得できた本文も掲載したぽん。")
                 else:
-                    lines.append(
-                        "一覧では本文を省略しているぽん。通知名を指定すれば本文も確認できるぽん。"
-                    )
+                    lines.append("一覧では本文を省略しているぽん。通知名を指定すれば本文も確認できるぽん。")
             if group_index + 1 < len(groups):
                 lines.append("---")
                 lines.append("")
@@ -5210,16 +4988,12 @@ class CorpusManager:
             if heading:
                 value = heading.group(1).strip()
                 if cls._normalized_grounding_text(value) in {
-                    cls._normalized_grounding_text(item)
-                    for item in _NONFACTUAL_GROUNDING_HEADINGS
+                    cls._normalized_grounding_text(item) for item in _NONFACTUAL_GROUNDING_HEADINGS
                 }:
                     continue
 
             value = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", value).strip()
-            if (
-                cls._normalized_grounding_claim(value)
-                in _NONFACTUAL_GROUNDING_CLAIMS
-            ):
+            if cls._normalized_grounding_claim(value) in _NONFACTUAL_GROUNDING_CLAIMS:
                 continue
             if re.search(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠]", value):
                 claims.append(value)
@@ -5251,9 +5025,7 @@ class CorpusManager:
     def _grounding_claims_covered(cls, answer_text: str, segment_texts: list[str]) -> bool:
         raw_claims = cls._grounding_claims(answer_text)
         claims = [
-            (raw, cls._normalized_grounding_claim(raw))
-            for raw in raw_claims
-            if cls._normalized_grounding_claim(raw)
+            (raw, cls._normalized_grounding_claim(raw)) for raw in raw_claims if cls._normalized_grounding_claim(raw)
         ]
         if not claims:
             return True
@@ -5299,8 +5071,7 @@ class CorpusManager:
             for match in _RECOVERY_JAPANESE_NUMBER_UNIT_RE.finditer(raw_clause)
         )
         atoms.extend(
-            cls._normalized_grounding_text(match.group(0))
-            for match in _CRITICAL_GROUNDING_ATOM_RE.finditer(raw_clause)
+            cls._normalized_grounding_text(match.group(0)) for match in _CRITICAL_GROUNDING_ATOM_RE.finditer(raw_clause)
         )
         for match in _RECOVERY_PROPER_TOKEN_RE.finditer(raw_clause):
             atom = cls._normalized_grounding_text(match.group(0))
@@ -5317,8 +5088,7 @@ class CorpusManager:
             return ()
 
         quoted = [
-            cls._normalized_grounding_text(match.group(1))
-            for match in _RECOVERY_QUOTED_VALUE_RE.finditer(raw_claim)
+            cls._normalized_grounding_text(match.group(1)) for match in _RECOVERY_QUOTED_VALUE_RE.finditer(raw_claim)
         ]
         quoted = [value for value in quoted if value]
         if quoted:
@@ -5333,11 +5103,7 @@ class CorpusManager:
             return ()
 
         parts = re.split(r"(?:または|もしくは|あるいは)", values)
-        atoms = [
-            cls._normalized_grounding_text(part)
-            for part in parts
-            if cls._normalized_grounding_text(part)
-        ]
+        atoms = [cls._normalized_grounding_text(part) for part in parts if cls._normalized_grounding_text(part)]
         # Long prose after a role marker is not a stable identifier. In that
         # case ordinary atom and bigram verification remains fail-closed.
         if not atoms or any(len(atom) > 32 for atom in atoms):
@@ -5348,10 +5114,7 @@ class CorpusManager:
     def _recovery_permission_atoms(cls, raw_claim: str) -> tuple[str, ...]:
         """Extract permission actors independently of role-marker word order."""
         atoms = list(cls._recovery_role_atoms(raw_claim))
-        if not (
-            _RECOVERY_ROLE_MARKER_RE.search(raw_claim)
-            or _RECOVERY_PERMISSION_PREDICATE_RE.search(raw_claim)
-        ):
+        if not (_RECOVERY_ROLE_MARKER_RE.search(raw_claim) or _RECOVERY_PERMISSION_PREDICATE_RE.search(raw_claim)):
             return tuple(atoms)
 
         for connector in re.finditer(r"(?:または|もしくは|あるいは)", raw_claim):
@@ -5390,10 +5153,7 @@ class CorpusManager:
             for match in _RECOVERY_PERMISSION_POST_ACTOR_RE.finditer(raw_claim):
                 actor = match.group("actor").strip("「『 」")
                 actor = re.sub(r"(?:だ|です|である)$", "", actor)
-                if any(
-                    connector in actor
-                    for connector in ("または", "もしくは", "あるいは")
-                ):
+                if any(connector in actor for connector in ("または", "もしくは", "あるいは")):
                     continue
                 atom = cls._normalized_grounding_text(actor)
                 if atom and len(atom) <= 32 and not re.search(r"\d", atom):
@@ -5407,11 +5167,7 @@ class CorpusManager:
         normalized = cls._normalized_grounding_text(value)
         states = set()
         if "削除" in normalized:
-            states.add(
-                "retained"
-                if _RECOVERY_NEGATED_DELETION_RE.search(normalized)
-                else "not_retained"
-            )
+            states.add("retained" if _RECOVERY_NEGATED_DELETION_RE.search(normalized) else "not_retained")
         if _RECOVERY_NEGATIVE_RETENTION_RE.search(normalized):
             states.add("not_retained")
         if _RECOVERY_POSITIVE_RETENTION_RE.search(normalized):
@@ -5495,11 +5251,7 @@ class CorpusManager:
         ):
             if answer_state == "conflicting" or evidence_state == "conflicting":
                 return True
-            if (
-                answer_state is not None
-                and evidence_state is not None
-                and answer_state != evidence_state
-            ):
+            if answer_state is not None and evidence_state is not None and answer_state != evidence_state:
                 return True
         return False
 
@@ -5528,9 +5280,7 @@ class CorpusManager:
         if answer_state == "conflicting":
             return True
         evidence_state = cls._recovery_subcollection_state(raw_evidence)
-        return evidence_state == "conflicting" or (
-            evidence_state is not None and evidence_state != answer_state
-        )
+        return evidence_state == "conflicting" or (evidence_state is not None and evidence_state != answer_state)
 
     @classmethod
     def _recovery_permission_atom_in_evidence(
@@ -5617,9 +5367,7 @@ class CorpusManager:
         for match in re.finditer(re.escape(atom), surface, re.IGNORECASE):
             left = surface[: match.start()]
             right = surface[match.end() :]
-            if (not left or left.endswith(left_boundaries)) and (
-                not right or right.startswith(right_boundaries)
-            ):
+            if (not left or left.endswith(left_boundaries)) and (not right or right.startswith(right_boundaries)):
                 return True
         return False
 
@@ -5685,10 +5433,7 @@ class CorpusManager:
             # character overlap for a structural existence assertion.
             return False
         atoms = cls._recovery_required_atoms(raw_clause, clause)
-        if any(
-            not cls._recovery_atom_in_evidence(atom, evidence, raw_evidence)
-            for atom in atoms
-        ):
+        if any(not cls._recovery_atom_in_evidence(atom, evidence, raw_evidence) for atom in atoms):
             return False
 
         if clause in evidence:
@@ -5704,11 +5449,7 @@ class CorpusManager:
             if _CRITICAL_GROUNDING_CLAIM_RE.search(raw_clause)
             else _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
         )
-        return (
-            len(matched) >= minimum_matches
-            and len(matched) / len(clause_bigrams)
-            >= threshold
-        )
+        return len(matched) >= minimum_matches and len(matched) / len(clause_bigrams) >= threshold
 
     @classmethod
     def _elliptical_non_retention_supported(
@@ -5848,15 +5589,13 @@ class CorpusManager:
         verified = [
             claim
             for claim in claims
-            if cls._recovered_claim_is_standalone(claim)
-            and cls._recovered_claims_supported(claim, evidence_texts)
+            if cls._recovered_claim_is_standalone(claim) and cls._recovered_claims_supported(claim, evidence_texts)
         ]
         if not verified:
             return ""
 
-        return (
-            "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
-            + "\n".join(f"- {claim}" for claim in verified)
+        return "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n" + "\n".join(
+            f"- {claim}" for claim in verified
         )
 
     @staticmethod
@@ -5912,13 +5651,10 @@ class CorpusManager:
         supports = getattr(grounding, "grounding_supports", None)
         invalid_supports = 0
         support_indices: list[tuple[object, tuple[int, ...]]] = []
-        missing_required_supports = bool(
-            supports is None and chunks and REQUIRE_GROUNDING_SUPPORTS
-        )
+        missing_required_supports = bool(supports is None and chunks and REQUIRE_GROUNDING_SUPPORTS)
         if supports is None and chunks:
             log.warning(
-                "File Search grounding_supports missing; semantic citation fallback "
-                "(required=%s chunk_count=%s)",
+                "File Search grounding_supports missing; semantic citation fallback (required=%s chunk_count=%s)",
                 REQUIRE_GROUNDING_SUPPORTS,
                 len(chunks),
             )
@@ -6289,9 +6025,7 @@ class CorpusManager:
         category_id = channel.category_id
         category_name = channel.category_name
         topic = channel.topic
-        auto_promote = (
-            allow_automatic_promotion and channel.automatic_promotion_allowed
-        )
+        auto_promote = allow_automatic_promotion and channel.automatic_promotion_allowed
         documents = []
         for group in cls._split_knowledge_messages(messages):
             start_at = group[0].timestamp.astimezone(JST)
@@ -6380,9 +6114,7 @@ class CorpusManager:
         """Compatibility wrapper for synchronous callers and focused tests."""
 
         snapshot = (
-            channel
-            if isinstance(channel, ChannelKnowledgeSnapshot)
-            else cls._channel_knowledge_snapshot(channel)
+            channel if isinstance(channel, ChannelKnowledgeSnapshot) else cls._channel_knowledge_snapshot(channel)
         )
         return cls._build_knowledge_documents_from_snapshot(
             snapshot,
@@ -6427,10 +6159,9 @@ class CorpusManager:
         source_type = str(metadata.get("source_type") or "").strip()
         if source_type:
             return source_type == "discord_conversation"
-        return (
-            str(metadata.get("source") or "").strip() == "discord"
-            and str(metadata.get("schema") or "").strip().startswith("discord-")
-        )
+        return str(metadata.get("source") or "").strip() == "discord" and str(
+            metadata.get("schema") or ""
+        ).strip().startswith("discord-")
 
     @staticmethod
     def _legacy_channel_names(display_name: str) -> tuple[str, ...]:
@@ -6464,9 +6195,7 @@ class CorpusManager:
     ) -> RemoteInventoryIndex:
         """Scan a remote inventory once and create immutable lookup tables."""
 
-        documents_by_channel: dict[
-            tuple[int, int], list[RemoteInventoryDocument]
-        ] = {}
+        documents_by_channel: dict[tuple[int, int], list[RemoteInventoryDocument]] = {}
         legacy_documents_by_name: dict[str, list[RemoteInventoryDocument]] = {}
         channel_names_by_id: dict[tuple[int, int], set[str]] = {}
         for position, document in enumerate(documents):
@@ -6489,9 +6218,7 @@ class CorpusManager:
                     metadata=MappingProxyType(metadata),
                 )
                 for channel_name in channel_names:
-                    legacy_documents_by_name.setdefault(channel_name, []).append(
-                        snapshot
-                    )
+                    legacy_documents_by_name.setdefault(channel_name, []).append(snapshot)
                 continue
 
             raw_guild_id = str(metadata.get("guild_id") or "")
@@ -6531,18 +6258,11 @@ class CorpusManager:
             documents_by_channel.setdefault(key, []).append(snapshot)
 
         return RemoteInventoryIndex(
-            documents_by_channel=MappingProxyType(
-                {key: tuple(value) for key, value in documents_by_channel.items()}
-            ),
+            documents_by_channel=MappingProxyType({key: tuple(value) for key, value in documents_by_channel.items()}),
             legacy_documents_by_name=MappingProxyType(
                 {key: tuple(value) for key, value in legacy_documents_by_name.items()}
             ),
-            channel_names_by_id=MappingProxyType(
-                {
-                    key: frozenset(value)
-                    for key, value in channel_names_by_id.items()
-                }
-            ),
+            channel_names_by_id=MappingProxyType({key: frozenset(value) for key, value in channel_names_by_id.items()}),
         )
 
     @staticmethod
@@ -6560,9 +6280,7 @@ class CorpusManager:
         iso_value = metadata.get(iso_key)
         if iso_value:
             try:
-                parsed = datetime.fromisoformat(
-                    str(iso_value).replace("Z", "+00:00")
-                )
+                parsed = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
             except ValueError:
                 return None
             if parsed.tzinfo is None:
@@ -6589,18 +6307,14 @@ class CorpusManager:
             )
         )
         if allow_legacy_name_match:
-            candidates.extend(
-                inventory.legacy_documents_by_name.get(channel.channel_name, ())
-            )
+            candidates.extend(inventory.legacy_documents_by_name.get(channel.channel_name, ()))
         candidates.sort(key=lambda document: document.position)
         after_timestamp = after.timestamp() if after else None
         before_timestamp = before.timestamp() if before else None
         matches = []
         for document in candidates:
             metadata = document.metadata
-            document_start = cls._metadata_timestamp(
-                metadata, "start_epoch", "start_at"
-            )
+            document_start = cls._metadata_timestamp(metadata, "start_epoch", "start_at")
             document_end = cls._metadata_timestamp(metadata, "end_epoch", "end_at")
             if document_start is None or document_end is None:
                 match = re.search(
@@ -6610,17 +6324,13 @@ class CorpusManager:
                 )
                 if match:
                     try:
-                        inferred_start = datetime.strptime(
-                            match.group(1), "%Y-%m-%d %H:%M"
-                        ).replace(tzinfo=JST)
+                        inferred_start = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=JST)
                         # Legacy display names retain only minute precision.
                         # Treat the end as the last possible instant in that
                         # minute so a bounded replacement cannot drop seconds
                         # that were rounded out of the name.
                         inferred_end = (
-                            datetime.strptime(
-                                match.group(2), "%Y-%m-%d %H:%M"
-                            ).replace(tzinfo=JST)
+                            datetime.strptime(match.group(2), "%Y-%m-%d %H:%M").replace(tzinfo=JST)
                             + timedelta(minutes=1)
                             - timedelta(microseconds=1)
                         )
@@ -6642,18 +6352,12 @@ class CorpusManager:
                 # document is contained by a bounded fetch. Preserve it for a
                 # later unbounded maintenance rebuild.
                 continue
-            if (
-                after_timestamp is not None
-                and (document_start is None or document_start <= after_timestamp)
-            ):
+            if after_timestamp is not None and (document_start is None or document_start <= after_timestamp):
                 # Discord's ``after`` bound is exclusive. Keep any document
                 # that is not provably wholly inside the fetched slice; deleting
                 # an overlapping chunk would lose its pre-boundary messages.
                 continue
-            if (
-                before_timestamp is not None
-                and (document_end is None or document_end >= before_timestamp)
-            ):
+            if before_timestamp is not None and (document_end is None or document_end >= before_timestamp):
                 # ``before`` is exclusive as well. Equality and unknown ends
                 # are retained for the same lossless-replacement guarantee.
                 continue
@@ -6674,9 +6378,7 @@ class CorpusManager:
         """Find replaceable documents without doing CPU scans on the bot loop."""
 
         channel_snapshot = (
-            channel
-            if isinstance(channel, ChannelKnowledgeSnapshot)
-            else self._channel_knowledge_snapshot(channel)
+            channel if isinstance(channel, ChannelKnowledgeSnapshot) else self._channel_knowledge_snapshot(channel)
         )
         inventory = remote_inventory_index
         if inventory is None:
@@ -6725,11 +6427,7 @@ class CorpusManager:
         }
         if any(not names for names in names_by_channel_id.values()):
             return False
-        owners = {
-            channel_id
-            for channel_id, names in names_by_channel_id.items()
-            if channel.channel_name in names
-        }
+        owners = {channel_id for channel_id, names in names_by_channel_id.items() if channel.channel_name in names}
         return owners == {channel.channel_id}
 
     async def backfill_channel(
@@ -6748,9 +6446,7 @@ class CorpusManager:
     ) -> BackfillResult:
         """履歴を再現可能な文書へ変換し、成功後に同範囲の旧文書を置換する。"""
         if authorize_history_promotion and not full_history:
-            raise ValueError(
-                "authorize_history_promotion requires full_history=True"
-            )
+            raise ValueError("authorize_history_promotion requires full_history=True")
         if session is not None:
             if int(channel.guild.id) != session.guild_id:
                 raise ValueError("Backfill session guild does not match channel")
@@ -6775,10 +6471,7 @@ class CorpusManager:
             remote_inventory_index = None
             allow_legacy_name_match = True
             if session is not None:
-                if (
-                    session.remote_inventory is None
-                    or session.remote_inventory_index is None
-                ):
+                if session.remote_inventory is None or session.remote_inventory_index is None:
                     raise RuntimeError("Prepared backfill remote inventory is unavailable")
                 remote_inventory = session.remote_inventory
                 remote_inventory_index = session.remote_inventory_index
@@ -6880,8 +6573,7 @@ class CorpusManager:
                 # the cursor. The next idempotent run can remove the remaining
                 # old documents without losing the already-replaced range.
                 raise RuntimeError(
-                    "Could not replace all existing channel documents "
-                    f"({deleted}/{len(replaceable)} deleted)"
+                    f"Could not replace all existing channel documents ({deleted}/{len(replaceable)} deleted)"
                 )
         if session is not None and not session.dry_run and complete_session_channel:
             session.completed_channel_ids.add(int(channel.id))
@@ -6963,10 +6655,7 @@ class CorpusManager:
                 # An empty local mirror may be a new/recovered installation
                 # with an existing remote store. Reconcile remotely once in
                 # that case; normal scheduled runs stay entirely local.
-                session.remote_inventory = tuple(
-                    local_inventory
-                    or await self.list_remote_documents(corpus_store_name)
-                )
+                session.remote_inventory = tuple(local_inventory or await self.list_remote_documents(corpus_store_name))
                 session.remote_inventory_index = await asyncio.to_thread(
                     self._index_remote_inventory,
                     session.remote_inventory,

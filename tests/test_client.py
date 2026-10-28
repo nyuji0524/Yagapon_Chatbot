@@ -45,9 +45,7 @@ def test_clean_rag_query_removes_bot_role_mention():
 def test_clean_rag_query_preserves_numbered_multiline_structure():
     content = "<@123> 次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題\n@silent"
 
-    assert _clean_rag_query(content, 123) == (
-        "次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題"
-    )
+    assert _clean_rag_query(content, 123) == ("次を詳しく教えてください。\n\n1. 権限\n2. 運用上の問題")
 
 
 def test_same_name_role_assigned_to_bot_is_an_invocation():
@@ -179,7 +177,7 @@ def test_decorate_rag_answer_uses_cry_for_missing_knowledge():
 
 def test_rag_confidence_line_explains_server_side_search_audit():
     assert _rag_confidence_line(82, "高", "根拠3件 / 2系統 / 監査済み") == (
-        "**根拠信頼度（検索・監査）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
+        "**回答信頼度（根拠・充足度）: 82/100（高）** — 根拠3件 / 2系統 / 監査済み"
     )
     assert _rag_confidence_line(None, None, None) == ""
 
@@ -276,7 +274,9 @@ async def test_send_split_message_never_sends_empty_payload_for_long_line():
 async def test_send_split_message_uses_one_complete_markdown_attachment_for_very_long_answer():
     destination = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1)))
     answer = "長い回答だぽん。\n" + "根拠の詳細\n" * 2500
-    text = f"{answer}\n\n回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
+    text = (
+        f"{answer}\n\n回答の品質を評価してください：✅ 正しい / ⚠️ 一部不正確 / ❌ 誤り（対応した絵文字でリアクション）"
+    )
 
     sent = await YagaPon.send_split_message(None, destination, text)
 

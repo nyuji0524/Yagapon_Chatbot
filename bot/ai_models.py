@@ -11,7 +11,11 @@ from google.genai import types
 
 _PROFILE_MODELS = {
     "budget": {
-        "rag": "gemini-3.1-flash-lite",
+        # RAG must synthesize several evidence families and follow the
+        # evidence-key contract.  3.1 Flash-Lite was cheap but frequently
+        # collapsed broad questions to one fact.  3.5 Flash-Lite keeps the
+        # low-cost tier while restoring enough instruction following for RAG.
+        "rag": "gemini-3.5-flash-lite",
         "response": "gemini-3.1-flash-lite",
         "minutes": "gemini-3.5-flash-lite",
         "fast": "gemini-3.1-flash-lite",

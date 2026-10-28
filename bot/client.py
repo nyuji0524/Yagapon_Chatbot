@@ -132,9 +132,7 @@ def _discord_channel_lineage(channel) -> dict[str, object]:
     parent_name = str(getattr(parent, "name", "") or "")
     category = getattr(channel, "category", None) or getattr(parent, "category", None)
     category_id = (
-        getattr(channel, "category_id", None)
-        or getattr(category, "id", None)
-        or getattr(parent, "category_id", None)
+        getattr(channel, "category_id", None) or getattr(category, "id", None) or getattr(parent, "category_id", None)
     )
     return {
         "parent_id": int(parent_id) if parent_id is not None else None,
@@ -179,12 +177,12 @@ def _rag_confidence_line(
     label: str | None,
     detail: str | None,
 ) -> str:
-    """Render server-calculated retrieval confidence, never model self-rating."""
+    """Render server-calculated evidence and requirement coverage confidence."""
     if score is None or label is None:
         return ""
     bounded_score = max(0, min(100, int(score)))
     suffix = f" — {detail}" if detail else ""
-    return f"**根拠信頼度（検索・監査）: {bounded_score}/100（{label}）**{suffix}"
+    return f"**回答信頼度（根拠・充足度）: {bounded_score}/100（{label}）**{suffix}"
 
 
 def _rag_visibility_scope(guild, member, channel) -> tuple[tuple[int, ...], bool]:
@@ -196,8 +194,7 @@ def _rag_visibility_scope(guild, member, channel) -> tuple[tuple[int, ...], bool
     )
 
     guildwide_access = bool(
-        has_guildwide_rag_access(guild, member)
-        and channel_audience_has_guildwide_rag_access(guild, channel)
+        has_guildwide_rag_access(guild, member) and channel_audience_has_guildwide_rag_access(guild, channel)
     )
     if guildwide_access:
         return readable_channel_ids(guild, member), True
@@ -471,9 +468,7 @@ class YagaPon(discord.Bot):
         if bot_departed_source:
             if getattr(session, "_intentional_stop", False):
                 return
-            interruption_reason = (
-                "bot-moved" if after.channel is not None else "bot-disconnected"
-            )
+            interruption_reason = "bot-moved" if after.channel is not None else "bot-disconnected"
             session.is_active = False
             # Metadata failure must not skip stop/fsync. The session helper
             # latches the integrity failure in memory and absorbs mark errors.
@@ -620,12 +615,8 @@ class YagaPon(discord.Bot):
                             transcript=session.transcript_text,
                             transcript_url=transcript_url,
                         )
-                    if not await session.mark_delivered(
-                        transcript_url=transcript_url
-                    ):
-                        raise RuntimeError(
-                            "terminal delivery checkpoint could not be persisted"
-                        )
+                    if not await session.mark_delivered(transcript_url=transcript_url):
+                        raise RuntimeError("terminal delivery checkpoint could not be persisted")
                     return
 
                 from bot.commands.voice_cmd import _summarize_minutes
@@ -677,9 +668,7 @@ class YagaPon(discord.Bot):
                     drive_url=drive_url,
                     transcript_url=transcript_url,
                 ):
-                    raise RuntimeError(
-                        "terminal delivery checkpoint could not be persisted"
-                    )
+                    raise RuntimeError("terminal delivery checkpoint could not be persisted")
             except Exception as exc:
                 if session.recording_sink:
                     mark_sink = getattr(session, "_mark_recording_sink", None)
@@ -733,9 +722,7 @@ class YagaPon(discord.Bot):
                     inline=False,
                 )
             capture_warning_reader = getattr(session, "capture_warning_text", None)
-            capture_warning = (
-                capture_warning_reader() if callable(capture_warning_reader) else ""
-            )
+            capture_warning = capture_warning_reader() if callable(capture_warning_reader) else ""
             if capture_warning:
                 embed.add_field(
                     name="⚠️ 録音の完全性",
@@ -998,9 +985,7 @@ class YagaPon(discord.Bot):
                 result.confidence_detail,
             )
             discord_answer = "\n\n".join(
-                part
-                for part in (decorated_answer, confidence_line, RAG_FEEDBACK_PROMPT)
-                if part
+                part for part in (decorated_answer, confidence_line, RAG_FEEDBACK_PROMPT) if part
             )
             sent_messages = await self.send_split_message(message.channel, discord_answer)
             if result.query_id and sent_messages:
@@ -1026,8 +1011,7 @@ class YagaPon(discord.Bot):
                 if attachment_text.endswith("\n\n"):
                     attachment_text = attachment_text[:-2]
             message = await destination.send(
-                "回答が長いため、全文をMarkdownファイルにまとめたぽん。"
-                f"\n\n{RAG_FEEDBACK_PROMPT}",
+                f"回答が長いため、全文をMarkdownファイルにまとめたぽん。\n\n{RAG_FEEDBACK_PROMPT}",
                 file=discord.File(
                     io.BytesIO(attachment_text.encode("utf-8")),
                     filename="yagapon-answer.md",
@@ -1170,11 +1154,7 @@ class YagaPon(discord.Bot):
                 )
 
             async def cancel_knowledge_refreshes(_timeout: float) -> None:
-                pending_refreshes = [
-                    task
-                    for task in getattr(self, "knowledge_refresh_tasks", ())
-                    if not task.done()
-                ]
+                pending_refreshes = [task for task in getattr(self, "knowledge_refresh_tasks", ()) if not task.done()]
                 for task in pending_refreshes:
                     task.cancel()
                 if pending_refreshes:
