@@ -1175,6 +1175,7 @@ class ScheduledBackfillManager:
                 guild_id,
                 (channel.id for channel in channels),
                 corpus_store,
+                prefer_local_inventory=True,
             )
             if session is None:
                 summary["status"] = "deferred"
