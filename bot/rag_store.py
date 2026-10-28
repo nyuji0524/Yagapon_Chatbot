@@ -1057,7 +1057,7 @@ class RagStore:
                 # subject when a common operational suffix would otherwise
                 # hide exact matches such as ``整理券`` inside ``整理券運用``.
                 compound = re.fullmatch(
-                    r"(.{2,})(運用|問題点|課題|保存先|開催状況)",
+                    r"(.{2,})(運用|問題点|課題|保存先|開催状況|(?i:Web)|ウェブ)",
                     segment,
                 )
                 if compound:
@@ -1112,6 +1112,7 @@ class RagStore:
             term
             for term in terms
             if not re.fullmatch(r"(?:要求|要望|依頼)された内容", term)
+            and not re.fullmatch(r".{0,16}対して(?:行った)?対応", term)
         ]
         # The compound is the useful subject; the bare English suffix occurs
         # in almost every web repository document and crowds out relevant
@@ -1294,11 +1295,27 @@ class RagStore:
         # then scored them in Python.  Repositories with many history chunks
         # could therefore starve a much more relevant Discord or meeting
         # record before it was ever considered.
+        # The first extracted term is the concrete subject.  An abbreviated
+        # subject produced by suffix stripping (for example ``新歓`` from
+        # ``新歓Web``) is equally important.  Generic action words such as
+        # ``対応`` and ``変更`` must not outrank that subject merely because a
+        # very long source-code diff happens to contain many of them.
+        primary_term = clean_terms[0].casefold() if clean_terms else ""
+
+        def term_weight(term: str) -> int:
+            weight = 100 + min(len(term), 24) * 4
+            normalized = term.casefold()
+            if normalized == primary_term or (
+                len(term) >= 2 and normalized in primary_term
+            ):
+                return weight * 8
+            return weight
+
         relevance_parts = []
         relevance_params: list[object] = []
         body_expression = "d.body" if use_fts else "body"
         for term in clean_terms:
-            weight = 100 + min(len(term), 24) * 4
+            weight = term_weight(term)
             relevance_parts.append(
                 "CASE WHEN instr(lower("
                 f"{body_expression}), lower(?)) > 0 THEN {weight} ELSE 0 END"
@@ -1353,18 +1370,24 @@ class RagStore:
 
         with self._lock, self._connect() as connection:
             rows = list(fetch_rows())
-            if use_fts and short_terms:
+            short_subject_terms = [
+                term
+                for term in short_terms
+                if term.casefold() in primary_term
+            ]
+            if use_fts and short_subject_terms:
                 # FTS5 rejects MATCH on one side of an OR with ordinary
                 # predicates. Run a second bounded lane for two-character
                 # Japanese terms and merge it with the indexed candidates.
                 # This keeps the fast trigram path while ensuring records that
                 # say only ``他局``, ``依頼`` or ``削除`` remain discoverable.
                 short_condition = "(" + " OR ".join(
-                    "instr(lower(d.body), lower(?)) > 0" for _ in short_terms
+                    "instr(lower(d.body), lower(?)) > 0"
+                    for _ in short_subject_terms
                 ) + ")"
                 short_rows = fetch_rows(
                     short_condition,
-                    tuple(short_terms),
+                    tuple(short_subject_terms),
                     where_override=base_conditions,
                     params_override=base_params,
                     documents_only=True,
@@ -1408,7 +1431,7 @@ class RagStore:
             body = row["body"]
             excerpt = self._best_matching_excerpt(body, clean_terms)
             matched_terms = sum(
-                100 + min(len(term), 24) * 4
+                term_weight(term)
                 for term in clean_terms
                 if term.casefold() in body.casefold()
             )

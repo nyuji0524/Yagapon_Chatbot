@@ -145,7 +145,7 @@ def test_trigram_index_tracks_document_replacements(tmp_path):
     assert store.search_exact(1, ["新歓Web"], festival=27)
 
 
-def test_fts_search_keeps_short_japanese_terms_alongside_long_terms(tmp_path):
+def test_fts_search_keeps_abbreviated_japanese_subject_alongside_long_term(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     store.upsert_document(
         "documents/long-term",
@@ -169,7 +169,7 @@ def test_fts_search_keeps_short_japanese_terms_alongside_long_terms(tmp_path):
 
     hits = store.search_exact(
         1,
-        ["新歓Web", "他局", "依頼"],
+        ["新歓Web", "新歓", "他局", "依頼"],
         festival=27,
         limit=10,
     )
@@ -909,6 +909,61 @@ def test_sql_candidate_limit_uses_relevance_before_recency(tmp_path):
     assert hits[0].document_key == "specific"
 
 
+def test_abbreviated_subject_outranks_large_generic_action_documents(tmp_path):
+    store = RagStore(tmp_path / "rag.sqlite3")
+    common = [
+        {"key": "guild_id", "numeric_value": 1},
+        {"key": "festival", "numeric_value": 27},
+        {"key": "access_scope", "string_value": "guild"},
+        {"key": "authority", "string_value": "conversation"},
+        {"key": "status", "string_value": "raw"},
+        {"key": "source_type", "string_value": "discord_conversation"},
+    ]
+    for index in range(80):
+        store.upsert_document(
+            f"documents/generic-actions-{index}",
+            "要求、依頼、要望、規制、削除、修正、変更、掲載、反映、対応の一般資料",
+            [
+                *common,
+                {
+                    "key": "document_key",
+                    "string_value": f"generic-actions-{index}",
+                },
+            ],
+        )
+    store.upsert_document(
+        "documents/abbreviated-subject",
+        "新歓実から公開規制がなくなり、日程を掲載する対応を行った。",
+        [
+            *common,
+            {"key": "document_key", "string_value": "abbreviated-subject"},
+        ],
+    )
+
+    hits = store.search_exact(
+        1,
+        [
+            "新歓Web",
+            "新歓",
+            "外部",
+            "他局",
+            "対応",
+            "要求",
+            "依頼",
+            "要望",
+            "規制",
+            "削除",
+            "修正",
+            "変更",
+        ],
+        festival=27,
+        question_kind="history",
+        limit=4,
+    )
+
+    assert hits[0].document_key == "abbreviated-subject"
+
+
 def test_data_contract_filters_non_direct_history_before_candidate_limit(tmp_path):
     store = RagStore(tmp_path / "rag.sqlite3")
     common = [
@@ -1088,7 +1143,7 @@ def test_query_terms_keep_cross_team_and_data_contract_cues():
     shinkan = RagStore.query_terms("新歓webで外部や他局から要求された内容をまとめて")
     ranking = RagStore.query_terms("27thのrankingの構造と票数を教えて")
 
-    assert {"新歓web", "外部", "他局", "要求"}.issubset(
+    assert {"新歓web", "新歓", "外部", "他局", "要求"}.issubset(
         {term.casefold() for term in shinkan}
     )
     assert {"ranking", "構造", "票数"}.issubset(
@@ -1110,13 +1165,15 @@ def test_query_terms_decompose_compound_request_and_implementation_question():
 
 def test_query_terms_expand_request_and_response_history_vocabulary():
     terms = RagStore.query_terms(
-        "新歓Webで外部や他局から要求された内容と対応をまとめて"
+        "新歓Webで外部や他局から要求された内容と、それに対して行った対応をまとめて"
     )
 
     assert "Web" not in terms
     assert "要求された内容" not in terms
+    assert "それに対して行った対応" not in terms
     assert {
         "新歓web",
+        "新歓",
         "外部",
         "他局",
         "要求",
