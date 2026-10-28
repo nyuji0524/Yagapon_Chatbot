@@ -3582,7 +3582,15 @@ class CorpusManager:
                             for item in recovery_semantic_evidence
                             if item.citation and item.citation not in fallback_sources
                         )
-                        if fallback_answer and fallback_sources:
+                        if (
+                            fallback_answer
+                            and fallback_sources
+                            and not (
+                                schema_fallback_allowed
+                                and schema_contracts
+                                and schema_sources
+                            )
+                        ):
                             answer = fallback_answer
                             sources = fallback_sources
                             used_lexical_hits = search_hits
