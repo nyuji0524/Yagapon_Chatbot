@@ -291,6 +291,20 @@ _GROUNDING_CONTROL_LINE_RE = re.compile(
 )
 _GROUNDING_CLAUSE_SPLIT_RE = re.compile(r"[、,，;；]+")
 _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
+_RUNTIME_SUMMARY_FIELDS = (
+    ("shortDescription", "概要"),
+    ("longDescription", "詳細"),
+    ("body", "内容"),
+    ("organizationDescription", "団体"),
+    ("place", "場所"),
+    ("placeRoom", "教室"),
+    ("status", "状態"),
+    ("category", "カテゴリ"),
+    ("eventName", "企画"),
+    ("score", "得票・スコア"),
+    ("publishedAt", "公開日時"),
+    ("updatedAt", "更新日時"),
+)
 
 # Critical atoms are checked against one selected evidence body in addition to
 # lexical overlap.  This keeps a nearby but different number, role, state, or
@@ -3578,7 +3592,7 @@ class CorpusManager:
                         # claim mapping was incomplete.
                         fallback_answer = (
                             ""
-                            if overview_subject
+                            if overview_subject and (firebase_evidence or search_hits)
                             else self._render_retrieved_evidence_fallback(
                                 search_hits,
                                 firebase_evidence,
@@ -3833,26 +3847,12 @@ class CorpusManager:
             (
                 str(fields[key]).strip()
                 for key in ("eventName", "name", "title", "organizationName")
-                if fields.get(key)
+                if str(fields.get(key) or "").strip()
             ),
-            item.title,
-        )
-        labels = (
-            ("shortDescription", "概要"),
-            ("longDescription", "詳細"),
-            ("body", "内容"),
-            ("organizationDescription", "団体"),
-            ("place", "場所"),
-            ("placeRoom", "教室"),
-            ("status", "状態"),
-            ("category", "カテゴリ"),
-            ("eventName", "企画"),
-            ("score", "得票・スコア"),
-            ("publishedAt", "公開日時"),
-            ("updatedAt", "更新日時"),
+            str(item.title or "").strip() or "Firebase現在値",
         )
         details: list[str] = []
-        for key, label in labels:
+        for key, label in _RUNTIME_SUMMARY_FIELDS:
             value = fields.get(key)
             if value in (None, "", [], {}, ()):
                 continue
