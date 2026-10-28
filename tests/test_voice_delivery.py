@@ -27,7 +27,7 @@ def _automatic_leave_context():
     session = SimpleNamespace(
         channel=channel,
         voice_client=SimpleNamespace(is_connected=Mock(return_value=True)),
-        mode=VoiceMode.LISTEN,
+        mode=VoiceMode.MEETING,
         recording_sink=SimpleNamespace(mark=Mock()),
         transcript_text="[中山]: 確認します",
         started_at=datetime(2026, 10, 22, tzinfo=timezone.utc),
@@ -205,6 +205,7 @@ async def test_automatic_leave_retains_recording_when_delivery_fails(monkeypatch
 @pytest.mark.asyncio
 async def test_automatic_listen_leave_does_not_deliver_empty_minutes(monkeypatch):
     bot, member, before, after, session = _automatic_leave_context()
+    session.mode = VoiceMode.LISTEN
     monkeypatch.setattr("bot.voice.get_session", lambda _guild_id: session)
     monkeypatch.setattr("bot.voice.leave_voice", AsyncMock(return_value=None))
     monkeypatch.setattr(
@@ -215,11 +216,7 @@ async def test_automatic_listen_leave_does_not_deliver_empty_minutes(monkeypatch
     await YagaPon.on_voice_state_update(bot, member, before, after)
 
     session.mark_delivered.assert_not_awaited()
-    session._mark_recording_sink.assert_awaited_once_with(
-        "automatic_leave_failed",
-        stage="delivery",
-        error="RuntimeError",
-    )
+    session._mark_recording_sink.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -484,7 +481,7 @@ async def test_manual_leave_protected_source_only_attaches_in_source_channel(
     )
     session = SimpleNamespace(
         channel=channel,
-        mode=VoiceMode.LISTEN,
+        mode=VoiceMode.MEETING,
         claim_delivery=AsyncMock(return_value=True),
         recording_sink=SimpleNamespace(),
         _mark_recording_sink=AsyncMock(return_value=True),

@@ -180,7 +180,7 @@ def test_bot_requires_file_search_grounding_supports_by_default():
         "${YAGAPON_RAG_REQUIRE_GROUNDING_SUPPORTS:-true}"
     )
     assert environment["YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD"] == (
-        "${YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD:-0.8}"
+        "${YAGAPON_RAG_GROUNDING_COVERAGE_THRESHOLD:-0.6}"
     )
     assert environment["YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS"] == (
         "${YAGAPON_FILE_SEARCH_INDEX_TIMEOUT_SECONDS:-1800}"
