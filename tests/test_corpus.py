@@ -330,7 +330,8 @@ async def test_history_with_narrative_evidence_skips_direct_only_shortcut(corpus
     assert result.no_answer is True
     call = corpus_manager._client.aio.models.generate_content.await_args
     assert call.kwargs["config"].tools is not None
-    assert call.kwargs["config"].thinking_config.thinking_level == "MEDIUM"
+    assert call.kwargs["model"] == "gemini-3.1-flash-lite"
+    assert call.kwargs["config"].thinking_config.thinking_level == "LOW"
     assert "implementation" in call.kwargs["contents"]
     assert "on-site-report" in call.kwargs["contents"]
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["question_kind"] is (
@@ -3712,8 +3713,8 @@ async def test_comprehensive_query_combines_exact_and_semantic_evidence(corpus_m
     assert len(result.citations) == 8
     call = corpus_manager._client.aio.models.generate_content.await_args
     assert corpus_manager._client.aio.models.generate_content.await_count == 2
-    assert call.kwargs["config"].max_output_tokens == 4096
-    assert call.kwargs["config"].tools[0].file_search.top_k == 20
+    assert call.kwargs["config"].max_output_tokens == 2048
+    assert call.kwargs["config"].tools[0].file_search.top_k == 12
     assert "短さより完全性" in call.kwargs["config"].system_instruction
     assert corpus_manager.rag_store.search_exact.call_args.kwargs["limit"] == 32
 
@@ -3794,8 +3795,8 @@ async def test_compound_current_and_history_query_uses_separate_authority_filter
     assert 'authority = "repository_context"' in runtime_filter
     assert 'authority = "repository_history"' not in runtime_filter
     assert 'authority = "repository_context"' not in history_filter
-    assert calls[0].kwargs["config"].max_output_tokens == 4096
-    assert calls[1].kwargs["config"].max_output_tokens == 4096
+    assert calls[0].kwargs["config"].max_output_tokens == 2048
+    assert calls[1].kwargs["config"].max_output_tokens == 2048
 
 
 @pytest.mark.asyncio
@@ -3845,7 +3846,7 @@ async def test_explicit_evidence_keys_prevent_unused_lexical_citations(corpus_ma
     )
     assert "unused" not in result.text
     config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
-    assert config.max_output_tokens == 2048
+    assert config.max_output_tokens == 1024
     assert config.tools is None
 
 
@@ -3874,7 +3875,7 @@ async def test_incomplete_rag_output_is_never_returned_as_an_answer(corpus_manag
     assert result.citations == ()
     assert corpus_manager._client.aio.models.generate_content.await_count == 1
     config = corpus_manager._client.aio.models.generate_content.await_args.kwargs["config"]
-    assert config.max_output_tokens == 8192
+    assert config.max_output_tokens == 4096
 
 
 @pytest.mark.asyncio
@@ -5884,7 +5885,7 @@ async def test_calendar_window_is_applied_to_exact_search_and_prompt(
     assert "2025-10-01から2025-10-31" in config.system_instruction
     assert "『本番前の準備』" in config.system_instruction
     assert "異なるイベントを単に『本番』としてまとめず" in config.system_instruction
-    assert config.tools[0].file_search.top_k == 20
+    assert config.tools[0].file_search.top_k == 12
 
 
 @pytest.mark.asyncio
@@ -6296,8 +6297,8 @@ async def test_query_drops_curated_source_when_curated_answer_fails(corpus_manag
         call.kwargs["config"].max_output_tokens
         for call in corpus_manager._client.aio.models.generate_content.await_args_list
     ]
-    assert budgets == [2048, 2048]
-    assert all(budget <= 2048 for budget in budgets)
+    assert budgets == [1024, 1024]
+    assert all(budget <= 1024 for budget in budgets)
 
 
 @pytest.mark.asyncio

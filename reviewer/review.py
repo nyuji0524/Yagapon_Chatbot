@@ -312,8 +312,8 @@ def run_review(
     github: GitHubClient,
     repository: str,
     pull_number: int,
-    model: str = "gemini-3.8-flash",
-    thinking_level: str = "medium",
+    model: str = "gemini-3.1-flash-lite",
+    thinking_level: str = "low",
     profile: str = "code",
 ) -> str:
     pull_request = github.get(f"/repos/{repository}/pulls/{pull_number}")

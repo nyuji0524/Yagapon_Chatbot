@@ -10,6 +10,7 @@ from pathlib import Path
 import discord
 from google.auth.exceptions import RefreshError
 
+from bot.ai_models import knowledge_model
 from bot.authorization import require_guild_admin
 from bot.gdrive import DOCS_SCOPE, DRIVE_FILE_SCOPE
 from bot.google_credentials import GoogleCredentialScopeError
@@ -1017,7 +1018,7 @@ def register(bot):
             structured = await asyncio.to_thread(
                 structure_source,
                 sanitized,
-                os.environ.get("YAGAPON_KNOWLEDGE_MODEL", "gemini-3.5-flash-lite"),
+                knowledge_model(),
             )
             args = build_drive_intake_bundle(
                 guild_id=ctx.guild.id,

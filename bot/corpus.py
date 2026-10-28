@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from google.genai import types
 
 from bot.ai_completion import IncompleteModelOutput, require_complete_model_output
-from bot.ai_models import generation_config, log_usage, rag_model
+from bot.ai_models import ai_profile, generation_config, log_usage, rag_model
 from bot.ai_retry import (
     RateLimitExceeded,
     is_ai_unavailable_error,
@@ -161,7 +161,7 @@ def _file_search_metadata(metadata: list[dict] | None) -> list[dict]:
     return [item for index, item in enumerate(items) if index in selected_indices]
 
 # レート制限
-DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "400"))
+DAILY_QUERY_LIMIT = int(os.environ.get("YAGAPON_DAILY_QUERY_LIMIT", "50"))
 BACKFILL_CHANNEL_CONCURRENCY_DEFAULT = 3
 BACKFILL_CHANNEL_CONCURRENCY_MAX = 8
 BUILTIN_KNOWLEDGE_PATH = Path(__file__).with_name("trusted_knowledge.json")
@@ -239,13 +239,15 @@ def file_search_ambiguous_start_grace_seconds() -> int:
 
 
 RAG_NORMAL_OUTPUT_TOKENS = _bounded_int_env(
-    "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 2048, 512, 4096
+    "YAGAPON_RAG_NORMAL_OUTPUT_TOKENS", 1024, 512, 4096
 )
 RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS = _bounded_int_env(
-    "YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 8192, 2048, 16384
+    "YAGAPON_RAG_COMPREHENSIVE_OUTPUT_TOKENS", 4096, 2048, 16384
 )
-RAG_SEARCH_TOP_K = 12
-RAG_COMPREHENSIVE_SEARCH_TOP_K = 20
+RAG_SEARCH_TOP_K = _bounded_int_env("YAGAPON_RAG_SEARCH_TOP_K", 8, 4, 20)
+RAG_COMPREHENSIVE_SEARCH_TOP_K = _bounded_int_env(
+    "YAGAPON_RAG_COMPREHENSIVE_SEARCH_TOP_K", 12, 8, 30
+)
 RAG_LEXICAL_CANDIDATES = 16
 RAG_COMPREHENSIVE_LEXICAL_CANDIDATES = 32
 RAG_LEXICAL_CONTEXT_HITS = 6
@@ -3926,7 +3928,10 @@ class CorpusManager:
                         config=generation_config(
                             model,
                             thinking_level=(
-                                "medium" if comprehensive or cross_source_history else "low"
+                                "medium"
+                                if ai_profile() == "quality"
+                                and (comprehensive or cross_source_history)
+                                else "low"
                             ),
                             max_output_tokens=primary_budget,
                             system_instruction=system,

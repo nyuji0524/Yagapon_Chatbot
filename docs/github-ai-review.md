@@ -38,6 +38,13 @@ Yagapon_Chatbot自身は`.github/workflows/ai-review-self.yml`から同じ再利
 
 本番運用では`@main`ではなく、レビュー済みのrelease tagまたはcommit SHAへ固定する。Private forkからのPRはGitHubの既定保護により書き込みトークンとSecretを受け取れないため、レビューは投稿されない。
 
+## モデルと費用
+
+月1,000円運用では既定を `gemini-3.1-flash-lite`・thinking `low` とする。
+レビュー品質を再評価するときは、呼び出し側workflowの `model` を
+`gemini-3.8-flash`、`thinking_level`を`medium`へ変更できる。モデル変更に
+reviewer本体の改修は不要である。
+
 ## Gemini 3.8 Flashの評価
 
 既存PRから以下を含む評価セットを作る。
@@ -48,4 +55,4 @@ Yagapon_Chatbot自身は`.github/workflows/ai-review-self.yml`から同じ再利
 - 正常な変更（誤検知を測るため）
 - Flutter、Firebase Functions、Web、Python Bot
 
-各PRで、人間が確認した正解指摘に対する再現率、AI指摘の適合率、重大度、該当行、費用、実行時間を記録する。最初は`medium`、重大な見逃しが多い場合だけ`high`を比較する。
+各PRで、人間が確認した正解指摘に対する再現率、AI指摘の適合率、重大度、該当行、費用、実行時間を記録する。予算確保後に`medium`、重大な見逃しが多い場合だけ`high`を比較する。
