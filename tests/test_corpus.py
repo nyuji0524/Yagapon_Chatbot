@@ -5890,6 +5890,54 @@ async def test_ai_unavailable_does_not_mix_unrelated_hits_into_firebase_result(
 
 
 @pytest.mark.asyncio
+async def test_ai_unavailable_entity_overview_keeps_runtime_and_citations_aligned(
+    corpus_manager,
+):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    event = FirebaseEvidence(
+        document_key="firebase:events:1",
+        title="27th 企画",
+        body=(
+            "Firestore現在値（27th / events）\n"
+            "collection_path: festival/27/events\n"
+            "reference: events:1\n"
+            'fields: {"eventName": "ITラボ", "place": "11-21", '
+            '"status": "ended"}'
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    unrelated = lexical_hit(
+        "unrelated-notification-code",
+        score=900,
+        authority="repository_context",
+        source_type="source_code",
+        excerpt="個人通知のParserとdeep linkを実装する。",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[event])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[unrelated])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted("prepayment credits are depleted")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボについて教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "ITラボ" in result.text
+    assert "11-21" in result.text
+    assert "個人通知" not in result.text
+    assert result.lexical_keys == ()
+    assert len(result.citations) == 1
+    assert "Firebase現在値" in result.citations[0]
+
+
+@pytest.mark.asyncio
 async def test_ai_unavailable_without_evidence_is_reported_as_no_evidence(
     corpus_manager,
 ):

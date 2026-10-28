@@ -4064,19 +4064,27 @@ class CorpusManager:
                         or schema_fallback_allowed
                     )
                 ]
-                if overview_subject:
+                if fallback_runtime:
+                    fallback_answer = (
+                        self._render_entity_overview_fallback(
+                            overview_subject,
+                            [],
+                            fallback_runtime,
+                        )
+                        if overview_subject
+                        else self._render_retrieved_evidence_fallback(
+                            [],
+                            fallback_runtime,
+                            (),
+                        )
+                    )
+                    fallback_hits = []
+                elif overview_subject:
                     fallback_answer = self._render_entity_overview_fallback(
                         overview_subject,
                         fallback_hits,
-                        fallback_runtime,
-                    )
-                elif fallback_runtime:
-                    fallback_answer = self._render_retrieved_evidence_fallback(
                         [],
-                        fallback_runtime,
-                        (),
                     )
-                    fallback_hits = []
                 else:
                     fallback_answer = self._render_retrieved_evidence_fallback(
                         fallback_hits,
