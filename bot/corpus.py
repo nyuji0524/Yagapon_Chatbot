@@ -26,6 +26,7 @@ from bot.ai_completion import IncompleteModelOutput, require_complete_model_outp
 from bot.ai_models import generation_config, log_usage, rag_model
 from bot.ai_retry import (
     RateLimitExceeded,
+    is_ai_unavailable_error,
     is_transient_api_error,
     retry_rate_limit,
     retry_transient_api,
@@ -291,6 +292,21 @@ _GROUNDING_CONTROL_LINE_RE = re.compile(
 )
 _GROUNDING_CLAUSE_SPLIT_RE = re.compile(r"[、,，;；]+")
 _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
+_RUNTIME_SUMMARY_FIELDS = (
+    ("shortDescription", "概要"),
+    ("longDescription", "詳細"),
+    ("body", "内容"),
+    ("organizationName", "団体名"),
+    ("organizationDescription", "団体"),
+    ("place", "場所"),
+    ("placeRoom", "教室"),
+    ("status", "状態"),
+    ("category", "カテゴリ"),
+    ("eventName", "企画"),
+    ("score", "得票・スコア"),
+    ("publishedAt", "公開日時"),
+    ("updatedAt", "更新日時"),
+)
 
 # Critical atoms are checked against one selected evidence body in addition to
 # lexical overlap.  This keeps a nearby but different number, role, state, or
@@ -3069,8 +3085,12 @@ class CorpusManager:
             allow_unrestricted_conversations=allow_unrestricted_conversations,
         )
         terms = self.rag_store.query_terms(question, glossary)
+        # ``search_exact`` performs a bounded but potentially expensive SQLite
+        # scan.  Running it on the Discord event loop can delay heartbeats and
+        # disconnect the bot while a broad question is being answered.
         lexical_hits = (
-            self.rag_store.search_exact(
+            await asyncio.to_thread(
+                self.rag_store.search_exact,
                 guild_id,
                 terms,
                 festival=festival,
@@ -3106,6 +3126,8 @@ class CorpusManager:
         schema_contracts: tuple[_FirebaseSchemaContract, ...] = ()
         schema_sources: list[str] = []
         schema_fallback_allowed = False
+        firebase_evidence: list[FirebaseEvidence] = []
+        overview_subject = entity_overview_subject(question)
         try:
             system = SYSTEM_INSTRUCTION
             system += f"\n\n【根拠優先度】質問種別は {question_kind.value} だぽん。" + authority_instruction(
@@ -3138,7 +3160,6 @@ class CorpusManager:
                 question_kind,
                 festival=festival,
             )
-            overview_subject = entity_overview_subject(question)
             if overview_subject and festival is None:
                 # Broad entity questions often refer to a recurring festival
                 # project before the current year's event document exists.
@@ -3568,10 +3589,18 @@ class CorpusManager:
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
                             recovery_context += self._untrusted_evidence(item.key, item.text)
-                        fallback_answer = self._render_retrieved_evidence_fallback(
-                            search_hits,
-                            firebase_evidence,
-                            recovery_semantic_evidence,
+                        # Broad entity questions have a safer structured
+                        # projection below.  Do not let the generic raw-record
+                        # fallback pre-empt it merely because File Search's
+                        # claim mapping was incomplete.
+                        fallback_answer = (
+                            ""
+                            if overview_subject and (firebase_evidence or search_hits)
+                            else self._render_retrieved_evidence_fallback(
+                                search_hits,
+                                firebase_evidence,
+                                recovery_semantic_evidence,
+                            )
                         )
                         fallback_sources = self._lexical_sources(search_hits, [])
                         fallback_sources.extend(
@@ -3582,7 +3611,15 @@ class CorpusManager:
                             for item in recovery_semantic_evidence
                             if item.citation and item.citation not in fallback_sources
                         )
-                        if fallback_answer and fallback_sources:
+                        if (
+                            fallback_answer
+                            and fallback_sources
+                            and not (
+                                schema_fallback_allowed
+                                and schema_contracts
+                                and schema_sources
+                            )
+                        ):
                             answer = fallback_answer
                             sources = fallback_sources
                             used_lexical_hits = search_hits
@@ -3675,7 +3712,7 @@ class CorpusManager:
                 confidence_label=confidence[1],
                 confidence_detail=confidence[2],
             )
-        except Exception:
+        except Exception as exc:
             log.exception("RAG query failed")
             if schema_fallback_allowed and schema_contracts and schema_sources:
                 confidence = evidence_confidence(
@@ -3696,6 +3733,57 @@ class CorpusManager:
                     confidence_label=confidence[1],
                     confidence_detail=confidence[2],
                 )
+            if is_ai_unavailable_error(exc):
+                fallback_hits = [
+                    hit
+                    for hit in authoritative_hits
+                    if can_answer_directly(question_kind, hit.authority, hit.status)
+                ]
+                fallback_runtime = [
+                    item
+                    for item in firebase_evidence
+                    if can_answer_directly(question_kind, item.authority, item.status)
+                    and (
+                        not item.document_key.startswith("firebase:schema:")
+                        or schema_fallback_allowed
+                    )
+                ]
+                if overview_subject:
+                    fallback_answer = self._render_entity_overview_fallback(
+                        overview_subject,
+                        fallback_hits,
+                        fallback_runtime,
+                    )
+                else:
+                    fallback_answer = self._render_retrieved_evidence_fallback(
+                        fallback_hits,
+                        fallback_runtime,
+                        (),
+                    )
+                fallback_sources = self._lexical_sources(fallback_hits, [])
+                fallback_sources.extend(
+                    self._firebase_sources(fallback_runtime, fallback_sources)
+                )
+                if fallback_answer and fallback_sources:
+                    confidence = evidence_confidence(
+                        answered=True,
+                        evidence_count=len(fallback_sources),
+                        source_family_count=citation_source_family_count(fallback_sources),
+                        candidate_count=len(fallback_hits) + len(fallback_runtime),
+                        locally_verified=True,
+                        extractive_fallback=True,
+                    )
+                    return RagAnswer(
+                        text=fallback_answer,
+                        citations=tuple(fallback_sources),
+                        festival=festival,
+                        no_answer=False,
+                        metadata_filter=metadata_filter,
+                        lexical_keys=tuple(hit.document_key for hit in fallback_hits),
+                        confidence_score=confidence[0],
+                        confidence_label=confidence[1],
+                        confidence_detail=confidence[2],
+                    )
             return RagAnswer(
                 text="質問の処理中にエラーが出ちゃったぽん…。少し待ってからもう一度試してほしいぽん。",
                 festival=festival,
@@ -3789,6 +3877,60 @@ class CorpusManager:
         )
 
     @staticmethod
+    def _runtime_evidence_summary(item: FirebaseEvidence) -> tuple[str, str] | None:
+        """Project one Firebase record into a short, human-readable summary.
+
+        Runtime evidence bodies deliberately retain their machine-readable
+        ``fields`` payload for grounded generation.  Echoing that payload as a
+        fallback exposed large JSON blobs and made a successful retrieval look
+        like an error.  This projection keeps only common public display
+        fields, with conservative size bounds; the citation still links to the
+        original record.
+        """
+        fields_marker = re.search(r"^fields:\s*", item.body, re.MULTILINE)
+        if not fields_marker:
+            return None
+        try:
+            # ``raw_decode`` accepts compact or pretty-printed JSON and stops
+            # before any later evidence metadata in the same body.
+            fields, _end = json.JSONDecoder().raw_decode(
+                item.body[fields_marker.end():].lstrip()
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(fields, dict):
+            return None
+
+        title = next(
+            (
+                str(fields[key]).strip()
+                for key in ("eventName", "name", "title", "organizationName")
+                if str(fields.get(key) or "").strip()
+            ),
+            str(item.title or "").strip() or "Firebase現在値",
+        )
+        details: list[str] = []
+        for key, label in _RUNTIME_SUMMARY_FIELDS:
+            value = fields.get(key)
+            if value in (None, "", [], {}, ()):
+                continue
+            if key in {"eventName", "name", "title", "organizationName"} and str(value).strip() == title:
+                continue
+            if isinstance(value, (dict, list, tuple)):
+                rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            else:
+                rendered = str(value)
+            rendered = re.sub(r"\s+", " ", rendered).strip()
+            if not rendered:
+                continue
+            if len(rendered) > 220:
+                rendered = rendered[:219].rstrip() + "…"
+            details.append(f"{label}: {rendered}")
+            if len(details) >= 6:
+                break
+        return title, " / ".join(details) or "公開データを確認"
+
+    @staticmethod
     def _render_entity_overview_fallback(
         subject: str,
         hits: list[LexicalHit],
@@ -3804,37 +3946,10 @@ class CorpusManager:
         sections: list[str] = []
         runtime_lines: list[str] = []
         for item in runtime_evidence[:6]:
-            fields_match = re.search(r"^fields:\s*(\{.*\})$", item.body, re.MULTILINE)
-            if not fields_match:
+            summary = CorpusManager._runtime_evidence_summary(item)
+            if summary is None:
                 continue
-            try:
-                fields = json.loads(fields_match.group(1))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if not isinstance(fields, dict):
-                continue
-            title = next(
-                (
-                    str(fields[key]).strip()
-                    for key in ("eventName", "name", "title")
-                    if fields.get(key)
-                ),
-                item.title,
-            )
-            details = []
-            for key, label in (
-                ("shortDescription", "概要"),
-                ("longDescription", "詳細"),
-                ("organizationDescription", "団体"),
-                ("place", "場所"),
-                ("placeRoom", "教室"),
-                ("status", "状態"),
-                ("category", "カテゴリ"),
-            ):
-                value = fields.get(key)
-                if value not in (None, "", [], {}, ()):
-                    details.append(f"{label}: {value}")
-            suffix = " / ".join(details[:5]) or "公開企画データを確認"
+            title, suffix = summary
             runtime_lines.append(f"- **{title}** — {suffix}")
         if runtime_lines:
             sections.append("### Firebaseの企画データ\n" + "\n".join(runtime_lines))
@@ -3878,12 +3993,14 @@ class CorpusManager:
                 normalized = normalized[:649].rstrip() + "…"
             lines.append(f"- **{label}** — {normalized}")
 
-        for item in runtime_evidence[:5]:
-            add(item.title or "Firebase現在値", item.body)
-        for hit in hits[:6]:
+        for item in runtime_evidence[:4]:
+            summary = CorpusManager._runtime_evidence_summary(item)
+            if summary is not None:
+                add(*summary)
+        for hit in hits[:4]:
             period = f" / {hit.festival}th" if hit.festival is not None else ""
             add(f"{hit.channel_name}{period}", hit.excerpt)
-        for index, item in enumerate(semantic_evidence[:6], start=1):
+        for index, item in enumerate(semantic_evidence[:4], start=1):
             add(f"検索結果 {index}", item.text)
 
         if not lines:

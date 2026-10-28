@@ -111,6 +111,51 @@ def has_guildwide_rag_access(guild, member) -> bool:
     return bool(getattr(permissions, "administrator", False))
 
 
+def channel_audience_has_guildwide_rag_access(guild, channel) -> bool:
+    """Return true only when every cached human viewer is an administrator.
+
+    A normal Discord answer is visible to the whole destination channel, not
+    only to the requester.  Guild-wide retrieval is therefore safe only for a
+    fully cached, non-thread channel whose complete visible audience (including
+    other bots) already has Administrator access.  Missing cache or permission
+    evidence fails closed to current-channel retrieval.
+    """
+    if guild is None or channel is None or not bool(getattr(guild, "chunked", False)):
+        return False
+    if channel not in (getattr(guild, "channels", ()) or ()):
+        return False
+    members = tuple(getattr(guild, "members", ()) or ())
+    if not members:
+        return False
+    viewers = []
+    self_id = int(getattr(getattr(guild, "me", None), "id", 0) or 0)
+    permissions_for = getattr(channel, "permissions_for", None)
+    if not callable(permissions_for):
+        return False
+    for member in members:
+        if self_id and int(getattr(member, "id", -1)) == self_id:
+            continue
+        try:
+            permissions = permissions_for(member)
+            can_view = bool(
+                getattr(
+                    permissions,
+                    "view_channel",
+                    getattr(permissions, "read_messages", False),
+                )
+            )
+            can_read_history = bool(
+                getattr(permissions, "read_message_history", False)
+            )
+        except Exception:
+            return False
+        if can_view and can_read_history:
+            viewers.append(member)
+    return bool(viewers) and all(
+        has_guildwide_rag_access(guild, member) for member in viewers
+    )
+
+
 def resolve_minutes_notification_channel(config, guild, source_channel):
     """Choose a writable destination without widening the meeting audience.
 

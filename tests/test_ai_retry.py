@@ -7,6 +7,7 @@ from google.genai.errors import ServerError
 from bot.ai_retry import (
     RateLimitCircuitBreaker,
     RateLimitExceeded,
+    is_ai_unavailable_error,
     is_rate_limit_error,
     is_transient_api_error,
     new_genai_client,
@@ -180,12 +181,35 @@ async def test_transient_api_retry_does_not_retry_permanent_4xx():
     assert operation.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_prepaid_credit_402_is_not_retried_as_rate_limit():
+    class PrepaidCreditDepleted(ApiError):
+        def __init__(self):
+            super().__init__(402)
+            self.args = ("RESOURCE_EXHAUSTED: prepayment credits are depleted",)
+
+    operation = AsyncMock(side_effect=PrepaidCreditDepleted())
+    sleep = AsyncMock()
+
+    with pytest.raises(PrepaidCreditDepleted):
+        await retry_transient_api(
+            operation,
+            operation_name="rag_file_search",
+            attempts=4,
+            sleep=sleep,
+        )
+
+    assert operation.await_count == 1
+    sleep.assert_not_awaited()
+    assert is_ai_unavailable_error(PrepaidCreditDepleted()) is True
+
+
 @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
 def test_transient_api_error_statuses(status):
     assert is_transient_api_error(ApiError(status)) is True
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 409, 422])
 def test_permanent_api_error_statuses(status):
     assert is_transient_api_error(ApiError(status)) is False
 

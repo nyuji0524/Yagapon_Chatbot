@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -2101,16 +2102,154 @@ def test_retrieved_evidence_fallback_preserves_useful_search_results():
         citation="[企画資料](https://example.com/it-lab)",
         text="来場者向けに展示内容を案内する企画である。",
     )
+    runtime = FirebaseEvidence(
+        document_key="firebase:festival/27/events/it-lab",
+        title="27th 企画",
+        body=(
+            "Firestore現在値（27th / events）\n"
+            "fields: {\n"
+            '  "eventName": "ITラボ",\n'
+            '  "place": "11-21",\n'
+            '  "longDescription": "AI鬼ごっこなどを体験できる企画です。"\n'
+            "}\n"
+            "reference: events:it-lab"
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
 
     rendered = CorpusManager._render_retrieved_evidence_fallback(
         [hit],
-        [],
+        [runtime],
         (semantic,),
     )
 
     assert "根拠の対応を十分に確認できなかった" in rendered
+    assert "場所: 11-21" in rendered
     assert "ITラボでは技術展示" in rendered
     assert "来場者向け" in rendered
+    assert "fields:" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_search(*_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=3)
+        return []
+
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ"])
+    corpus_manager.rag_store.search_exact = Mock(side_effect=blocking_search)
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="[[YAGAPON_ANSWER_STATUS:no_evidence]]",
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+    loop_progressed = asyncio.Event()
+
+    async def observe_started_search():
+        assert await asyncio.to_thread(started.wait, 3)
+        loop_progressed.set()
+
+    observer = asyncio.create_task(observe_started_search())
+    task = asyncio.create_task(
+        corpus_manager.query_with_trace(
+            "ITラボについて教えて",
+            "fileSearchStores/test",
+            guild_id=1,
+        )
+    )
+    try:
+        await asyncio.wait_for(loop_progressed.wait(), timeout=0.5)
+        release.set()
+        await task
+    finally:
+        release.set()
+        await observer
+
+
+@pytest.mark.asyncio
+async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
+    corpus_manager,
+):
+    evidence = FirebaseEvidence(
+        document_key="firebase:festival/27/events/it-lab",
+        title="27th 企画",
+        body=(
+            "Firestore現在値（27th / events）\n"
+            'fields: {"eventName": "ITラボ", "place": "11-21", '
+            '"shortDescription": "AI鬼ごっこなどの体験企画"}'
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(
+        side_effect=[[evidence], []]
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="[[YAGAPON_ANSWER_STATUS:no_evidence]]",
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボについて教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "Firebaseの企画データ" in result.text
+    assert "AI鬼ごっこなどの体験企画" in result.text
+    assert "fields:" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
+    class PrepaidCreditDepleted(RuntimeError):
+        code = 402
+
+    evidence = FirebaseEvidence(
+        document_key="firebase:festival/27/events/it-lab",
+        title="27th 企画",
+        body=(
+            "Firestore現在値（27th / events）\n"
+            'fields: {"eventName": "ITラボ", "place": "11-21", '
+            '"shortDescription": "AI鬼ごっこなどの体験企画"}'
+        ),
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(
+        side_effect=[[evidence], []]
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=PrepaidCreditDepleted(
+            "RESOURCE_EXHAUSTED: prepayment credits are depleted"
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボについて教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+    )
+
+    assert result.no_answer is False
+    assert "Firebaseの企画データ" in result.text
+    assert "ITラボ" in result.text
+    assert "場所: 11-21" in result.text
+    assert "fields:" not in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
 def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():
@@ -2742,7 +2881,16 @@ async def test_map_data_contract_falls_back_to_reviewed_public_projection(
     corpus_manager.rag_store.query_terms = Mock(return_value=["map", "Firestore", "構造"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
     corpus_manager._client.aio.models.generate_content = AsyncMock(
-        side_effect=RuntimeError("source search unavailable")
+        return_value=SimpleNamespace(
+            text=(
+                "根拠が不足しているぽん。\n"
+                "[[YAGAPON_ANSWER_STATUS:no_evidence]]"
+            ),
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(finish_reason="STOP", grounding_metadata=None)
+            ],
+        )
     )
 
     result = await corpus_manager.query_with_trace(
