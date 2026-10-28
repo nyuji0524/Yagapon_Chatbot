@@ -32,16 +32,18 @@ def _prepare(tmp_path, monkeypatch):
     monkeypatch.delenv("YAGAPON_KEY_DB_PATH", raising=False)
 
 
-def test_deploy_preflight_uses_constant_time_sqlite_probe(tmp_path, monkeypatch):
+def test_deploy_preflight_reads_only_sqlite_header(tmp_path, monkeypatch):
     _prepare(tmp_path, monkeypatch)
-    queries = []
+    (tmp_path / "rag.sqlite3").write_bytes(b"SQLite format 3\x00fixture")
     monkeypatch.delenv("YAGAPON_PREFLIGHT_FULL_SQLITE_CHECK", raising=False)
-    monkeypatch.setattr(preflight.sqlite3, "connect", lambda _path: _Connection(queries))
+    monkeypatch.setattr(
+        preflight.sqlite3,
+        "connect",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must not open SQLite")),
+    )
     monkeypatch.setattr(preflight.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
 
     preflight.main()
-
-    assert queries == ["PRAGMA schema_version"]
 
 
 def test_maintenance_preflight_can_request_full_sqlite_check(tmp_path, monkeypatch):
