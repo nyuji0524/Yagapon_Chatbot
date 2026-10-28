@@ -18,6 +18,7 @@ async def test_close_flushes_corpus_when_voice_checkpoint_fails(monkeypatch):
     bot.scheduled_backfill = SimpleNamespace(stop=AsyncMock())
     bot.knowledge_refresh_tasks = set()
     bot.corpus = SimpleNamespace(shutdown=AsyncMock())
+    bot._post_durable_cleanup = Mock()
     checkpoint = AsyncMock(side_effect=RuntimeError("checkpoint failed"))
     shutdown_reactions = AsyncMock()
     discord_close = AsyncMock()
@@ -37,6 +38,7 @@ async def test_close_flushes_corpus_when_voice_checkpoint_fails(monkeypatch):
     bot.corpus.shutdown.assert_awaited_once()
     assert bot.corpus.shutdown.await_args.kwargs["timeout_seconds"] > 0
     assert bot._close_completed is True
+    bot._post_durable_cleanup.assert_called_once_with()
 
 
 @pytest.mark.asyncio

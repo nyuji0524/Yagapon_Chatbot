@@ -323,6 +323,7 @@ class YagaPon(discord.Bot):
         self.committee_backend = CommitteeBackend()
         self._recording_recovery_task: asyncio.Task | None = None
         self._committee_role_sync_task: asyncio.Task | None = None
+        self._post_durable_cleanup = None
         self._close_lock = asyncio.Lock()
         self._close_completed = False
 
@@ -1258,6 +1259,14 @@ class YagaPon(discord.Bot):
                     "Shutdown cleanup finished in %.1fs",
                     time.monotonic() - shutdown_started,
                 )
+                # Pycord can call close() from bot.start() before the outer
+                # shutdown coordinator resumes. Notify the process boundary
+                # here, after every durable cleanup step has completed, so
+                # abandoned default-executor workers cannot add tens of
+                # seconds to a deployment restart.
+                post_cleanup = getattr(self, "_post_durable_cleanup", None)
+                if callable(post_cleanup):
+                    post_cleanup()
 
 
 def create_bot() -> YagaPon:
