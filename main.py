@@ -236,13 +236,23 @@ async def main(*, _keep_watchdog_armed: bool = False):
             log.error("DISCORD_TOKEN is not set!")
             return
 
-        try:
-            await asyncio.to_thread(_prewarm_transcription_sdk)
-            log.info("Transcription SDK prewarm completed")
-        except Exception:
-            # Startup must remain available for non-voice commands. Per-request
-            # STT still runs in an isolated worker as a second line of defense.
-            log.exception("Transcription SDK prewarm failed; continuing startup")
+        if os.environ.get(
+            "YAGAPON_TRANSCRIPTION_PREWARM_ENABLED",
+            "false",
+        ).lower() == "true":
+            try:
+                await asyncio.to_thread(_prewarm_transcription_sdk)
+                log.info("Transcription SDK prewarm completed")
+            except Exception:
+                # Startup must remain available for non-voice commands. Per-request
+                # STT still runs in an isolated worker as a second line of defense.
+                log.exception("Transcription SDK prewarm failed; continuing startup")
+        else:
+            # Capture-only recording does not need the generated STT client.
+            # Loading it before Discord connects added roughly 90 seconds to a
+            # production restart on the small VM. Minutes/replay processing
+            # still initializes the SDK lazily in its isolated worker.
+            log.info("Transcription SDK prewarm skipped; lazy processing enabled")
 
         log.info("Starting bot + API server...")
         try:

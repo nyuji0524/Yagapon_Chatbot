@@ -50,6 +50,9 @@ YAGAPON_SOURCE_REQUIRE_FULL_MANIFEST=true
 YAGAPON_SOURCE_REPOSITORIES=
 YAGAPON_SOURCE_HISTORY_SINCE=2024-10-01T00:00:00+09:00
 YAGAPON_SOURCE_INDEX_ENABLED=true
+# 通常はCIで検証済みのimmutable imageを使う。mutableな本番データと
+# remote credentialまで再検証する保守デプロイ時だけtrueにする。
+YAGAPON_DEPLOY_RUNTIME_PREFLIGHT=false
 EOF
 sudo chown -R 10001:10001 /var/lib/yagapon
 sudo systemctl daemon-reload
@@ -58,6 +61,11 @@ sudo systemctl status yagapon
 ```
 
 ## main pushからの自動更新
+
+通常リリースでは、CIで完了済みのimport・Compose・ソース索引検証を本番VMで
+重複実行しない。`/etc/yagapon/deploy.env`の
+`YAGAPON_DEPLOY_RUNTIME_PREFLIGHT=true`は、SQLiteや設定ファイル、remote source
+credentialを再検査する保守デプロイ時だけ使用する。
 
 `CI` workflowがmainで成功すると`Deploy to GCE`が次を実行する。
 
