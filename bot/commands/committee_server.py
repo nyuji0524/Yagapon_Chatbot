@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from collections.abc import Iterable
 
 import discord
@@ -436,6 +437,10 @@ class ProjectLeaderApplicationButton(discord.ui.Button):
 
 class ProjectOrganizationSelect(discord.ui.Select):
     def __init__(self, organizations):
+        organizations = sorted(
+            organizations,
+            key=lambda item: str(item.get("name") or ""),
+        )
         self._organizations = {
             str(item["id"]): str(item["name"])
             for item in organizations[:24]
@@ -622,7 +627,7 @@ class EmailCodeModal(discord.ui.Modal):
         if interaction.user.id != self.member_id:
             await _respond_ephemeral(interaction, "この確認コードは登録した本人だけが入力できるぽん。")
             return
-        code = self.children[0].value.strip()
+        code = unicodedata.normalize("NFKC", self.children[0].value).strip()
         await interaction.response.defer(ephemeral=True)
         try:
             result = await interaction.client.committee_backend.verify_code(
@@ -770,6 +775,15 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
     ):
         await _respond_ephemeral(interaction, "申請データを確認できなかったぽん。")
         return
+    officer_role = None
+    if approve and role.name in OFFICER_POSITIONS:
+        officer_role = _find_named(guild.roles, "役員")
+        if officer_role is None:
+            await _respond_ephemeral(
+                interaction,
+                "役員ロールが見つからないぽん。管理者がロールを作成してから再度承認してほしいぽん。",
+            )
+            return
     await interaction.response.defer(ephemeral=True)
     try:
         await interaction.client.committee_backend.decide_application(
@@ -786,15 +800,6 @@ async def _handle_position_request(interaction: discord.Interaction, *, approve:
         return
     if approve:
         try:
-            officer_role = None
-            if role.name in ("副局長", "局長"):
-                officer_role = _find_named(guild.roles, "役員")
-                if officer_role is None:
-                    await interaction.followup.send(
-                        "役員ロールが見つからないぽん。管理者がロールを作成してほしいぽん。",
-                        ephemeral=True,
-                    )
-                    return
             desired_roles = _roles_after_position_approval(
                 member.roles,
                 role,
@@ -1206,7 +1211,10 @@ def register(bot):
             )
             panel_message = "ロール選択パネルも設置したぽん。" if posted else "既存のロール選択パネルを維持したぽん。"
         else:
-            panel_message = "`#ロール選択` がないため、パネルは `/role_panel` で手動設置してほしいぽん。"
+            panel_message = (
+                "`#ロール選択` がないため、チャンネルを作成してから"
+                "もう一度 `/committee_setup` を実行してほしいぽん。"
+            )
         await ctx.followup.send(
             "\n".join(
                 [

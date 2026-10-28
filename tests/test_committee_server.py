@@ -12,11 +12,13 @@ from bot.commands.committee_server import (
     SERVER_ADMIN_ROLE,
     CommitteeGuideView,
     PostRegistrationRoleView,
+    ProjectOrganizationSelect,
     RegistrationModal,
     SelfRolePanelView,
     _bot_guide_embed,
     _embed_field_id,
     _ensure_setup_actor_is_server_admin,
+    _handle_position_request,
     _is_keio_email,
     _position_role_names,
     _position_role_summary,
@@ -128,6 +130,21 @@ def test_position_role_summary_is_stable_for_combined_roles_and_empty_input():
     assert _position_role_summary(roles) == "局長, 企画長, 役員"
     assert _position_role_names([]) == []
     assert _position_role_summary([]) == "なし"
+
+
+def test_project_organizations_are_sorted_before_discord_option_limit():
+    select = ProjectOrganizationSelect(
+        [
+            {"id": "z", "name": "屋外企画"},
+            {"id": "a", "name": "ITラボ"},
+        ]
+    )
+
+    assert [option.label for option in select.options] == [
+        "ITラボ",
+        "屋外企画",
+        "この中にない",
+    ]
 
 
 @pytest.mark.asyncio
@@ -259,3 +276,38 @@ async def test_sync_acknowledges_decision_for_member_who_left_guild():
         guild_id=10,
         application_id="application-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_officer_approval_requires_officer_role_before_backend_decision():
+    applicant = SimpleNamespace(id=20, roles=[])
+    director = SimpleNamespace(id=30, name="局長")
+    guild = SimpleNamespace(
+        id=10,
+        roles=[director],
+        get_member=lambda member_id: applicant if member_id == 20 else None,
+        get_role=lambda role_id: director if role_id == 30 else None,
+    )
+    embed = discord.Embed(title="役職申請")
+    embed.add_field(name="申請者ID", value="20")
+    embed.add_field(name="役職ロールID", value="30")
+    embed.add_field(name="申請ID", value="application-1")
+    backend = SimpleNamespace(decide_application=AsyncMock())
+    response = SimpleNamespace(is_done=lambda: False, send_message=AsyncMock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(
+            id=99,
+            guild_permissions=SimpleNamespace(manage_roles=True),
+        ),
+        guild=guild,
+        message=SimpleNamespace(embeds=[embed]),
+        response=response,
+        followup=SimpleNamespace(send=AsyncMock()),
+        client=SimpleNamespace(committee_backend=backend),
+    )
+
+    await _handle_position_request(interaction, approve=True)
+
+    backend.decide_application.assert_not_awaited()
+    response.send_message.assert_awaited_once()
+    assert "役員ロールが見つからない" in response.send_message.await_args.args[0]

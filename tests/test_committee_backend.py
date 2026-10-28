@@ -1,4 +1,9 @@
-from bot.committee_backend import CommitteeBackend
+from unittest.mock import AsyncMock
+
+import pytest
+from google.auth.exceptions import GoogleAuthError
+
+from bot.committee_backend import CommitteeBackend, CommitteeBackendError
 
 
 class RecordingBackend(CommitteeBackend):
@@ -21,7 +26,19 @@ class RecordingBackend(CommitteeBackend):
 def test_emulator_urls_do_not_request_oidc_tokens():
     assert CommitteeBackend._uses_emulator("http://127.0.0.1:5001/function")
     assert CommitteeBackend._uses_emulator("http://localhost:5001/function")
+    assert CommitteeBackend._uses_emulator("http://functions:5001/function")
     assert not CommitteeBackend._uses_emulator("https://cloudfunctions.net/function")
+
+
+@pytest.mark.asyncio
+async def test_google_auth_failures_are_exposed_as_backend_unavailable():
+    backend = CommitteeBackend()
+    backend._headers = AsyncMock(side_effect=GoogleAuthError("metadata unavailable"))
+
+    with pytest.raises(CommitteeBackendError) as caught:
+        await backend._post("https://cloudfunctions.net/function", {"action": "test"})
+
+    assert caught.value.status == 503
 
 
 async def test_registration_and_application_payloads_are_server_bound():

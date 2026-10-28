@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 import aiohttp
+from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 
@@ -45,7 +46,9 @@ class CommitteeBackend:
 
     @staticmethod
     def _uses_emulator(url: str) -> bool:
-        return url.startswith("http://127.0.0.1") or url.startswith("http://localhost")
+        # Production Functions must use HTTPS. Plain HTTP is reserved for a
+        # local/container emulator and cannot receive a Google OIDC token.
+        return url.startswith("http://")
 
     async def _headers(self, url: str) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -72,7 +75,7 @@ class CommitteeBackend:
                     return body
         except CommitteeBackendError:
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, GoogleAuthError) as exc:
             raise CommitteeBackendError(
                 503,
                 "Committee backend is temporarily unavailable",
