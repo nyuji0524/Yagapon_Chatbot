@@ -1621,6 +1621,11 @@ def trusted_capability_response(question: str) -> str | None:
         r"(?:(?:は|が|の)?(?:何|なに)ができる(?:の|ん)?|(?:の)?できること|"
         r"(?:の)?機能(?:一覧)?|(?:の)?使い方|(?:は)?どんな(?:ai|bot|ボット))"
     )
+    # Natural questions often use ``何ができるBotですか`` rather than ending
+    # immediately after ``何ができる``. Treat the trailing type/copula as
+    # part of the self-help intent so this cheap trusted route does not fall
+    # through to broad RAG retrieval and collect unrelated repository hits.
+    capability_descriptor = r"(?:(?:ai|bot|ボット)(?:ですか|でしょうか|なの)?)?"
     request_suffix = r"(?:(?:を|について)?(?:教えて|説明して)(?:ください|下さい)?)?"
     identity_intent = (
         r"(?:(?:自身)?について(?:教えて|説明して)?|"
@@ -1630,6 +1635,7 @@ def trusted_capability_response(question: str) -> str | None:
         bot_subject
         + r"(?:自身)?"
         + capability_intent
+        + capability_descriptor
         + request_suffix
         + r"[。！？!?、,.]*",
         normalized,
