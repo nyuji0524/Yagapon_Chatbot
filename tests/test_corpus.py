@@ -406,6 +406,38 @@ def test_current_context_preserves_curated_contract_among_deployed_fragments():
     assert curated in selected
 
 
+def test_data_contract_implementation_question_prefers_actual_code_over_docs():
+    docs = replace(
+        lexical_hit(
+            "ranking-docs",
+            score=900,
+            authority="repository_context",
+            source_type="source_code",
+            status="current",
+        ),
+        channel_name="Yagamy:docs/requirements/ranking.md",
+    )
+    implementation = replace(
+        lexical_hit(
+            "ranking-code",
+            score=700,
+            authority="repository_context",
+            source_type="source_code",
+            status="current",
+        ),
+        channel_name="Yagamy:lib/service.dart",
+    )
+
+    selected = _select_lexical_context_hits(
+        [docs, implementation],
+        question_kind=QuestionKind.DATA_CONTRACT,
+        limit=1,
+        question="rankingで実際に使うコレクション名をコードから教えて",
+    )
+
+    assert selected == [implementation]
+
+
 def test_small_history_context_limit_does_not_replace_best_hit():
     implementation = lexical_hit(
         "implementation",
@@ -2979,6 +3011,7 @@ def test_invisible_combining_character_cannot_hide_a_credential_request():
         "何ができる？",
         "おしゃべりやがぽんは何ができるの？",
         "このBotの機能一覧",
+        "あなたは何ができるBotですか？得意なことと、できないことを教えてください。",
         "あなたは何ができるボットですか。ナレッジがなくても答えられる一般的な自己紹介をしてください",
     ],
 )
