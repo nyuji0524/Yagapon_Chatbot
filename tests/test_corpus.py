@@ -4022,6 +4022,43 @@ async def test_comprehensive_query_prefers_sufficient_authorized_local_evidence(
 
 
 @pytest.mark.asyncio
+async def test_operational_question_skips_local_generation_without_narrative_evidence(
+    corpus_manager,
+):
+    first = lexical_hit(
+        "it-lab-page",
+        score=500,
+        authority="repository_history",
+        source_type="source_code_history",
+        excerpt="ITラボをトップページに表示する実装。",
+    )
+    second = lexical_hit(
+        "it-lab-event",
+        score=480,
+        authority="reviewed_record",
+        source_type="firebase_current",
+        excerpt="企画名はITラボ、会場は11-21。",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ", "課題"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[first, second])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        side_effect=RuntimeError("stop after route inspection")
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボの企画内容、担当、運用上の課題、関連システムを教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    call = corpus_manager._client.aio.models.generate_content.await_args
+    assert call.kwargs["config"].tools is not None
+
+
+@pytest.mark.asyncio
 async def test_compound_current_and_history_query_uses_separate_authority_filters(corpus_manager):
     corpus_manager.rag_store.query_terms = Mock(return_value=["新歓Web"])
     corpus_manager.rag_store.search_exact = Mock(return_value=[])
@@ -6219,6 +6256,69 @@ async def test_incomplete_support_mapping_keeps_locally_verified_primary_answer(
     assert result.citations == (
         "[確定仕様: 28th開催案内 [28th / active]](https://knowledge.example/28-guide)",
     )
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_descriptive_overview_is_not_reduced_by_sentence_level_support_mapping(
+    corpus_manager,
+):
+    corpus_manager.rag_store.query_terms = Mock(return_value=[])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    context = SimpleNamespace(
+        title="ITラボ反省記録",
+        text=(
+            "ITラボではAI鬼ごっこなどの体験展示を実施した。"
+            "準備の遅れと担当者への負荷集中が課題だった。"
+        ),
+        uri="https://knowledge.example/it-lab-review",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "ITラボ反省記録"},
+            {"key": "festival", "numeric_value": 27},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "source_type", "string_value": "discord_conversation"},
+            {"key": "access_scope", "string_value": "guild"},
+        ],
+    )
+    primary = SimpleNamespace(
+        text=(
+            "ITラボはAI鬼ごっこなどを来場者が体験する展示だぽん。"
+            "準備が遅れ、少数の担当者へ作業が集中したことが運用課題だったぽん。\n"
+            "[[YAGAPON_ANSWER_STATUS:complete]]"
+        ),
+        usage_metadata=None,
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                grounding_metadata=SimpleNamespace(
+                    grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                    # The provider mapped only the first paraphrased sentence.
+                    grounding_supports=[
+                        SimpleNamespace(
+                            grounding_chunk_indices=[0],
+                            segment=SimpleNamespace(
+                                text="ITラボはAI鬼ごっこなどを来場者が体験する展示だぽん。"
+                            ),
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=primary
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "ITラボの企画内容と運用上の課題を自然に説明して",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "作業が集中" in result.text
     assert corpus_manager._client.aio.models.generate_content.await_count == 1
 
 
