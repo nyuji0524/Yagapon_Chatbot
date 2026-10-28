@@ -723,6 +723,9 @@ def test_generic_festival_runtime_question_does_not_become_a_false_search_term()
     assert FirebaseKnowledgeReader._terms("27thの最新の公開通知を一覧で確認したい") == []
     assert FirebaseKnowledgeReader._terms("公開通知を全件教えて") == []
     assert FirebaseKnowledgeReader._terms(
+        "27thに発行された通知を一覧で出してほしい"
+    ) == []
+    assert FirebaseKnowledgeReader._terms(
         "firebaseを読んで、27thの大賞企画の結果を教えてください",
         source_type="ranking",
     ) == []
@@ -741,6 +744,9 @@ def test_generic_festival_runtime_question_does_not_become_a_false_search_term()
 
 
 def test_query_modifiers_do_not_remove_real_firebase_value_filters():
+    assert FirebaseKnowledgeReader._terms(
+        "ITラボに関して発行された通知を一覧で出してほしい"
+    ) == ["ITラボ"]
     assert FirebaseKnowledgeReader._terms(
         "ITラボの票数も含めて教えて",
         source_type="ranking",

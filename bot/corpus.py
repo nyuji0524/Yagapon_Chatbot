@@ -294,7 +294,8 @@ _GROUNDING_CONTROL_LINE_RE = re.compile(
     r"EVIDENCE_KEYS:[A-Za-z0-9:._/,\-]*)\]\]"
 )
 _GROUNDING_CLAUSE_SPLIT_RE = re.compile(r"[、,，;；]+")
-_RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.3
+_RECOVERY_EVIDENCE_BIGRAM_THRESHOLD = 0.15
+_RECOVERY_CRITICAL_BIGRAM_THRESHOLD = 0.3
 _RUNTIME_SUMMARY_FIELDS = (
     ("shortDescription", "概要"),
     ("longDescription", "詳細"),
@@ -480,6 +481,16 @@ def requires_comprehensive_answer(question: str) -> bool:
         listed_lines >= 2
         or sum(bool(re.search(r"(?:教えて|知りたい|まとめ|確認)", line)) for line in nonempty_lines) >= 2
     )
+
+
+def requires_comprehensive_recovery(
+    *,
+    comprehensive: bool,
+    source_count: int,
+    candidate_count: int,
+) -> bool:
+    """Do not finalize a broad answer from one source when alternatives exist."""
+    return comprehensive and candidate_count >= 2 and source_count < 2
 
 
 def _select_lexical_context_hits(
@@ -998,7 +1009,8 @@ def _sensitive_request_policy(question: str) -> _SensitiveRequestPolicy:
     )
     credential_pattern = (
         r"(?:(?:discord\s*bot|bot|api)[ _-]?(?:token|key)|トークン|api\s*キー|apiキー|"
-        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|secret|秘密情報|"
+        r"パスワード|秘密鍵|認証情報|credentials?|環境変数|"
+        r"(?<![a-z0-9_])env(?![a-z0-9_])|secret|秘密情報|"
         r"\.env(?:ファイル)?|process\.env|os\.environ|"
         r"[a-z][a-z0-9_]{2,}(?:token|secret|password|api_key))"
     )
@@ -1245,7 +1257,8 @@ _INSTRUCTION_OVERRIDE_PATTERN = re.compile(
     r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
     r"(?:previous|prior|above|system|developer)\s+"
     r"(?:instructions?|rules?|prompts?|messages?)|"
-    r"(?:これまで|以前|前\s*の|上記|システム|開発者)\s*(?:の)?\s*"
+    r"(?:これまで|今まで|以前|前\s*の|上記|システム|開発者)\s*(?:の)?\s*"
+    r"(?:(?:すべて|全て|全部)\s*(?:の)?\s*)?"
     r"(?:指示|命令|ルール|プロンプト|メッセージ)\s*(?:を)?\s*"
     r"(?:無視|忘れ|破棄|上書き|解除|回避)",
     re.IGNORECASE,
@@ -1590,8 +1603,10 @@ def evidence_confidence(
         score += 15
     if extractive_fallback:
         # Extractive output avoids unsupported synthesis, but it may be less
-        # complete than a fully grounded answer.
-        score += 5
+        # relevant or complete than a fully grounded answer. Evidence volume
+        # must not turn an un-synthesized record dump into a high-confidence
+        # answer to the user's actual question.
+        score = min(score, 69)
     score = min(95, score)
     label = "高" if score >= 80 else "中" if score >= 55 else "低"
     method = "監査済み" if locally_verified else "未監査"
@@ -3504,6 +3519,7 @@ class CorpusManager:
             ) -> bool:
                 """Retry using only evidence that passed local authorization filters."""
                 nonlocal answer, has_answer, sources, used_lexical_hits
+                nonlocal extractive_fallback
                 recovered_answer = await self._recover_from_lexical_hits(
                     question=question,
                     system_instruction=system,
@@ -3538,14 +3554,16 @@ class CorpusManager:
                     sources = []
                     return False
 
-                if not self._recovered_claims_supported(
+                selected_texts = selected_evidence_texts(
+                    recovered_hits,
+                    used_firebase,
+                    used_semantic,
+                )
+                verified_text = self._verified_recovered_answer(
                     recovered.text,
-                    selected_evidence_texts(
-                        recovered_hits,
-                        used_firebase,
-                        used_semantic,
-                    ),
-                ):
+                    selected_texts,
+                )
+                if not verified_text:
                     log.warning(
                         "Rejected regenerated RAG answer not supported by selected evidence "
                         "(kind=%s guild=%s exact=%s runtime=%s semantic=%s)",
@@ -3559,11 +3577,23 @@ class CorpusManager:
                     sources = []
                     return False
 
+                if verified_text != recovered.text:
+                    log.info(
+                        "Using sentence-filtered regenerated RAG answer "
+                        "(kind=%s guild=%s exact=%s runtime=%s semantic=%s)",
+                        question_kind.value,
+                        guild_id,
+                        len(recovered_hits),
+                        len(used_firebase),
+                        len(used_semantic),
+                    )
+                    extractive_fallback = True
+
                 # The retry used only locally filtered exact/runtime evidence,
                 # plus semantic excerpts that passed the grounding audit.
                 used_lexical_hits = recovered_hits
                 sources = recovered_sources
-                answer = recovered.text
+                answer = verified_text
                 has_answer = True
                 return True
 
@@ -3576,6 +3606,37 @@ class CorpusManager:
                 QuestionKind.GENERAL,
             }
             direct_declared_no_evidence = False
+            # Use the cheaper local path only for explicitly broad questions
+            # with multiple independent candidates. A single history hit still
+            # goes through File Search so safety stops and semantic expansion
+            # keep their existing fail-closed behavior.
+            if comprehensive and len(lexical_hits) >= 2:
+                local_first_context = with_lexical_context(
+                    evidence_context,
+                    lexical_hits,
+                )
+                recovered_locally = await recover_verified_evidence(
+                    local_first_context,
+                    lexical_hits,
+                )
+                if recovered_locally and requires_comprehensive_recovery(
+                    comprehensive=comprehensive,
+                    source_count=len(sources),
+                    candidate_count=len(lexical_hits) + len(firebase_evidence),
+                ):
+                    log.warning(
+                        "Local-first comprehensive answer used too few sources; "
+                        "continuing to File Search (kind=%s guild=%s sources=%s "
+                        "candidates=%s)",
+                        question_kind.value,
+                        guild_id,
+                        len(sources),
+                        len(lexical_hits) + len(firebase_evidence),
+                    )
+                    has_answer = False
+                    sources = []
+                    used_lexical_hits = []
+
             if (
                 not comprehensive
                 and not cross_source_history
@@ -3735,63 +3796,91 @@ class CorpusManager:
                         item for item in semantic_audit.evidence if item.text
                     )
                     semantic_candidate_count = len(recovery_semantic_evidence)
+                    comprehensive_coverage_too_narrow = requires_comprehensive_recovery(
+                        comprehensive=comprehensive,
+                        source_count=len(sources),
+                        candidate_count=(
+                            len(search_hits)
+                            + len(recovery_semantic_evidence)
+                            + len(firebase_evidence)
+                        ),
+                    )
+                    if comprehensive_coverage_too_narrow:
+                        log.warning(
+                            "RAG comprehensive answer used too few sources; regenerating "
+                            "(kind=%s guild=%s sources=%s candidates=%s)",
+                            question_kind.value,
+                            guild_id,
+                            len(sources),
+                            len(search_hits)
+                            + len(recovery_semantic_evidence)
+                            + len(firebase_evidence),
+                        )
                     if (search_hits or recovery_semantic_evidence or firebase_evidence) and (
                         not has_answer
                         or not (semantic_sources or used_lexical_hits or used_firebase)
                         or semantic_audit.requires_recovery
+                        or comprehensive_coverage_too_narrow
                     ):
                         recovery_context = search_context
                         for item in recovery_semantic_evidence:
                             recovery_context += self._untrusted_evidence(item.key, item.text)
-                        # Broad entity questions have a safer structured
-                        # projection below.  Do not let the generic raw-record
-                        # fallback pre-empt it merely because File Search's
-                        # claim mapping was incomplete.
-                        fallback_search_hits = _rank_extract_fallback_hits(
+                        # A failed File Search support mapping does not mean the
+                        # retrieved records are unusable. First regenerate from
+                        # the locally authorized excerpts and verify every
+                        # resulting claim against the exact evidence selected by
+                        # the model. Only expose raw records when that safer,
+                        # readable recovery also fails (for example while the AI
+                        # provider is unavailable).
+                        recovered = await recover_verified_evidence(
+                            recovery_context,
                             search_hits,
-                            question_kind,
+                            recovery_semantic_evidence,
                         )
-                        fallback_answer = (
-                            ""
-                            if overview_subject and (firebase_evidence or search_hits)
-                            else self._render_retrieved_evidence_fallback(
-                                fallback_search_hits,
-                                firebase_evidence,
-                                recovery_semantic_evidence,
-                            )
-                        )
-                        fallback_sources = self._lexical_sources(
-                            fallback_search_hits,
-                            [],
-                        )
-                        fallback_sources.extend(
-                            self._firebase_sources(firebase_evidence, fallback_sources)
-                        )
-                        fallback_sources.extend(
-                            item.citation
-                            for item in recovery_semantic_evidence
-                            if item.citation and item.citation not in fallback_sources
-                        )
-                        if (
-                            fallback_answer
-                            and fallback_sources
-                            and not (
-                                schema_fallback_allowed
-                                and schema_contracts
-                                and schema_sources
-                            )
-                        ):
-                            answer = fallback_answer
-                            sources = fallback_sources
-                            used_lexical_hits = fallback_search_hits
-                            has_answer = True
-                            extractive_fallback = True
-                        else:
-                            await recover_verified_evidence(
-                                recovery_context,
+                        if not recovered:
+                            # Broad entity questions have a safer structured
+                            # projection below. Do not let the generic raw-record
+                            # fallback pre-empt it merely because File Search's
+                            # claim mapping was incomplete.
+                            fallback_search_hits = _rank_extract_fallback_hits(
                                 search_hits,
-                                recovery_semantic_evidence,
+                                question_kind,
                             )
+                            fallback_answer = (
+                                ""
+                                if overview_subject and (firebase_evidence or search_hits)
+                                else self._render_retrieved_evidence_fallback(
+                                    fallback_search_hits,
+                                    firebase_evidence,
+                                    recovery_semantic_evidence,
+                                )
+                            )
+                            fallback_sources = self._lexical_sources(
+                                fallback_search_hits,
+                                [],
+                            )
+                            fallback_sources.extend(
+                                self._firebase_sources(firebase_evidence, fallback_sources)
+                            )
+                            fallback_sources.extend(
+                                item.citation
+                                for item in recovery_semantic_evidence
+                                if item.citation and item.citation not in fallback_sources
+                            )
+                            if (
+                                fallback_answer
+                                and fallback_sources
+                                and not (
+                                    schema_fallback_allowed
+                                    and schema_contracts
+                                    and schema_sources
+                                )
+                            ):
+                                answer = fallback_answer
+                                sources = fallback_sources
+                                used_lexical_hits = fallback_search_hits
+                                has_answer = True
+                                extractive_fallback = True
             no_answer = not sources or not has_answer
             if (
                 no_answer
@@ -3993,6 +4082,12 @@ class CorpusManager:
             "runtime:<document_key>、semantic:<index> の提示形式どおりに列挙した"
             " [[YAGAPON_EVIDENCE_KEYS:key1,key2]] 行を回答状態行の直前へ必ず出すぽん。"
             "使っていないkeyや提示されていないkeyは列挙しないぽん。"
+            "要約は1つの箇条書きにつき1つの根拠だけから作り、複数の記録を"
+            "1つの事実へ合成しないぽん。人名・数値・日付・状態・役職は根拠の"
+            "表記をそのまま使うぽん。根拠に明記されていない件数や『主に』などの"
+            "評価を付け足さないぽん。各箇条書きは、主語と内容が分かる1つの完全な"
+            "文章にするぽん。見出し、発言者名だけの行、『内容:』だけを分離した行、"
+            "回答する・まとめるという前置きは出力しないぽん。"
             "提示された根拠が質問と無関係、または不足する場合は、"
             "『その件に関する情報は、今のボクの記憶には見当たらないぽん』と答えるぽん。"
             "提示されていない事実は補完しないぽん。"
@@ -4166,6 +4261,8 @@ class CorpusManager:
         seen: set[str] = set()
 
         def add(label: str, value: str) -> None:
+            if len(lines) >= 6:
+                return
             normalized = re.sub(r"\s+", " ", value).strip()
             if not normalized or normalized.casefold() in seen:
                 return
@@ -4178,11 +4275,14 @@ class CorpusManager:
             summary = CorpusManager._runtime_evidence_summary(item)
             if summary is not None:
                 add(*summary)
+        # File Search semantic hits reflect the model's topical retrieval and
+        # are usually more relevant than broad lexical matches. Show them
+        # first when synthesis cannot be safely returned.
+        for index, item in enumerate(semantic_evidence[:4], start=1):
+            add(f"検索結果 {index}", item.text)
         for hit in hits[:4]:
             period = f" / {hit.festival}th" if hit.festival is not None else ""
             add(f"{hit.channel_name}{period}", hit.excerpt)
-        for index, item in enumerate(semantic_evidence[:4], start=1):
-            add(f"検索結果 {index}", item.text)
 
         if not lines:
             return ""
@@ -4609,7 +4709,14 @@ class CorpusManager:
         cls,
         groups: tuple[_FirebaseListGroup, ...],
     ) -> str:
-        """Render every projected field without an LLM or an output-token cap."""
+        """Render complete Firebase lists without an LLM or an output-token cap.
+
+        A list request asks for every matching record, not for a raw schema dump.
+        Notifications therefore use a compact, stable projection that remains
+        readable in Discord while retaining all titles and operational metadata.
+        Other collection types keep the lossless generic representation because
+        their useful summary fields vary by schema.
+        """
         lines: list[str] = []
         if len(groups) > 1:
             lines.extend(("# Firebase現在値一覧", ""))
@@ -4617,10 +4724,15 @@ class CorpusManager:
             safe_title = cls._escape_untrusted_markdown(group.title)
             lines.append(f"## {safe_title}一覧（{group.returned}件）")
             if group.completeness == "complete":
-                lines.append(
-                    f"Firebaseで質問条件に一致した{group.matched}件を、"
-                    "省略せずすべて掲載するぽん。"
-                )
+                if group.source_type == "notifications":
+                    lines.append(
+                        f"Firebaseで質問条件に一致した全{group.matched}件を掲載するぽん。"
+                    )
+                else:
+                    lines.append(
+                        f"Firebaseで質問条件に一致した{group.matched}件を、"
+                        "省略せずすべて掲載するぽん。"
+                    )
             else:
                 lines.append(
                     f"取得上限（{group.reader_limit}件）に到達したため、取得できた"
@@ -4640,6 +4752,44 @@ class CorpusManager:
                     ),
                     f"項目 {item.position}",
                 )
+                if group.source_type == "notifications":
+                    timestamp = item.fields.get("publishedAt") or item.fields.get(
+                        "createdAt"
+                    )
+                    metadata = []
+                    if timestamp:
+                        metadata.append(str(timestamp))
+                    category = item.fields.get("category")
+                    if category:
+                        metadata.append(str(category))
+                    targets = item.fields.get("displayTargets")
+                    if isinstance(targets, list) and targets:
+                        metadata.append("対象: " + "/".join(map(str, targets)))
+                    if "sendPush" in item.fields:
+                        metadata.append(
+                            "Push: あり" if item.fields.get("sendPush") else "Push: なし"
+                        )
+                    suffix = (
+                        " — "
+                        + cls._escape_untrusted_markdown(" / ".join(metadata))
+                        if metadata
+                        else ""
+                    )
+                    lines.append(
+                        f"{item.position}. **{cls._escape_untrusted_markdown(display_name)}**"
+                        f"{suffix}"
+                    )
+                    action = item.fields.get("action")
+                    if isinstance(action, dict):
+                        label = action.get("label")
+                        url = action.get("url")
+                        action_parts = [str(value) for value in (label, url) if value]
+                        if action_parts:
+                            lines.append(
+                                "   - アクション: "
+                                + cls._escape_untrusted_markdown(" — ".join(action_parts))
+                            )
+                    continue
                 lines.append(
                     f"### {item.position}. {cls._escape_untrusted_markdown(display_name)}"
                 )
@@ -4655,6 +4805,13 @@ class CorpusManager:
                         f"{cls._escape_untrusted_markdown(rendered_value)}"
                     )
                 lines.append("")
+            if group.source_type == "notifications":
+                lines.extend(
+                    (
+                        "",
+                        "一覧では本文を省略しているぽん。通知名を指定すれば本文も確認できるぽん。",
+                    )
+                )
             if group_index + 1 < len(groups):
                 lines.append("---")
                 lines.append("")
@@ -5246,10 +5403,15 @@ class CorpusManager:
             return False
         matched = clause_bigrams & cls._grounding_bigrams(evidence)
         minimum_matches = 1 if len(clause_bigrams) == 1 else 2
+        threshold = (
+            _RECOVERY_CRITICAL_BIGRAM_THRESHOLD
+            if _CRITICAL_GROUNDING_CLAIM_RE.search(raw_clause)
+            else _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
+        )
         return (
             len(matched) >= minimum_matches
             and len(matched) / len(clause_bigrams)
-            >= _RECOVERY_EVIDENCE_BIGRAM_THRESHOLD
+            >= threshold
         )
 
     @classmethod
@@ -5368,6 +5530,53 @@ class CorpusManager:
                     return False
                 previous_clause = (raw_clause, clause)
         return True
+
+    @classmethod
+    def _verified_recovered_answer(
+        cls,
+        answer_text: str,
+        evidence_texts: list[str],
+    ) -> str:
+        """Keep a recovery answer whole, or retain only independently verified claims.
+
+        Model summaries often contain several otherwise useful bullets. Rejecting the
+        entire answer because one narrative sentence paraphrases too broadly turns a
+        successful retrieval into an unreadable raw-record dump. Each retained line is
+        still checked by the same fail-closed atom, polarity, role and permission
+        verification as a complete answer; unsupported lines are never shown.
+        """
+        if cls._recovered_claims_supported(answer_text, evidence_texts):
+            return answer_text
+
+        claims = cls._grounding_claims(answer_text)
+        verified = [
+            claim
+            for claim in claims
+            if cls._recovered_claim_is_standalone(claim)
+            and cls._recovered_claims_supported(claim, evidence_texts)
+        ]
+        if not verified:
+            return ""
+
+        return (
+            "根拠との対応を文ごとに確認できた内容だけを示すぽん。\n\n"
+            + "\n".join(f"- {claim}" for claim in verified)
+        )
+
+    @staticmethod
+    def _recovered_claim_is_standalone(claim: str) -> bool:
+        """Reject headings, orphan labels, and generic answer preambles."""
+        plain = re.sub(r"[*_`#]", "", claim).strip()
+        if not plain:
+            return False
+        if re.match(
+            r"^(?:発言者|日時|日付|出典|根拠|チャンネル|カテゴリ|参加者)\s*[:：]",
+            plain,
+        ):
+            return False
+        if re.search(r"(?:まとめ|説明|お伝え|回答)(?:た|る|する)?.{0,8}ぽん[。.!！?？]?$", plain):
+            return False
+        return len(plain) >= 12 and bool(re.search(r"[。.!！?？]$", plain))
 
     @staticmethod
     def _support_segment_text(support, answer_text: str) -> str:
