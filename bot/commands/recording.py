@@ -32,7 +32,20 @@ def register(bot):
     @group.command(name="minutes", description="保存済み録音から文字起こしと議事録を作成する")
     @discord.default_permissions(administrator=True)
     @discord.option("session_id", description="/leave で表示されたセッションID")
-    async def recording_minutes(ctx: discord.ApplicationContext, session_id: str):
+    @discord.option(
+        "quality",
+        description="通常は低コスト。重要会議だけ高精度を選択",
+        choices=[
+            discord.OptionChoice("標準（低コスト・推奨）", "standard"),
+            discord.OptionChoice("高精度（話者分離・高コスト）", "high_accuracy"),
+        ],
+        default="standard",
+    )
+    async def recording_minutes(
+        ctx: discord.ApplicationContext,
+        session_id: str,
+        quality: str = "standard",
+    ):
         if not await require_guild_admin(ctx):
             return
         await ctx.defer(ephemeral=True)
@@ -44,6 +57,7 @@ def register(bot):
                 artifact=artifact,
                 target_channel=ctx.channel,
                 retranscribe=True,
+                transcription_quality=quality,
                 review_only=False,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
@@ -51,6 +65,7 @@ def register(bot):
             return
         await ctx.followup.send(
             f"議事録作成ジョブ `{job.id}` を開始したぽん。"
+            f"文字起こし: **{'高精度' if quality == 'high_accuracy' else '標準（低コスト）'}**。"
             "録音は削除せず、完了後にこのチャンネルへ議事録と文字起こしを投稿するぽん。",
             ephemeral=True,
         )
@@ -107,11 +122,21 @@ def register(bot):
         type=bool,
         default=False,
     )
+    @discord.option(
+        "quality",
+        description="再文字起こし時の品質（既存文字起こし再利用時は課金なし）",
+        choices=[
+            discord.OptionChoice("標準（低コスト・推奨）", "standard"),
+            discord.OptionChoice("高精度（話者分離・高コスト）", "high_accuracy"),
+        ],
+        default="standard",
+    )
     async def recording_replay(
         ctx: discord.ApplicationContext,
         session_id: str,
         retranscribe: bool = False,
         review_only: bool = False,
+        quality: str = "standard",
     ):
         if not await _require_operator(ctx, bot):
             return
@@ -122,6 +147,7 @@ def register(bot):
                 artifact=artifact,
                 target_channel=ctx.channel,
                 retranscribe=retranscribe,
+                transcription_quality=quality,
                 review_only=review_only,
                 review_actor=ctx.author if review_only else None,
             )

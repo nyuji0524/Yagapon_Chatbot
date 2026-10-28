@@ -18,7 +18,7 @@ _PROFILE_MODELS = {
         "curation": "gemini-3.1-flash-lite",
         "knowledge": "gemini-3.1-flash-lite",
         "transcribe": "gemini-3.5-transcribe",
-        "transcribe_fallback": "gemini-3.1-flash-lite",
+        "transcribe_fallback": "gemini-3.5-flash-lite",
         "audio": "gemini-3.1-flash-lite",
     },
     "quality": {

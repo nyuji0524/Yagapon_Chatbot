@@ -218,7 +218,7 @@ async def test_transcription_falls_back_on_429_without_reuploading(monkeypatch):
     assert result == "Speaker 1: 復旧しました"
     create.assert_awaited_once()
     fallback.assert_awaited_once()
-    assert fallback.await_args.kwargs["model"] == "gemini-3.1-flash-lite"
+    assert fallback.await_args.kwargs["model"] == "gemini-3.5-flash-lite"
     assert transcription._dedicated_transcription_rate_limiter.remaining() > 0
     client.aio.files.upload.assert_awaited_once()
     client.aio.files.delete.assert_awaited_once_with(name="files/test")

@@ -232,6 +232,11 @@ class VoiceSession:
         self._reference_docs: list[str] = []  # VCテキストチャットに投稿された参考資料
         self._meeting_materials: list[dict[str, str]] = []
         self._voiceprint_paths: dict[str, str] | None = None
+        # Archived recordings default to the cost-efficient multimodal model.
+        # `/recording minutes` can explicitly opt one job into the dedicated
+        # diarization endpoint without changing or redeploying the global model
+        # profile.
+        self.prefer_dedicated_transcription: bool | None = None
         self._stt_workers: set[asyncio.Future] = set()
         self._stt_request_lock = asyncio.Lock()
         self._starting = False
@@ -2707,7 +2712,7 @@ class VoiceSession:
                     audio_bytes,
                     speaker,
                     diarization=True,
-                    prefer_dedicated=True,
+                    prefer_dedicated=self._prefer_dedicated_final_transcription(),
                 )
                 if text is None:
                     self._diarized_speaker_labels = previous_diarized_labels
@@ -2758,7 +2763,7 @@ class VoiceSession:
                         audio_bytes,
                         speaker,
                         diarization=True,
-                        prefer_dedicated=True,
+                        prefer_dedicated=self._prefer_dedicated_final_transcription(),
                     )
                     if text is None:
                         self._diarized_speaker_labels = previous_diarized_labels
@@ -2796,6 +2801,21 @@ class VoiceSession:
             transcript_complete=True,
         )
         return True
+
+    def _prefer_dedicated_final_transcription(self) -> bool:
+        if self.prefer_dedicated_transcription is not None:
+            return self.prefer_dedicated_transcription
+        configured = os.environ.get(
+            "YAGAPON_TRANSCRIPTION_QUALITY",
+            "standard",
+        ).strip().casefold()
+        if configured not in {"standard", "high_accuracy"}:
+            log.warning(
+                "Unknown YAGAPON_TRANSCRIPTION_QUALITY=%s; using standard",
+                configured,
+            )
+            return False
+        return configured == "high_accuracy"
 
     @staticmethod
     def _pcm_to_wav(pcm_data: bytes, channels: int = 2, sample_rate: int = 48000, sample_width: int = 2) -> bytes:
