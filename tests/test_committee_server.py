@@ -21,6 +21,7 @@ from bot.commands.committee_server import (
     _post_once,
     _replace_role_group,
     _roles_after_position_approval,
+    _sync_role_decision,
 )
 
 
@@ -204,3 +205,31 @@ async def test_post_once_repins_an_existing_guide():
     message.edit.assert_awaited_once_with(content="updated guide", embed=None, view=None)
     message.pin.assert_awaited_once_with(reason="28thサーバー案内")
     channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_acknowledges_decision_for_member_who_left_guild():
+    response = SimpleNamespace(status=404, reason="Not Found")
+    guild = SimpleNamespace(
+        id=10,
+        get_member=lambda _member_id: None,
+        fetch_member=AsyncMock(side_effect=discord.NotFound(response, "missing")),
+    )
+    backend = SimpleNamespace(acknowledge_decision=AsyncMock())
+    bot = SimpleNamespace(committee_backend=backend)
+
+    await _sync_role_decision(
+        bot,
+        guild,
+        {
+            "id": "application-1",
+            "discordUserId": "20",
+            "status": "approved",
+            "role": "企画長",
+        },
+    )
+
+    backend.acknowledge_decision.assert_awaited_once_with(
+        guild_id=10,
+        application_id="application-1",
+    )

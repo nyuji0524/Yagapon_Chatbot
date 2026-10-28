@@ -30,13 +30,6 @@ class SupportIdentity:
     role_synced: bool = False
 
 
-@dataclass(frozen=True)
-class SupportOrganization:
-    id: str
-    name: str
-    department: str
-
-
 def _field_value(value: dict[str, Any] | None) -> Any:
     if not value:
         return None
@@ -179,53 +172,6 @@ class SupportDirectory:
             self._documents_url(f"/support/functions/staffInfos/{quote(email, safe='')}"),
         )
         return _document_fields(document or {}).get("grade")
-
-    async def list_organizations(self, department: str) -> tuple[SupportOrganization, ...]:
-        """Return current organizations for one trusted saved department."""
-        if not self.enabled:
-            return ()
-        payload = {
-            "structuredQuery": {
-                "from": [{"collectionId": "organizations"}],
-                "where": {
-                    "fieldFilter": {
-                        "field": {"fieldPath": "department"},
-                        "op": "EQUAL",
-                        "value": {"stringValue": department},
-                    }
-                },
-                "limit": 100,
-            }
-        }
-        try:
-            rows = await self._request(
-                "POST",
-                self._documents_url("/support/functions:runQuery"),
-                payload=payload,
-            )
-        except Exception:
-            log.exception("Yaga Support organization lookup failed department=%s", department)
-            return ()
-        organizations = []
-        for row in rows or ():
-            document = row.get("document")
-            if not document:
-                continue
-            fields = _document_fields(document)
-            document_id = document["name"].rsplit("/", 1)[-1]
-            name = str(
-                fields.get("organizationName")
-                or fields.get("eventName")
-                or document_id
-            ).strip()
-            organizations.append(
-                SupportOrganization(
-                    id=document_id,
-                    name=name,
-                    department=str(fields.get("department") or ""),
-                )
-            )
-        return tuple(sorted(organizations, key=lambda item: item.name.casefold()))
 
     async def _sync_committee_role(self, document_name: str) -> None:
         payload = {

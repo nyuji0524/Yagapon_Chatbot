@@ -414,18 +414,19 @@ class ProjectLeaderApplicationButton(discord.ui.Button):
         if not bureau or registration.get("email_verified") is not True:
             await _respond_ephemeral(interaction, "先に慶應メール認証まで完了してほしいぽん。")
             return
+        await interaction.response.defer(ephemeral=True)
         try:
             organizations = await interaction.client.committee_backend.list_organizations(
                 guild_id=guild.id,
                 discord_user_id=member.id,
             )
         except CommitteeBackendError:
-            await _respond_ephemeral(
-                interaction,
+            await interaction.followup.send(
                 "企画一覧を取得できなかったぽん。少し待ってからもう一度試してほしいぽん。",
+                ephemeral=True,
             )
             return
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "担当する企画を選んでほしいぽん。見つからない場合は最後の選択肢を選んでねぽん。",
             view=ProjectOrganizationView(organizations),
             ephemeral=True,
@@ -852,12 +853,36 @@ class RoleApprovalView(discord.ui.View):
 
 async def _sync_role_decision(bot, guild: discord.Guild, application: dict) -> None:
     application_id = str(application.get("id") or "")
-    member_id = int(application.get("discordUserId") or 0)
+    try:
+        member_id = int(application.get("discordUserId") or 0)
+    except (TypeError, ValueError):
+        member_id = 0
     status = application.get("status")
     role_name = str(application.get("role") or "")
+    if not application_id or member_id <= 0 or status not in {"approved", "rejected"}:
+        log.error("Ignoring malformed committee role decision id=%s", application_id)
+        if application_id:
+            await bot.committee_backend.acknowledge_decision(
+                guild_id=guild.id,
+                application_id=application_id,
+            )
+        return
     member = guild.get_member(member_id)
     if member is None:
-        member = await guild.fetch_member(member_id)
+        try:
+            member = await guild.fetch_member(member_id)
+        except discord.NotFound:
+            log.warning(
+                "Committee applicant left guild=%s member=%s application=%s",
+                guild.id,
+                member_id,
+                application_id,
+            )
+            await bot.committee_backend.acknowledge_decision(
+                guild_id=guild.id,
+                application_id=application_id,
+            )
+            return
     if status == "approved":
         role = _find_named(guild.roles, role_name)
         if role is None or role.name not in DECLARABLE_POSITIONS:
@@ -891,7 +916,16 @@ async def committee_role_sync_loop(bot) -> None:
             try:
                 decisions = await bot.committee_backend.list_decisions(guild.id)
                 for application in decisions:
-                    await _sync_role_decision(bot, guild, application)
+                    try:
+                        await _sync_role_decision(bot, guild, application)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.exception(
+                            "Committee decision sync failed guild=%s application=%s",
+                            guild.id,
+                            application.get("id"),
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
