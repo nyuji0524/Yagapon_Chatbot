@@ -622,6 +622,7 @@ def _select_lexical_context_hits(
     *,
     question_kind: QuestionKind,
     limit: int,
+    question: str = "",
 ) -> list[LexicalHit]:
     """Rank exact hits while preserving explanatory evidence for history.
 
@@ -633,6 +634,26 @@ def _select_lexical_context_hits(
     """
     if limit <= 0:
         return []
+    prefer_implementation_source = bool(
+        question_kind is QuestionKind.DATA_CONTRACT
+        and re.search(
+            r"(?:実装|ソース|コード|コレクション名|定数|実際に使う)",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+    def is_implementation_source(hit: LexicalHit) -> bool:
+        if not prefer_implementation_source or hit.source_type != "source_code":
+            return False
+        path = hit.channel_name.replace("\\", "/").casefold()
+        return "/docs/" not in path and bool(
+            re.search(
+                r"\.(?:dart|js|jsx|ts|tsx|py|go|java|kt|swift|rs)(?::|$)",
+                path,
+            )
+        )
+
     if question_kind is not QuestionKind.HISTORY:
         authority_before_relevance = not allows_unreviewed_evidence(question_kind)
         ranked = sorted(
@@ -644,6 +665,7 @@ def _select_lexical_context_hits(
                     if authority_before_relevance
                     else hit.score
                 ),
+                is_implementation_source(hit),
                 (
                     hit.score
                     if authority_before_relevance
@@ -682,6 +704,7 @@ def _select_lexical_context_hits(
             hits,
             key=lambda hit: (
                 can_answer_directly(question_kind, hit.authority, hit.status),
+                is_implementation_source(hit),
                 hit.score,
                 authority_score(question_kind, hit.authority, hit.status),
             ),
@@ -1621,6 +1644,13 @@ def trusted_capability_response(question: str) -> str | None:
     if (
         re.search(bot_subject, normalized)
         and "自己紹介" in normalized
+        and not re.search(r"(?:ではなく|とは違う|別の(?:企画|担当者|意見))", normalized)
+    ):
+        return _TRUSTED_CAPABILITY_RESPONSE
+    if (
+        re.search(bot_subject, normalized)
+        and re.search(r"(?:何|なに)ができる|できること|機能", normalized)
+        and re.search(r"得意なこと|できないこと|制約|苦手なこと", normalized)
         and not re.search(r"(?:ではなく|とは違う|別の(?:企画|担当者|意見))", normalized)
     ):
         return _TRUSTED_CAPABILITY_RESPONSE
@@ -3845,6 +3875,7 @@ class CorpusManager:
             lexical_hits,
             question_kind=question_kind,
             limit=lexical_context_limit,
+            question=question,
         )
         authoritative_hits = [
             hit for hit in lexical_hits if can_answer_directly(question_kind, hit.authority, hit.status)
@@ -4314,7 +4345,12 @@ class CorpusManager:
                 )
                 for hit in lexical_hits
             )
-            if comprehensive and len(lexical_hits) >= 2 and local_narrative_ready:
+            if (
+                comprehensive
+                and not cross_source_history
+                and len(lexical_hits) >= 2
+                and local_narrative_ready
+            ):
                 local_first_context = with_lexical_context(
                     evidence_context,
                     lexical_hits,
