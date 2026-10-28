@@ -33,6 +33,7 @@ from bot.corpus import (
     parse_model_answer,
     requires_comprehensive_answer,
     requires_comprehensive_recovery,
+    requires_requirement_recovery,
     retrieval_metadata_filter,
     run_backfill_channels,
     sensitive_request_response,
@@ -2511,6 +2512,25 @@ def test_requirement_coverage_keeps_simple_answer_at_full_coverage():
         "ITラボとは何ですか",
         "ITラボはIT局が運営する展示企画だぽん。",
     ) == (100, "単一の依頼へ直接回答")
+
+
+def test_requirement_recovery_uses_requested_facets_not_only_citation_count():
+    question = (
+        "総務系申請とは何ですか。申請の種類、やがサポ上の仕様、入力制御、"
+        "提出後の確認方法、運用上の工夫を根拠付きで詳しく教えてください"
+    )
+    incomplete = "### 1. 申請の種類\n机椅子申請があるぽん。\n\n### 2. 入力制御\n文字入力に対応するぽん。"
+    complete = (
+        "### 1. 申請の種類\n申請の種類を説明するぽん。\n"
+        "### 2. やがサポ上の仕様\nやがサポ上の仕様を説明するぽん。\n"
+        "### 3. 入力制御\n入力制御を説明するぽん。\n"
+        "### 4. 提出後の確認方法\n提出後の確認方法を説明するぽん。\n"
+        "### 5. 運用上の工夫\n運用上の工夫を説明するぽん。"
+    )
+    citations = ("[仕様](https://example.com/spec)", "[実装](https://example.com/code)")
+
+    assert requires_requirement_recovery(question, incomplete, citations=citations) is True
+    assert requires_requirement_recovery(question, complete, citations=citations) is False
 
 
 @pytest.mark.parametrize(
