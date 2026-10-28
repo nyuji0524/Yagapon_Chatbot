@@ -1188,15 +1188,16 @@ async def test_listen_start_runs_capture_monitors_without_realtime_transcription
     session._realtime_loop = AsyncMock(side_effect=AssertionError("realtime STT started"))
 
     await session.start()
-
-    assert session.is_active is True
-    assert session._capture_monitor_task is not None
-    assert session._durability_task is not None
-    assert session._realtime_task is None
-    session._realtime_loop.assert_not_awaited()
-
-    monitor_release.set()
-    await asyncio.gather(session._capture_monitor_task, session._durability_task)
+    try:
+        assert session.is_active is True
+        assert session._capture_monitor_task is not None
+        assert session._durability_task is not None
+        assert session._realtime_task is None
+        session._realtime_loop.assert_not_awaited()
+    finally:
+        monitor_release.set()
+        tasks = [session._capture_monitor_task, session._durability_task]
+        await asyncio.gather(*(task for task in tasks if task is not None))
 
 
 @pytest.mark.asyncio
