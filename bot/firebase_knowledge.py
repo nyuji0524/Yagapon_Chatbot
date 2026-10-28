@@ -634,7 +634,13 @@ class FirebaseKnowledgeReader:
         *,
         exhaustive: bool = False,
     ) -> list[FirebaseEvidence]:
-        terms = self._terms(question, source_type=source_type)
+        # An explicit exhaustive request is a collection listing, not a
+        # relevance search. Reusing focused-query terms here caused output
+        # column words such as "title", "publishedAt" or "本文" to filter out
+        # every fetched document even when Firestore returned the collection.
+        # Keep every document that passes the reviewed projection and public
+        # status gate for exhaustive requests.
+        terms = [] if exhaustive else self._terms(question, source_type=source_type)
         ranked: list[dict[str, Any]] = []
         for document in documents:
             fields = _document_fields(document)
