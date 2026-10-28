@@ -56,19 +56,27 @@ class CommitteeBackend:
 
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
-        headers = await self._headers(url)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.post(url, json=payload) as response:
-                try:
-                    body = await response.json()
-                except (aiohttp.ContentTypeError, ValueError):
-                    body = {"error": (await response.text())[:300]}
-                if response.status >= 400 or body.get("success") is not True:
-                    raise CommitteeBackendError(
-                        response.status,
-                        str(body.get("error") or "Committee backend request failed"),
-                    )
-                return body
+        try:
+            headers = await self._headers(url)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.post(url, json=payload) as response:
+                    try:
+                        body = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        body = {"error": (await response.text())[:300]}
+                    if response.status >= 400 or body.get("success") is not True:
+                        raise CommitteeBackendError(
+                            response.status,
+                            str(body.get("error") or "Committee backend request failed"),
+                        )
+                    return body
+        except CommitteeBackendError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise CommitteeBackendError(
+                503,
+                "Committee backend is temporarily unavailable",
+            ) from exc
 
     async def request_code(
         self,

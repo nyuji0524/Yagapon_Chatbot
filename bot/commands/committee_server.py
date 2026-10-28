@@ -919,6 +919,14 @@ async def committee_role_sync_loop(bot) -> None:
     """Apply Yaga Support decisions to Discord with idempotent acknowledgement."""
     while not bot.is_closed():
         for guild in bot.guilds:
+            # The bot also serves IT and test guilds.  Only a server prepared
+            # for committee registration has both the role panel and managed
+            # committee roles, so avoid a paid Functions poll everywhere else.
+            if (
+                _find_named(guild.text_channels, ROLE_PANEL_CHANNEL) is None
+                or not any(_find_named(guild.roles, name) for name in GRADE_ROLES)
+            ):
+                continue
             try:
                 decisions = await bot.committee_backend.list_decisions(guild.id)
                 for application in decisions:
