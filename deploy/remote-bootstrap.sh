@@ -20,7 +20,22 @@ fi
 registry=${image%%/*}
 gcloud auth configure-docker "$registry" --quiet
 pull_started=$SECONDS
-docker pull "$image"
+for attempt in 1 2 3; do
+  if docker pull "$image"; then
+    break
+  fi
+  if [[ "$attempt" == 3 ]]; then
+    echo "Image pull failed after $attempt attempts" >&2
+    exit 1
+  fi
+  # Docker/containerd can occasionally lose a temporary extraction lease
+  # while unpacking a freshly pushed image.  The registry object is immutable
+  # by commit SHA, so retrying the exact reference is safe and resumes already
+  # downloaded layers without redeploying a different artifact.
+  delay=$((attempt * 5))
+  echo "Transient image pull failure; retrying in ${delay}s ($attempt/3)" >&2
+  sleep "$delay"
+done
 echo "Deploy timing: image-pull=$((SECONDS - pull_started))s"
 
 container_id=
