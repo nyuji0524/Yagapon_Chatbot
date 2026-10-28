@@ -528,6 +528,30 @@ def requires_comprehensive_answer(question: str) -> bool:
     )
 
 
+def requires_exact_claim_verification(
+    question: str,
+    question_kind: QuestionKind,
+) -> bool:
+    """Keep sentence-level filtering for exact/high-risk factual answers only.
+
+    Descriptive overview answers naturally paraphrase long source passages.
+    Applying literal sentence support checks to them deletes useful prose and
+    can leave only headings. Exact values and authorization claims retain the
+    stricter guard.
+    """
+    if question_kind in {QuestionKind.AUTHORIZATION, QuestionKind.DATA_CONTRACT}:
+        return True
+    return bool(
+        re.search(
+            r"(?:何時|日時|日程|開催日|開始|終了|会場|場所|票数|得票|順位|"
+            r"ランキング|件数|人数|金額|価格|権限|許可|認可|できる|できない|"
+            r"保存先|フィールド|コレクション|ドキュメント|パス|構造)",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
 def answer_requirement_labels(question: str) -> tuple[str, ...]:
     """Extract explicit deliverables without interpreting evidence.
 
@@ -4276,7 +4300,21 @@ class CorpusManager:
             # remains the fallback when those records cover only one source or
             # miss a requested facet.  This avoids paying for hidden tool
             # reasoning when the mirrored corpus already contains the answer.
-            if comprehensive and len(lexical_hits) >= 2:
+            narrative_requested = bool(
+                re.search(
+                    r"(?:課題|問題点|反省|指摘|フィードバック|経緯|要望|要求)",
+                    question,
+                )
+            )
+            local_narrative_ready = not narrative_requested or any(
+                is_history_narrative_source(hit.source_type)
+                or re.search(
+                    r"(?:課題|問題点|反省|指摘|フィードバック|経緯|要望|要求)",
+                    hit.excerpt,
+                )
+                for hit in lexical_hits
+            )
+            if comprehensive and len(lexical_hits) >= 2 and local_narrative_ready:
                 local_first_context = with_lexical_context(
                     evidence_context,
                     lexical_hits,
@@ -4545,19 +4583,20 @@ class CorpusManager:
                     )
                     semantic_candidate_count = len(recovery_semantic_evidence)
                     locally_verified_primary = ""
-                    # File Search occasionally maps only part of a fully
-                    # grounded answer into ``grounding_supports``. Previously
-                    # that metadata omission forced a second model call and
-                    # could turn a useful answer into a false no-evidence
-                    # response. When every retrieved chunk passed ACL and
-                    # authority checks, independently verify the original
-                    # answer against the authorized chunk bodies. Unsupported
-                    # claims are still removed by the same atom/polarity
-                    # verifier used for regenerated answers.
+                    # Literal sentence filtering is valuable for exact values
+                    # and authorization claims, but destructive for natural
+                    # summaries that paraphrase several authorized sources.
+                    # In descriptive answers, ACL/authority validation and the
+                    # sensitive-data guard remain mandatory while incomplete
+                    # grounding span metadata only lowers confidence.
                     if (
                         semantic_audit.requires_recovery
                         and not semantic_audit.invalid_supports
                         and not semantic_audit.rejected_supported_chunks
+                        and requires_exact_claim_verification(
+                            question,
+                            question_kind,
+                        )
                     ):
                         locally_verified_primary = self._verified_retrieved_answer(
                             parsed.text,
