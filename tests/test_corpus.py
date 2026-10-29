@@ -142,6 +142,8 @@ def test_topic_query_excludes_illustrative_source_unless_explicitly_requested():
     assert _filter_retrieval_plumbing_hits("ITラボのモックについて教えて", [mock]) == [mock]
 
 
+
+
 def test_firebase_projection_does_not_preempt_requested_code_explanation():
     contracts = (SimpleNamespace(source_type="ranking"),)
 
@@ -2544,7 +2546,7 @@ async def test_exact_search_does_not_block_discord_event_loop(corpus_manager):
 
 
 @pytest.mark.asyncio
-async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
+async def test_entity_overview_uses_normal_synthesis_then_structured_fallback(
     corpus_manager,
 ):
     evidence = FirebaseEvidence(
@@ -2577,12 +2579,11 @@ async def test_entity_overview_uses_structured_fallback_instead_of_raw_records(
     )
 
     assert result.no_answer is False
-    assert "Firebaseの公開データでは「AI鬼ごっこなどの体験企画」と案内" in result.text
     assert "AI鬼ごっこなどの体験企画" in result.text
     assert "確認できた根拠を種類ごと" not in result.text
     assert "fields:" not in result.text
-    corpus_manager.rag_store.search_exact.assert_not_called()
-    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+    corpus_manager.rag_store.search_exact.assert_called_once()
+    assert corpus_manager._client.aio.models.generate_content.await_count >= 1
 
 
 @pytest.mark.asyncio
@@ -2604,6 +2605,13 @@ async def test_optional_query_telemetry_failure_does_not_discard_answer(
     )
     corpus_manager.rag_store.record_query = Mock(
         side_effect=sqlite3.OperationalError("database is locked")
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="[[YAGAPON_ANSWER_STATUS:no_evidence]]",
+            usage_metadata=None,
+            candidates=[],
+        )
     )
 
     result = await corpus_manager.query_with_trace(
@@ -2654,8 +2662,8 @@ async def test_entity_overview_survives_depleted_ai_credit(corpus_manager):
     assert "ITラボ" in result.text
     assert "開催場所は**11-21**" in result.text
     assert "fields:" not in result.text
-    corpus_manager.rag_store.search_exact.assert_not_called()
-    corpus_manager._client.aio.models.generate_content.assert_not_awaited()
+    corpus_manager.rag_store.search_exact.assert_called_once()
+    corpus_manager._client.aio.models.generate_content.assert_awaited_once()
 
 
 def test_evidence_confidence_distinguishes_no_hits_from_rejected_candidates():

@@ -111,6 +111,20 @@ def test_relative_history_calendar_anchor_does_not_create_runtime_facet():
     ) == {QuestionKind.RUNTIME, QuestionKind.HISTORY}
 
 
+def test_historical_practice_does_not_become_current_usage():
+    assert classify_question_facets(
+        "福沢諭吉寝かしつけのスコアの決め方って26thではどうやってやってた？"
+    ) == (QuestionKind.HISTORY,)
+
+
+def test_activity_history_supports_forward_plan_without_losing_history_lane():
+    assert set(
+        classify_question_facets(
+            "27thの活動履歴から、今年の12月までに何をするべきか考えてみて下さい"
+        )
+    ) == {QuestionKind.HISTORY, QuestionKind.POLICY}
+
+
 @pytest.mark.parametrize(
     "question",
     (

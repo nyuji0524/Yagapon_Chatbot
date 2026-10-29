@@ -28,7 +28,12 @@ log = logging.getLogger("yagapon.firebase_knowledge")
 
 _ENTITY_OVERVIEW_RE = re.compile(
     r"^\s*(?P<subject>.{2,48}?)\s*(?:について(?:詳しく)?(?:教えて(?:ください|下さい)?|知りたい)|"
-    r"とは(?:何|なん)?(?:ですか)?|の概要(?:を)?(?:教えて(?:ください|下さい)?)?)\s*[？?。\s]*$",
+    # ``ことは`` is ordinary grammar (for example ``決まっていることは？``),
+    # not the entity-overview suffix ``Xとは？``.  Without the negative
+    # look-behind, the whole preceding request became the subject and a broad
+    # Firestore event lookup could return an unrelated project immediately.
+    r"(?<!こ)とは(?:何|なん)?(?:ですか)?|って(?:何|なん)(?:ですか)?|"
+    r"の概要(?:を)?(?:教えて(?:ください|下さい)?)?)\s*[？?。\s]*$",
     re.IGNORECASE,
 )
 _ENTITY_OVERVIEW_STOP_SUBJECTS = {
@@ -58,7 +63,8 @@ def entity_overview_subject(question: str) -> str | None:
             re.IGNORECASE | re.DOTALL,
         )
         if not match or not re.search(
-            r"教えて|説明|まとめ|知りたい|概要|内容|担当|課題|関連|状態|場所",
+            r"教えて|説明|まとめ|知りたい|概要|内容|担当|課題|関連|状態|場所|"
+            r"決ま(?:って|り)|決定|確定",
             match.group("request"),
             re.IGNORECASE,
         ):
@@ -432,6 +438,7 @@ class FirebaseKnowledgeReader:
             QuestionKind.GENERAL,
         }:
             return []
+        overview_subject = entity_overview_subject(question)
         ranking_intent = bool(
             re.search(COLLECTIONS["ranking"]["keywords"], question, re.IGNORECASE)
         )
@@ -452,7 +459,7 @@ class FirebaseKnowledgeReader:
         # the generic word "企画". Treat it as a focused event lookup too, so
         # the safe Firestore projection can complement documents, Discord and
         # source-code evidence for any named project.
-        if entity_overview_subject(question) and not any(
+        if overview_subject and not any(
             name == "events" for name, _config in selected
         ):
             selected.append(("events", COLLECTIONS["events"]))
@@ -523,7 +530,9 @@ class FirebaseKnowledgeReader:
                     continue
                 evidence.extend(
                     self._rank(
-                        question,
+                        overview_subject
+                        if name == "events" and overview_subject
+                        else question,
                         name,
                         config["fields"],
                         documents,

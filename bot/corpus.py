@@ -3757,54 +3757,6 @@ class CorpusManager:
                 )
             return runtime_evidence
 
-        # For a generic entity overview, live structured records are both more
-        # authoritative and dramatically cheaper than a broad SQLite/File
-        # Search scan.  This rule applies to every entity with an authorized
-        # Firebase projection; entities without one continue through the full
-        # knowledge pipeline.
-        if (
-            overview_subject
-            and question_kind is QuestionKind.GENERAL
-            and not requires_comprehensive_answer(question)
-        ):
-            try:
-                firebase_evidence = await load_firebase_evidence()
-                firebase_loaded = True
-            except Exception:
-                log.warning(
-                    "Structured entity overview lookup failed; using normal retrieval",
-                    exc_info=True,
-                )
-            fallback_runtime = [
-                item
-                for item in firebase_evidence
-                if can_answer_directly(question_kind, item.authority, item.status)
-            ]
-            fallback_answer = self._render_entity_overview_fallback(
-                overview_subject,
-                [],
-                fallback_runtime,
-            )
-            fallback_sources = self._firebase_sources(fallback_runtime, [])
-            if fallback_answer and fallback_sources:
-                confidence = evidence_confidence(
-                    answered=True,
-                    evidence_count=len(fallback_sources),
-                    source_family_count=citation_source_family_count(fallback_sources),
-                    candidate_count=len(fallback_runtime),
-                    locally_verified=True,
-                    extractive_fallback=True,
-                )
-                return RagAnswer(
-                    text=fallback_answer,
-                    citations=tuple(fallback_sources),
-                    festival=festival,
-                    no_answer=False,
-                    metadata_filter=metadata_filter,
-                    confidence_score=confidence[0],
-                    confidence_label=confidence[1],
-                    confidence_detail=confidence[2],
-                )
         terms = self.rag_store.query_terms(question, glossary)
         # ``search_exact`` performs a bounded but potentially expensive SQLite
         # scan.  Running it on the Discord event loop can delay heartbeats and

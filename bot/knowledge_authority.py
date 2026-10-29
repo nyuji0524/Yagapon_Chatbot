@@ -34,6 +34,8 @@ CURRENT_IMPLEMENTATION_AUTHORITIES = {
     "repository_context",
 }
 
+_HISTORICAL_FESTIVAL_CONTEXT = r"(?:第\s*)?\d{1,3}(?:th|回).{0,60}(?:では|当時)"
+
 
 def is_history_narrative_source(source_type: str) -> bool:
     """Return whether a source can explain the human context of a change.
@@ -83,7 +85,9 @@ QUESTION_KIND_RULES = (
         r"\d{1,2}[/-]\d{1,2}.{0,16}(?:議事録|会議記録).{0,12}(?:教えて|確認)|"
         r"会議内容(?:(?:は|って)?[?？]|(?:を|について)(?:教えて|まとめ|知りたい|確認))|"
         r"会議(?:で|では).{0,20}(?:何が|何を|どんな|決定|議題|発言|話したこと)|反省(?:会)?|"
-        r"フィードバック|指摘|問題|障害|何が出た|意見|決まった理由|変更履歴|"
+        r"フィードバック|指摘|問題|障害|何が出た|意見|決まった理由|変更履歴|活動履歴|作業履歴|"
+        + _HISTORICAL_FESTIVAL_CONTEXT
+        + r"|"
         r"去年|昨年|昨年度|先月|今頃|この時期|要望|依頼|要求(?:があった|された)",
     ),
     (
@@ -128,6 +132,15 @@ def classify_question_facets(question: str) -> tuple[QuestionKind, ...]:
         # sections.  Keep both facets only when a real present-vs-past
         # comparison or another strong runtime cue is present.
         facets.remove(QuestionKind.RUNTIME)
+    if (
+        QuestionKind.HISTORY in facets
+        and QuestionKind.USAGE in facets
+        and re.search(_HISTORICAL_FESTIVAL_CONTEXT, question, re.IGNORECASE)
+    ):
+        # ``26thではどうやっていた？`` asks for a historical practice, not
+        # current usage instructions.  Keeping the usage facet excludes raw
+        # meeting/Discord records and lets a current manual answer instead.
+        facets.remove(QuestionKind.USAGE)
     if not facets:
         return (QuestionKind.GENERAL,)
     return tuple(facets)
