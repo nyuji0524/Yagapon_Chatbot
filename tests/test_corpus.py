@@ -8672,7 +8672,10 @@ async def test_one_pass_does_not_dump_unrelated_exact_candidates_on_no_evidence(
     corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
     corpus_manager._client.aio.models.generate_content = AsyncMock(
         return_value=SimpleNamespace(
-            text="FinTech企画について直接確認できる記録を見つけられなかったぽん。",
+            text=(
+                "FinTech企画について、実際の決定事項を参照できる記録や資料を"
+                "見つけることができなかったぽん。"
+            ),
             usage_metadata=None,
             candidates=[],
         )
