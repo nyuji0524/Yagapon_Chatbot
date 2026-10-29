@@ -899,6 +899,11 @@ def festival_filter_enabled() -> bool:
     return os.environ.get("YAGAPON_RAG_FESTIVAL_FILTER_ENABLED", "false").lower() == "true"
 
 
+def one_pass_rag_enabled() -> bool:
+    """Use the simple retrieval+synthesis path unless explicitly rolled back."""
+    return os.environ.get("YAGAPON_RAG_ONE_PASS", "true").lower() != "false"
+
+
 def retrieval_metadata_filter(
     question_kind: QuestionKind,
     *,
@@ -3522,6 +3527,23 @@ class CorpusManager:
                 ),
                 no_answer=True,
             )
+        if one_pass_rag_enabled():
+            return await self._query_one_pass(
+                question,
+                corpus_store_name,
+                guild_id=guild_id,
+                actor_id=actor_id,
+                channel_id=channel_id,
+                members_info=members_info,
+                glossary_text=glossary_text,
+                glossary=glossary,
+                allowed_channel_ids=allowed_channel_ids,
+                allow_unrestricted_conversations=allow_unrestricted_conversations,
+            )
+
+        # The former faceted/recovery pipeline remains behind an explicit
+        # rollback switch for one release. Production defaults to the active
+        # one-retrieval/one-synthesis path above.
         started = time.monotonic()
         facets = classify_question_facets(question)
         comprehensive = (
@@ -3675,6 +3697,361 @@ class CorpusManager:
             confidence_score=confidence_score,
             confidence_label=confidence_label,
             confidence_detail=confidence_detail,
+        )
+
+    @staticmethod
+    def _one_pass_question_kind(question: str) -> QuestionKind:
+        """Choose one authority boundary without splitting the user's answer."""
+        facets = classify_question_facets(question)
+        for strict_kind in (QuestionKind.AUTHORIZATION, QuestionKind.DATA_CONTRACT):
+            if strict_kind in facets:
+                return strict_kind
+        if QuestionKind.HISTORY in facets:
+            return QuestionKind.HISTORY
+        if QuestionKind.RUNTIME in facets:
+            return QuestionKind.RUNTIME
+        return facets[0] if facets else QuestionKind.GENERAL
+
+    async def _query_one_pass(
+        self,
+        question: str,
+        corpus_store_name: str,
+        *,
+        guild_id: int = 0,
+        actor_id: int | None = None,
+        channel_id: int | None = None,
+        members_info: str = "",
+        glossary_text: str = "",
+        glossary: dict | None = None,
+        allowed_channel_ids: tuple[int, ...] | list[int] | set[int] | None = None,
+        allow_unrestricted_conversations: bool = False,
+    ) -> RagAnswer:
+        """Search every admitted source once and synthesize one natural answer.
+
+        ACL, authority, festival/date and secret checks remain hard boundaries.
+        Re-ranking, facet-by-facet generation, answer grading and regeneration
+        are deliberately absent from this path.
+        """
+        started = time.monotonic()
+        festival = festival_from_query(question)
+        target_date = calendar_date_from_query(question, festival=festival)
+        target_window = (
+            None
+            if target_date is not None
+            else calendar_window_from_query(question, festival=festival)
+        )
+        date_from = target_window.starts_on.isoformat() if target_window else None
+        date_to = target_window.ends_on.isoformat() if target_window else None
+        question_kind = self._one_pass_question_kind(question)
+        comprehensive = requires_comprehensive_answer(question)
+        lexical_limit = (
+            RAG_COMPREHENSIVE_LEXICAL_CANDIDATES
+            if comprehensive
+            else RAG_LEXICAL_CANDIDATES
+        )
+        context_limit = (
+            RAG_COMPREHENSIVE_LEXICAL_CONTEXT_HITS
+            if comprehensive
+            else RAG_LEXICAL_CONTEXT_HITS
+        )
+        search_top_k = (
+            RAG_COMPREHENSIVE_SEARCH_TOP_K
+            if comprehensive
+            else RAG_SEARCH_TOP_K
+        )
+        max_output_tokens = (
+            RAG_COMPREHENSIVE_TOTAL_OUTPUT_TOKENS
+            if comprehensive
+            else RAG_NORMAL_OUTPUT_TOKENS
+        )
+        metadata_filter = retrieval_metadata_filter(
+            question_kind,
+            guild_id=guild_id,
+            festival=festival,
+            target_date=target_date.isoformat() if target_date else None,
+            allowed_channel_ids=allowed_channel_ids,
+            allow_unrestricted_conversations=allow_unrestricted_conversations,
+        )
+
+        terms = self.rag_store.query_terms(question, glossary)
+        lexical_hits = (
+            await asyncio.to_thread(
+                self.rag_store.search_exact,
+                guild_id,
+                terms,
+                festival=festival,
+                target_date=target_date.isoformat() if target_date else None,
+                date_from=date_from,
+                date_to=date_to,
+                allowed_channel_ids=allowed_channel_ids,
+                allow_unrestricted_conversations=allow_unrestricted_conversations,
+                question_kind=question_kind,
+                limit=lexical_limit,
+            )
+            if guild_id
+            else []
+        )
+        # Date-only retrieval is useful for "last year around now" questions,
+        # where the actual messages need not repeat the organization name.
+        if guild_id and question_kind is QuestionKind.HISTORY and target_window:
+            date_hits = await asyncio.to_thread(
+                self.rag_store.search_exact,
+                guild_id,
+                [],
+                festival=festival,
+                date_from=date_from,
+                date_to=date_to,
+                allowed_channel_ids=allowed_channel_ids,
+                allow_unrestricted_conversations=allow_unrestricted_conversations,
+                question_kind=question_kind,
+                limit=lexical_limit,
+            )
+            lexical_hits = list(
+                {
+                    hit.document_key: hit
+                    for hit in [*lexical_hits, *date_hits]
+                }.values()
+            )
+        lexical_hits = _filter_retrieval_plumbing_hits(question, lexical_hits)
+        if not allows_unreviewed_evidence(question_kind):
+            lexical_hits = [
+                hit
+                for hit in lexical_hits
+                if can_answer_directly(question_kind, hit.authority, hit.status)
+            ]
+        lexical_hits = _select_lexical_context_hits(
+            lexical_hits,
+            question_kind=question_kind,
+            limit=context_limit,
+            question=question,
+        )
+
+        firebase_evidence = await self.firebase_knowledge.evidence_for(
+            question,
+            question_kind,
+            festival=festival,
+        )
+        overview_subject = entity_overview_subject(question)
+        if overview_subject and festival is None:
+            previous_festival = max(1, current_festival() - 1)
+            previous_evidence = await self.firebase_knowledge.evidence_for(
+                question,
+                question_kind,
+                festival=previous_festival,
+            )
+            firebase_evidence = list(
+                {
+                    item.document_key + "\0" + item.title: item
+                    for item in [*firebase_evidence, *previous_evidence]
+                }.values()
+            )
+        firebase_evidence = [
+            item
+            for item in firebase_evidence
+            if can_answer_directly(question_kind, item.authority, item.status)
+            or allows_unreviewed_evidence(question_kind)
+        ]
+
+        evidence_context = ""
+        if members_info:
+            evidence_context += self._untrusted_evidence("member-info", members_info)
+        if glossary_text:
+            evidence_context += self._untrusted_evidence("glossary", glossary_text)
+        if firebase_evidence:
+            evidence_context += self._untrusted_evidence(
+                "firebase-runtime",
+                self._firebase_context(firebase_evidence),
+            )
+        if lexical_hits:
+            evidence_context += self._untrusted_evidence(
+                "exact-search",
+                self._lexical_context(lexical_hits),
+            )
+
+        system = SYSTEM_INSTRUCTION + "\n\n" + authority_instruction(question_kind)
+        if festival is not None:
+            system += f"\n対象は{festival}th。別年度を混ぜないぽん。"
+        if target_date is not None:
+            system += f"\n対象日は{target_date.isoformat()}。別日を混ぜないぽん。"
+        elif target_window is not None:
+            system += f"\n対象期間は{date_from}から{date_to}。期間外を混ぜないぽん。"
+        system += (
+            "\n完全一致検索、Firebase、File Searchを一つの根拠集合として扱い、"
+            "質問全体へ一度で答えるぽん。検索経路ごとに章を分けないぽん。"
+        )
+
+        search = types.FileSearch(
+            file_search_store_names=[corpus_store_name],
+            top_k=search_top_k,
+            metadata_filter=metadata_filter,
+        )
+        model = rag_model()
+        response = None
+        try:
+            async def generate_once():
+                return await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=self._question_with_evidence(question, evidence_context),
+                    config=generation_config(
+                        model,
+                        thinking_level="minimal",
+                        max_output_tokens=max_output_tokens,
+                        system_instruction=system,
+                        tools=[types.Tool(file_search=search)],
+                    ),
+                )
+
+            response = await retry_transient_api(
+                generate_once,
+                operation_name="rag_one_pass",
+                attempts=4,
+                initial_delay=2,
+                max_delay=30,
+            )
+            log_usage(log, "rag_one_pass", model, response)
+            require_complete_model_output(response, operation="rag_one_pass")
+            parsed = parse_model_answer((response.text or "").strip())
+            answer = parsed.text
+            no_answer = not answer or parsed.status is AnswerStatus.NO_EVIDENCE
+
+            audit = self._response_grounding_audit(
+                response,
+                limit=search_top_k,
+                answer_text=answer,
+                expected_festival=festival,
+                expected_date=target_date.isoformat() if target_date else None,
+                expected_date_from=date_from,
+                expected_date_to=date_to,
+                question_kind=question_kind,
+                allowed_channel_ids=allowed_channel_ids,
+                allow_unrestricted_conversations=allow_unrestricted_conversations,
+                allow_illustrative_sources=_question_is_about_illustrative_material(
+                    question
+                ),
+            )
+            if audit.rejected_supported_chunks:
+                log.warning(
+                    "Rejected one-pass answer using unauthorized grounding "
+                    "(rejected_chunks=%s guild=%s actor=%s)",
+                    audit.rejected_supported_chunks,
+                    guild_id,
+                    actor_id,
+                )
+                answer = "権限のある範囲で安全に確認できる根拠が不足しているぽん。"
+                no_answer = True
+
+            # A small model can occasionally decline despite receiving useful
+            # exact/Firebase records. Do not pay for a second generation: show
+            # the already-authorized records deterministically instead.
+            if no_answer and not audit.rejected_supported_chunks and (
+                lexical_hits or firebase_evidence
+            ):
+                fallback = (
+                    self._render_entity_overview_fallback(
+                        overview_subject,
+                        lexical_hits,
+                        firebase_evidence,
+                    )
+                    if overview_subject
+                    else self._render_retrieved_evidence_fallback(
+                        lexical_hits,
+                        firebase_evidence,
+                        (),
+                    )
+                )
+                if fallback:
+                    answer = fallback
+                    no_answer = False
+
+            sources = [] if no_answer else list(audit.sources)
+            if not no_answer:
+                sources.extend(self._lexical_sources(lexical_hits[:8], sources))
+                sources.extend(self._firebase_sources(firebase_evidence[:8], sources))
+                sources = list(dict.fromkeys(sources))
+                sources = [source for source in sources if rendered_citation_is_safe(source)]
+                if not sources:
+                    answer = "質問に直接答えられる参照元を確認できなかったぽん。"
+                    no_answer = True
+
+            if generated_answer_is_sensitive(question, answer):
+                log.warning(
+                    "Blocked sensitive one-pass RAG answer (guild=%s actor=%s)",
+                    guild_id,
+                    actor_id,
+                )
+                answer = (
+                    "安全に公開できない情報が回答に含まれたため、回答を停止したぽん。"
+                    "管理者に確認してほしいぽん。"
+                )
+                sources = []
+                no_answer = True
+        except Exception as exc:
+            log.exception("One-pass RAG query failed")
+            sources = []
+            no_answer = True
+            if is_ai_unavailable_error(exc):
+                fallback = self._render_retrieved_evidence_fallback(
+                    lexical_hits,
+                    firebase_evidence,
+                    (),
+                )
+                if fallback:
+                    answer = (
+                        "AI回答生成は現在利用できないため、検索で確認できた記録を示すぽん。"
+                        f"\n\n{fallback}"
+                    )
+                    sources = self._lexical_sources(lexical_hits[:8], [])
+                    sources.extend(self._firebase_sources(firebase_evidence[:8], sources))
+                    no_answer = not bool(sources)
+                else:
+                    answer = (
+                        "AI回答生成は現在利用できず、質問に直接答えられる記録も"
+                        "確認できなかったぽん。"
+                    )
+            else:
+                answer = (
+                    "質問の処理中にエラーが出ちゃったぽん…。"
+                    "少し待ってからもう一度試してほしいぽん。"
+                )
+
+        if no_answer:
+            sources = []
+        elif sources:
+            answer += "\n\n**参照**\n" + "\n".join(f"- {source}" for source in sources)
+        query_id = None
+        lexical_keys = tuple(hit.document_key for hit in lexical_hits)
+        if guild_id:
+            try:
+                query_id = self.rag_store.record_query(
+                    guild_id=guild_id,
+                    actor_id=actor_id,
+                    channel_id=channel_id,
+                    question=question,
+                    answer=answer,
+                    festival=festival,
+                    metadata_filter=metadata_filter,
+                    citations=sources,
+                    lexical_keys=list(lexical_keys),
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                    no_answer=no_answer,
+                )
+            except Exception:
+                log.exception("Failed to persist optional one-pass RAG telemetry")
+        return RagAnswer(
+            text=answer,
+            query_id=query_id,
+            citations=tuple(sources),
+            festival=festival,
+            no_answer=no_answer,
+            metadata_filter=metadata_filter,
+            lexical_keys=lexical_keys,
+            confidence_score=0 if no_answer else None,
+            confidence_label="根拠なし" if no_answer else "参照元あり",
+            confidence_detail=(
+                "質問に直接答えられる安全な参照元なし"
+                if no_answer
+                else f"安全な参照元{len(sources)}件"
+            ),
         )
 
     async def _query_single_facet(
