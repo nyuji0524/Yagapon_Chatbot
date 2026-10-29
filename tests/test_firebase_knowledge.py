@@ -114,6 +114,9 @@ def test_allowlist_never_contains_personal_collections():
             "ITラボ",
         ),
         ("新歓Webとは？", "新歓Web"),
+        ("レーザー射的って何？", "レーザー射的"),
+        ("FinTech企画について決まっていることは？", "FinTech企画"),
+        ("実装済みのことは？", None),
         ("あなたについて教えて", None),
         ("企画について教えて", None),
         ("ITラボの開催場所を教えて", None),
@@ -159,6 +162,31 @@ async def test_entity_overview_also_reads_matching_public_event(monkeypatch):
     assert len(evidence) == 1
     assert "ITラボ" in evidence[0].body
     assert "IT局による技術展示" in evidence[0].body
+
+
+async def test_entity_overview_ranks_events_by_subject_not_request_verbs(monkeypatch):
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_BACKEND", "emulator")
+    monkeypatch.setenv("YAGAPON_FIREBASE_KNOWLEDGE_PROJECT", "demo-project")
+    reader = FirebaseKnowledgeReader()
+    unrelated = {
+        "name": "projects/demo/databases/(default)/documents/festival/28/events/y1",
+        "fields": {
+            "eventName": {"stringValue": "Y-1グランプリ"},
+            "shortDescription": {"stringValue": "来場者の投票で順位が決まります"},
+        },
+    }
+
+    async def collection(*_args):
+        return FirebaseDocumentBatch([unrelated], complete=True, reader_limit=100)
+
+    monkeypatch.setattr(reader, "_collection", collection)
+
+    assert await reader.evidence_for(
+        "FinTech企画について決まっていることは？",
+        QuestionKind.GENERAL,
+        festival=28,
+    ) == []
 
 
 def test_firebase_projection_drops_unapproved_fields(monkeypatch):
