@@ -65,6 +65,9 @@ def corpus_manager(tmp_path, monkeypatch):
         "YAGAPON_RAG_DB_PATH",
         str(tmp_path / "fixture-rag.sqlite3"),
     )
+    # Existing tests below continue to cover the rollback implementation.
+    # One-pass production behavior has focused tests that opt in explicitly.
+    monkeypatch.setenv("YAGAPON_RAG_ONE_PASS", "false")
     with patch("bot.corpus.new_genai_client"):
         yield CorpusManager()
 
@@ -8514,3 +8517,138 @@ def test_retrieval_filter_is_guild_and_channel_scoped(monkeypatch):
     assert 'access_scope = "guild"' in metadata_filter
     assert 'access_scope = "channel"' in metadata_filter
     assert 'channel_id = "10" OR channel_id = "20"' in metadata_filter
+
+
+@pytest.mark.asyncio
+async def test_one_pass_combines_exact_firebase_and_file_search_once(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_RAG_ONE_PASS", "true")
+    exact = lexical_hit(
+        "it-lab-history",
+        score=500,
+        authority="reviewed_record",
+        source_type="meeting_minutes",
+        excerpt="ITラボではAI鬼ごっこを実施した。",
+    )
+    runtime = FirebaseEvidence(
+        document_key="firebase:festival/27/events/it-lab",
+        title="27th ITラボ",
+        body='fields: {"eventName":"ITラボ","place":"11-21"}',
+        source_url="https://console.firebase.google.com/project/example/firestore",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["ITラボ"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[exact])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[runtime])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="ITラボは11-21でAI鬼ごっこを実施した企画だぽん。",
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "27thのITラボについて、実施内容と場所を教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is False
+    assert "## 方針・決定" not in result.text
+    assert "AI鬼ごっこ" in result.text
+    assert "Firebase現在値" in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
+    request = corpus_manager._client.aio.models.generate_content.await_args.kwargs
+    assert "exact-search" in request["contents"]
+    assert "firebase-runtime" in request["contents"]
+    assert request["config"].tools[0].file_search.file_search_store_names == [
+        "fileSearchStores/test"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_one_pass_rejects_grounding_from_hidden_discord_channel(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_RAG_ONE_PASS", "true")
+    corpus_manager.rag_store.query_terms = Mock(return_value=["秘密の議題"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    context = SimpleNamespace(
+        title="非公開チャンネル",
+        uri="https://discord.com/channels/1/999/1",
+        text="閲覧権限のない議題",
+        custom_metadata=[
+            {"key": "channel_name", "string_value": "非公開"},
+            {"key": "access_scope", "string_value": "channel"},
+            {"key": "channel_id", "numeric_value": 999},
+            {"key": "authority", "string_value": "conversation"},
+            {"key": "status", "string_value": "raw"},
+            {"key": "source_type", "string_value": "discord_conversation"},
+        ],
+    )
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="非公開の議題はこれだぽん。",
+            usage_metadata=None,
+            candidates=[
+                SimpleNamespace(
+                    grounding_metadata=SimpleNamespace(
+                        grounding_chunks=[SimpleNamespace(retrieved_context=context)],
+                        grounding_supports=[
+                            SimpleNamespace(
+                                grounding_chunk_indices=[0],
+                                segment=SimpleNamespace(text="非公開の議題はこれだぽん。"),
+                            )
+                        ],
+                    )
+                )
+            ],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "秘密の議題を教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+        allowed_channel_ids=(10,),
+    )
+
+    assert result.no_answer is True
+    assert result.citations == ()
+    assert "非公開の議題はこれ" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_one_pass_no_evidence_has_consistent_confidence_label(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_RAG_ONE_PASS", "true")
+    corpus_manager.rag_store.query_terms = Mock(return_value=["未知語"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="その件を裏付ける記録を見つけられなかったぽん。",
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "未知語について教えて",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    assert result.confidence_label == "根拠なし"
+    assert result.citations == ()
+    assert "**参照**" not in result.text
+    assert corpus_manager._client.aio.models.generate_content.await_count == 1
