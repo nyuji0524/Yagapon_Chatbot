@@ -3943,21 +3943,16 @@ class CorpusManager:
             # A small model can occasionally decline despite receiving useful
             # exact/Firebase records. Do not pay for a second generation: show
             # the already-authorized records deterministically instead.
-            if no_answer and not audit.rejected_supported_chunks and (
-                lexical_hits or firebase_evidence
+            if (
+                no_answer
+                and not audit.rejected_supported_chunks
+                and overview_subject
+                and firebase_evidence
             ):
-                fallback = (
-                    self._render_entity_overview_fallback(
-                        overview_subject,
-                        lexical_hits,
-                        firebase_evidence,
-                    )
-                    if overview_subject
-                    else self._render_retrieved_evidence_fallback(
-                        lexical_hits,
-                        firebase_evidence,
-                        (),
-                    )
+                fallback = self._render_entity_overview_fallback(
+                    overview_subject,
+                    lexical_hits,
+                    firebase_evidence,
                 )
                 if fallback:
                     answer = fallback

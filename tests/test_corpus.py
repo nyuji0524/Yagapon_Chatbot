@@ -8652,3 +8652,39 @@ async def test_one_pass_no_evidence_has_consistent_confidence_label(
     assert result.citations == ()
     assert "**参照**" not in result.text
     assert corpus_manager._client.aio.models.generate_content.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_one_pass_does_not_dump_unrelated_exact_candidates_on_no_evidence(
+    corpus_manager,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_RAG_ONE_PASS", "true")
+    unrelated = lexical_hit(
+        "unrelated-notification",
+        score=10,
+        authority="repository_history",
+        source_type="source_code_history",
+        excerpt="個人通知の実装記録であり、FinTechとは無関係。",
+    )
+    corpus_manager.rag_store.query_terms = Mock(return_value=["企画"])
+    corpus_manager.rag_store.search_exact = Mock(return_value=[unrelated])
+    corpus_manager.firebase_knowledge.evidence_for = AsyncMock(return_value=[])
+    corpus_manager._client.aio.models.generate_content = AsyncMock(
+        return_value=SimpleNamespace(
+            text="FinTech企画について直接確認できる記録を見つけられなかったぽん。",
+            usage_metadata=None,
+            candidates=[],
+        )
+    )
+
+    result = await corpus_manager.query_with_trace(
+        "FinTech企画について決まっていることは？",
+        "fileSearchStores/test",
+        guild_id=1,
+        allow_unrestricted_conversations=True,
+    )
+
+    assert result.no_answer is True
+    assert "個人通知" not in result.text
+    assert result.citations == ()
