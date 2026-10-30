@@ -2455,15 +2455,27 @@ class CorpusManager:
     async def list_remote_documents(self, store_name: str) -> list[dict]:
         """Return File Search names and custom metadata for reconciliation."""
         loop = asyncio.get_running_loop()
+
         async def list_documents():
+            from bot.recording_priority import wait_for_recording_idle
+
+            def collect_documents():
+                result = []
+                pager = self._client.file_search_stores.documents.list(
+                    parent=store_name,
+                    config={"page_size": 20},
+                )
+                for document in pager:
+                    # Iterating the SDK pager performs the next HTTP request.
+                    # Yield between documents so a recording that starts in the
+                    # middle of a large inventory immediately pauses the crawl.
+                    wait_for_recording_idle()
+                    result.append(document)
+                return result
+
             return await loop.run_in_executor(
                 None,
-                lambda: list(
-                    self._client.file_search_stores.documents.list(
-                        parent=store_name,
-                        config={"page_size": 20},
-                    )
-                ),
+                collect_documents,
             )
 
         documents = await retry_transient_api(

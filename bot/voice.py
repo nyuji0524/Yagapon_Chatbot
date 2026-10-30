@@ -34,6 +34,7 @@ from bot.recording import (
     update_recording_metadata,
     validate_recording_raw,
 )
+from bot.recording_priority import RecordingActivityLease
 from bot.transcription import transcribe_audio
 
 log = logging.getLogger("yagapon.voice")
@@ -243,6 +244,52 @@ class VoiceSession:
         self._start_done = asyncio.Event()
         self._start_abort_requested = False
         self._start_abort_succeeded = False
+        self._recording_priority_lease: RecordingActivityLease | None = None
+        self._receiver_recovery_lock = asyncio.Lock()
+
+    def _activate_recording_priority(self) -> None:
+        if self._recording_priority_lease is None:
+            self._recording_priority_lease = RecordingActivityLease(
+                self.guild_id,
+                self.session_id,
+            )
+        try:
+            self._recording_priority_lease.acquire()
+        except OSError:
+            # Capture must remain available even if the coordination mount is
+            # temporarily read-only. Background workers fail safe on leases,
+            # while the recording itself is still more valuable than a start
+            # failure caused only by optional scheduling coordination.
+            log.exception(
+                "Could not publish recording-priority lease guild=%s",
+                self.guild_id,
+            )
+            self._recording_priority_lease = None
+
+    def _heartbeat_recording_priority(self) -> None:
+        if self._recording_priority_lease is not None:
+            try:
+                self._recording_priority_lease.heartbeat()
+            except OSError:
+                log.exception(
+                    "Could not renew recording-priority lease guild=%s",
+                    self.guild_id,
+                )
+
+    def _release_recording_priority(self) -> None:
+        lease = self._recording_priority_lease
+        self._recording_priority_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except OSError:
+                # Coordination cleanup must never turn a successful recording
+                # stop into an application error. The stale-lease timeout will
+                # eventually release background workers after a mount failure.
+                log.exception(
+                    "Could not release recording-priority lease guild=%s",
+                    self.guild_id,
+                )
 
     def _registered_voiceprints(self) -> dict[str, str]:
         """Load enrolled samples once per session for real speaker attribution."""
@@ -552,6 +599,7 @@ class VoiceSession:
                 raise RuntimeError("Voice recording did not start")
             self._capture_last_pcm_progress_at = time.monotonic()
             self.is_active = True
+            self._activate_recording_priority()
             log.info(
                 "Recording started in %s: %s",
                 self.channel.name,
@@ -566,6 +614,7 @@ class VoiceSession:
             if self.mode != VoiceMode.LISTEN:
                 self._realtime_task = asyncio.create_task(self._realtime_loop())
         except BaseException as exc:
+            self._release_recording_priority()
             self._start_abort_requested = True
             if (
                 sink_task is not None
@@ -622,6 +671,10 @@ class VoiceSession:
                 )
 
     async def _restart_recording(self, stopped_sink):
+        async with self._receiver_recovery_lock:
+            return await self._restart_recording_locked(stopped_sink)
+
+    async def _restart_recording_locked(self, stopped_sink):
         """録音を再開"""
         anomaly_reason = getattr(stopped_sink, "capture_anomaly_reason", "")
         if not isinstance(anomaly_reason, str) or not anomaly_reason:
@@ -1194,6 +1247,7 @@ class VoiceSession:
             CAPTURE_MONITOR_INTERVAL,
         )
         while self.is_active:
+            self._heartbeat_recording_priority()
             await asyncio.sleep(CAPTURE_MONITOR_INTERVAL)
             try:
                 if not await self._capture_connection_is_healthy():
@@ -1252,6 +1306,13 @@ class VoiceSession:
                 return
             try:
                 def durable_checkpoint() -> None:
+                    refresh_capacity = getattr(
+                        sink,
+                        "refresh_storage_capacity",
+                        None,
+                    )
+                    if callable(refresh_capacity):
+                        refresh_capacity()
                     sink.flush()
                     mark = getattr(sink, "mark", None)
                     if not callable(mark):
@@ -1319,6 +1380,123 @@ class VoiceSession:
                 log.error(f"Realtime processing error: {e}")
             await asyncio.sleep(interval)
 
+    async def _reconnect_voice_capture(self) -> bool:
+        """Reconnect a lost Discord voice client and continue the same archive."""
+
+        async with self._receiver_recovery_lock:
+            if not self.is_active or self._intentional_stop or self._sink_io_stalled:
+                return False
+            current = self.voice_client
+            try:
+                if current and current.is_connected() and current.is_recording():
+                    return True
+            except Exception:
+                pass
+
+            old_sink = self.recording_sink
+            if old_sink is None:
+                return False
+            self._mark_capture_interrupted("voice-connection-lost")
+            timeout = max(
+                5.0,
+                self._capture_alert_seconds(
+                    "YAGAPON_CAPTURE_RECONNECT_TIMEOUT_SECONDS",
+                    20,
+                ),
+            )
+            replacement = None
+            replacement_adopted = False
+            try:
+                if current is not None:
+                    try:
+                        await asyncio.wait_for(
+                            current.disconnect(force=True),
+                            timeout=min(10.0, timeout),
+                        )
+                    except Exception:
+                        log.warning(
+                            "Old voice client did not disconnect cleanly guild=%s",
+                            self.guild_id,
+                        )
+
+                await self._run_sink_worker(
+                    old_sink.cleanup,
+                    timeout=timeout,
+                )
+                new_client = await asyncio.wait_for(
+                    self.channel.connect(reconnect=True),
+                    timeout=timeout,
+                )
+                replacement = await self._run_sink_worker(
+                    PersistentPCMSink,
+                    self.guild_id,
+                    self.channel.name,
+                    self.mode.value,
+                    timeout=timeout,
+                    channel_id=getattr(self.channel, "id", None),
+                    category_id=getattr(self.channel, "category_id", None),
+                    category_name=getattr(
+                        getattr(self.channel, "category", None),
+                        "name",
+                        "",
+                    ),
+                    session_dir=old_sink.session_dir,
+                    resume=True,
+                    continue_capture=True,
+                )
+                await self._run_sink_worker(
+                    replacement.mark,
+                    "capture_interrupted",
+                    timeout=timeout,
+                    capture_interruption_reason="voice-connection-lost",
+                    capture_gap_detected=True,
+                    voice_reconnected_at=datetime.now(timezone.utc).isoformat(),
+                )
+                if not self.is_active or self._intentional_stop:
+                    await asyncio.wait_for(
+                        new_client.disconnect(force=True),
+                        timeout=min(10.0, timeout),
+                    )
+                    return False
+                self.voice_client = new_client
+                self.recording_sink = replacement
+                replacement_adopted = True
+                self._recording_done.clear()
+                new_client.start_recording(
+                    replacement,
+                    self._recording_finished,
+                    self.guild_id,
+                )
+                if not new_client.is_recording():
+                    raise RuntimeError("Voice receiver did not restart")
+                self._capture_last_pcm_progress_at = time.monotonic()
+                self._heartbeat_recording_priority()
+                log.warning(
+                    "Voice capture reconnected in the same session guild=%s session=%s",
+                    self.guild_id,
+                    self.session_id,
+                )
+                return True
+            except Exception:
+                log.exception(
+                    "Voice capture reconnect failed guild=%s session=%s",
+                    self.guild_id,
+                    self.session_id,
+                )
+                return False
+            finally:
+                if replacement is not None and not replacement_adopted:
+                    try:
+                        await self._run_sink_worker(
+                            replacement.cleanup,
+                            timeout=timeout,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Could not close unused reconnect sink guild=%s",
+                            self.guild_id,
+                        )
+
     async def _capture_connection_is_healthy(self) -> bool:
         """Fail closed when Discord voice reception silently disconnects.
 
@@ -1344,6 +1522,9 @@ class VoiceSession:
         # Notify before metadata I/O: a storage failure must not suppress the
         # only user-visible indication that capture became unsafe.
         await self._activate_capture_alert(reason, fail_closed=True)
+        if not connected and await self._reconnect_voice_capture():
+            self._capture_unhealthy_since = None
+            return True
         now = time.monotonic()
         if self._capture_unhealthy_since is None:
             self._capture_unhealthy_since = now
@@ -1720,6 +1901,7 @@ class VoiceSession:
                 self._stop_error = exc
                 raise
             finally:
+                self._release_recording_priority()
                 self._stop_completed = True
 
     async def claim_delivery(self) -> bool:
@@ -1945,6 +2127,7 @@ class VoiceSession:
 
     async def _cancel_capture_tasks(self) -> None:
         """Cancel realtime work and the independent capture watchdog."""
+        self._release_recording_priority()
         current = asyncio.current_task()
         tasks = []
         for task in (
@@ -2265,6 +2448,7 @@ class VoiceSession:
         was_active = self.is_active
         self._intentional_stop = True
         self.is_active = False
+        self._release_recording_priority()
 
         # Stop both loops, but never let a failed background task skip receiver
         # shutdown and fsync.

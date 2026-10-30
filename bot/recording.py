@@ -147,7 +147,6 @@ class RecordingCaptureHealth:
 
 log = logging.getLogger("yagapon.recording")
 _recording_space_lock = threading.Lock()
-_recording_inflight_bytes = 0
 _recording_admission_bytes = 0
 
 
@@ -1177,7 +1176,7 @@ class PersistentPCMSink(Sink):
             return {}
 
     def write(self, data, user) -> None:
-        global _recording_admission_bytes, _recording_inflight_bytes
+        global _recording_admission_bytes
         pcm_data = getattr(data, "pcm", data)
         if not isinstance(pcm_data, (bytes, bytearray, memoryview)):
             return
@@ -1197,29 +1196,14 @@ class PersistentPCMSink(Sink):
                 )
                 return
             requested_bytes = min(len(pcm_data), remaining)
-            reserved_bytes = 0
             consumed_admission = 0
+            # Capacity is admitted once when the sink opens and refreshed by
+            # the durability worker.  Never call statvfs/disk_usage for every
+            # RTP packet: on a busy persistent disk that blocked Discord's
+            # event loop for tens of seconds and caused the voice connection
+            # itself to drop.
+            reserved_bytes = requested_bytes
             with _recording_space_lock:
-                try:
-                    free_bytes = shutil.disk_usage(self.session_dir).free
-                except OSError as exc:
-                    self._pcm_write_error = type(exc).__name__
-                    self._capture_integrity_failed = True
-                    self._capture_integrity_status = "capture_suspicious"
-                    self._capture_integrity_reason = "storage-probe-failed"
-                    return
-                writable_bytes = max(
-                    0,
-                    free_bytes
-                    - self._free_space_reserve
-                    - max(
-                        0,
-                        _recording_admission_bytes - self._admission_remaining,
-                    )
-                    - _recording_inflight_bytes,
-                )
-                reserved_bytes = min(requested_bytes, writable_bytes)
-                _recording_inflight_bytes += reserved_bytes
                 consumed_admission = min(
                     reserved_bytes,
                     self._admission_remaining,
@@ -1229,17 +1213,6 @@ class PersistentPCMSink(Sink):
                     0,
                     _recording_admission_bytes - consumed_admission,
                 )
-            if reserved_bytes <= 0:
-                self._limit_reached = True
-                try:
-                    self._write_metadata(
-                        "storage_limit_reached",
-                        total_bytes=self._total_bytes,
-                        storage_limit_reached=True,
-                    )
-                except OSError:
-                    pass
-                return
             chunk = bytes(pcm_data[:reserved_bytes])
             start = self._user_bytes.get(user_id, 0)
             new_track = user_id not in self._user_bytes
@@ -1284,12 +1257,6 @@ class PersistentPCMSink(Sink):
                 except OSError:
                     pass
                 raise
-            finally:
-                with _recording_space_lock:
-                    _recording_inflight_bytes = max(
-                        0,
-                        _recording_inflight_bytes - reserved_bytes,
-                    )
             end = start + len(chunk)
             self._user_bytes[user_id] = end
             if new_track:
@@ -1330,6 +1297,31 @@ class PersistentPCMSink(Sink):
                     total_bytes=self._total_bytes,
                     storage_limit_reached=True,
                 )
+
+    def refresh_storage_capacity(self) -> None:
+        """Refresh the write ceiling outside Discord's packet callback.
+
+        The periodic durability worker calls this in its dedicated thread.
+        Capacity may shrink when other host data consumes disk, but it never
+        grows beyond the ceiling admitted when this recording started.
+        """
+
+        global _recording_admission_bytes
+        free_bytes = shutil.disk_usage(self.session_dir).free
+        with _recording_space_lock:
+            other_admission = max(
+                0,
+                _recording_admission_bytes - self._admission_remaining,
+            )
+        with self._lock:
+            writable_bytes = max(
+                0,
+                free_bytes - self._free_space_reserve - other_admission,
+            )
+            self.max_bytes = min(
+                self.max_bytes,
+                self._total_bytes + writable_bytes,
+            )
 
     def read_chunks(
         self,
@@ -1509,23 +1501,28 @@ class PersistentPCMSink(Sink):
 
     def flush(self) -> None:
         """Synchronously persist every userspace PCM buffer without closing it."""
+        descriptors: list[int] = []
         with self._lock:
-            failures: list[Exception] = []
+            checkpoint_bytes = self._total_bytes
             for file in tuple(self._files.values()):
-                if file.closed:
-                    continue
-                try:
-                    file.flush()
-                    os.fsync(file.fileno())
-                except Exception as exc:
-                    failures.append(exc)
-            if self._timeline_file is not None:
-                if not self._timeline_file.closed:
-                    try:
-                        self._timeline_file.flush()
-                        os.fsync(self._timeline_file.fileno())
-                    except Exception as exc:
-                        failures.append(exc)
+                if not file.closed:
+                    descriptors.append(os.dup(file.fileno()))
+            if self._timeline_file is not None and not self._timeline_file.closed:
+                descriptors.append(os.dup(self._timeline_file.fileno()))
+
+        # Files are unbuffered. Duplicate descriptors under the short metadata
+        # lock, then release it before potentially slow persistent-disk fsync.
+        # This prevents Discord's receive callback from waiting behind fsync.
+        failures: list[Exception] = []
+        for descriptor in descriptors:
+            try:
+                os.fsync(descriptor)
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                os.close(descriptor)
+
+        with self._lock:
             if failures:
                 self._capture_integrity_failed = True
                 self._capture_integrity_status = "capture_suspicious"
@@ -1542,7 +1539,10 @@ class PersistentPCMSink(Sink):
                 except OSError:
                     pass
                 raise failures[0]
-            self._durable_total_bytes = self._total_bytes
+            self._durable_total_bytes = max(
+                self._durable_total_bytes,
+                checkpoint_bytes,
+            )
 
     def format_audio(self, audio) -> None:  # pragma: no cover - base cleanup is overridden
         return

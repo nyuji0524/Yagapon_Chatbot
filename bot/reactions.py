@@ -9,11 +9,12 @@ from datetime import datetime, timezone
 from google import genai
 
 from bot.ai_models import fast_model, generation_config, log_usage
+from bot.recording_priority import recording_is_active
 
 log = logging.getLogger("yagapon.reactions")
 
-BATCH_SIZE = 5
-BATCH_INTERVAL = 180  # 3分
+DEFAULT_BATCH_SIZE = 20
+DEFAULT_BATCH_INTERVAL = 1800  # 30分
 
 JUDGE_PROMPT = """大学の学園祭実行委員会のDiscordメッセージを感情判定する。
 
@@ -45,6 +46,41 @@ _flush_task: asyncio.Task | None = None
 _flush_lock = asyncio.Lock()
 
 
+def _enabled() -> bool:
+    """Keep optional AI reactions off unless an operator opts in explicitly."""
+    return os.environ.get("YAGAPON_AI_REACTIONS_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _batch_size() -> int:
+    try:
+        return max(5, min(100, int(os.environ.get("YAGAPON_AI_REACTIONS_BATCH_SIZE", DEFAULT_BATCH_SIZE))))
+    except ValueError:
+        return DEFAULT_BATCH_SIZE
+
+
+def _batch_interval() -> int:
+    try:
+        return max(
+            300,
+            min(
+                86400,
+                int(
+                    os.environ.get(
+                        "YAGAPON_AI_REACTIONS_INTERVAL_SECONDS",
+                        DEFAULT_BATCH_INTERVAL,
+                    )
+                ),
+            ),
+        )
+    except ValueError:
+        return DEFAULT_BATCH_INTERVAL
+
+
 def _get_client() -> genai.Client:
     global _client
     if _client is None:
@@ -54,6 +90,8 @@ def _get_client() -> genai.Client:
 
 async def maybe_react(bot, message):
     """メッセージをバッファに追加、条件を満たしたらバッチ判定"""
+    if not _enabled():
+        return
     reactions_cfg = bot.config.get_reactions(message.guild.id)
     if not reactions_cfg.get("enabled"):
         return
@@ -76,8 +114,8 @@ async def maybe_react(bot, message):
     global _last_flush
     now = datetime.now(timezone.utc)
     should_flush = (
-        len(_buffer) >= BATCH_SIZE
-        or (now - _last_flush).total_seconds() >= BATCH_INTERVAL
+        len(_buffer) >= _batch_size()
+        or (now - _last_flush).total_seconds() >= _batch_interval()
     )
 
     if should_flush:
@@ -96,7 +134,7 @@ def start_reaction_flush_loop(bot) -> None:
 
 async def _reaction_flush_loop(bot) -> None:
     while True:
-        await asyncio.sleep(BATCH_INTERVAL)
+        await asyncio.sleep(_batch_interval())
         await _flush_reactions(bot)
 
 
@@ -122,9 +160,14 @@ async def _flush_reactions(bot) -> bool:
     async with _flush_lock:
         if not _buffer:
             return True
+        if recording_is_active():
+            # Reactions are optional. Keep the batch queued and avoid model/API
+            # work while voice capture owns the small production VM.
+            return False
 
-        batch = _buffer[:BATCH_SIZE]
-        _buffer = _buffer[BATCH_SIZE:]
+        batch_size = _batch_size()
+        batch = _buffer[:batch_size]
+        _buffer = _buffer[batch_size:]
         _last_flush = datetime.now(timezone.utc)
 
         # Geminiに投げる

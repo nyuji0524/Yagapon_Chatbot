@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from bot.recording_priority import wait_for_recording_idle
 from knowledge_sync.draft import (
     redact_credentials,
     render_source_draft,
@@ -47,6 +48,7 @@ def sync_lock(state_path: Path):
 
 
 def sync_once(args) -> dict:
+    wait_for_recording_idle()
     state_path = Path(os.environ.get("YAGAPON_DRIVE_SYNC_STATE", "/data/drive-sync-state.json"))
     output_dir = Path(os.environ.get("YAGAPON_KNOWLEDGE_OUTPUT", "/data/knowledge-drafts"))
     reader = DriveReader(
@@ -84,6 +86,7 @@ def sync_once(args) -> dict:
     skipped = 0
     removed = 0
     for document in documents:
+        wait_for_recording_idle()
         if document.removed:
             state["files"].setdefault(document.file_id, {})["removed"] = True
             removed += 1
@@ -135,6 +138,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     while True:
         try:
+            wait_for_recording_idle()
             state_path = Path(os.environ.get("YAGAPON_DRIVE_SYNC_STATE", "/data/drive-sync-state.json"))
             with sync_lock(state_path):
                 print(json.dumps(sync_once(args), ensure_ascii=False), flush=True)

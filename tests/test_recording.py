@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -215,6 +216,59 @@ def test_pcm_and_timeline_are_visible_before_cleanup_without_explicit_flush(tmp_
     assert timeline_event["user_id"] == 42
     assert (timeline_event["start"], timeline_event["end"]) == (0, 8)
 
+    sink.cleanup()
+
+
+def test_packet_write_does_not_probe_disk_space(tmp_path, monkeypatch):
+    sink = PersistentPCMSink(
+        1,
+        "meeting",
+        "listen",
+        session_dir=tmp_path / "no-packet-statvfs",
+    )
+    monkeypatch.setattr(
+        "bot.recording.shutil.disk_usage",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("packet disk probe")),
+    )
+
+    sink.write(b"audio", SimpleNamespace(id=42))
+
+    assert sink.total_bytes == 5
+    sink.cleanup()
+
+
+def test_packet_write_continues_while_checkpoint_fsync_is_slow(
+    tmp_path,
+    monkeypatch,
+):
+    sink = PersistentPCMSink(
+        1,
+        "meeting",
+        "listen",
+        session_dir=tmp_path / "nonblocking-fsync",
+    )
+    user = SimpleNamespace(id=42)
+    sink.write(b"first", user)
+    fsync_started = threading.Event()
+    fsync_release = threading.Event()
+    real_fsync = os.fsync
+
+    def delayed_fsync(descriptor):
+        fsync_started.set()
+        assert fsync_release.wait(timeout=2)
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", delayed_fsync)
+    worker = threading.Thread(target=sink.flush)
+    worker.start()
+    assert fsync_started.wait(timeout=1)
+
+    sink.write(b"second", user)
+
+    assert sink.total_bytes == len(b"firstsecond")
+    fsync_release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
     sink.cleanup()
 
 

@@ -412,6 +412,26 @@ def test_backfill_retry_keeps_six_hour_success_cadence():
 
 
 @pytest.mark.asyncio
+async def test_scheduled_cycle_defers_while_recording(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_SCHEDULED_BACKFILL_GUILD_IDS", "1")
+    monkeypatch.setattr(
+        "bot.scheduled_backfill.recording_is_active",
+        lambda: True,
+    )
+    bot = _bot()
+    manager = ScheduledBackfillManager(
+        bot,
+        state_path=tmp_path / "scheduled.json",
+    )
+
+    result = await manager.run_once()
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "recording-active"
+    bot.corpus.prepare_backfill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scheduled_cycle_is_incremental_and_checkpoints_after_completion(
     tmp_path,
     monkeypatch,
