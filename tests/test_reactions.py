@@ -78,3 +78,21 @@ async def test_reaction_flush_is_deferred_during_recording(monkeypatch):
     assert flushed is False
     assert reactions._buffer == [pending]
     generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_optional_ai_reactions_are_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("YAGAPON_AI_REACTIONS_ENABLED", raising=False)
+    bot = fake_bot()
+    bot.config.get_reactions = lambda _guild_id: {"enabled": True}
+    message = SimpleNamespace(
+        id=1,
+        content="Geminiを呼ばずに無視される十分に長い通常メッセージです",
+        guild=SimpleNamespace(id=3),
+        channel=SimpleNamespace(id=2),
+    )
+
+    await reactions.maybe_react(bot, message)
+
+    assert reactions._buffer == []
+    assert reactions._flush_task is None

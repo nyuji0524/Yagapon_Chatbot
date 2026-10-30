@@ -1881,7 +1881,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
         if store.find_approved_topic(open_topic.topic_id, festival=open_topic.festival):
             ledger.mark_accepted(open_topic.topic_id)
             reconciled += 1
-    retry_limit = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_RETRIES_PER_RUN", 3, maximum=20)
+    retry_limit = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_RETRIES_PER_RUN", 1, maximum=20)
     retried = retry_succeeded = retry_blocked = retry_failed = 0
     for topic in ledger.due_retries(limit=retry_limit):
         bundle_id = topic.bundle_id or ""
@@ -1992,8 +1992,11 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
     client = new_genai_client(os.environ.get("GOOGLE_API_KEY", ""))
     processed = queued = skipped = failed = backpressured = blocked_access = model_calls = 0
     batch_pending = 0
-    model_budget = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_MODEL_CALLS_PER_RUN", 6, maximum=50)
-    generation_budget = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_GENERATIONS_PER_RUN", 3, maximum=20)
+    # One document needs a planning call and one draft-generation call. Lower
+    # than two disables delivery entirely, so cost is controlled by the daily
+    # cadence and the one-generation budget instead.
+    model_budget = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_MODEL_CALLS_PER_RUN", 2, maximum=50)
+    generation_budget = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_GENERATIONS_PER_RUN", 1, maximum=20)
     generated = 0
     for document in pending:
         await wait_for_recording_idle_async()
