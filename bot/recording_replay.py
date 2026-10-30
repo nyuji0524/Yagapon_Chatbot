@@ -51,6 +51,7 @@ log = logging.getLogger("yagapon.recording_replay")
 REPLAY_TERMINAL_CHECKPOINTS = {
     "completed": "replay_completed",
     "review_completed": "replay_review_completed",
+    "partial_minutes_completed": "replay_partial_minutes_completed",
     "failed": "replay_failed",
     "interrupted": "replay_interrupted",
 }
@@ -252,6 +253,7 @@ class ReplayJob:
     retranscribe: bool
     transcription_quality: str = "standard"
     review_only: bool = False
+    generate_review_minutes: bool = False
     status: str = "queued"
     stage: str = "queued"
     created_at: str = ""
@@ -745,6 +747,7 @@ class RecordingReplayManager:
         retranscribe: bool,
         transcription_quality: str = "standard",
         review_only: bool = False,
+        generate_review_minutes: bool = False,
         review_actor=None,
     ) -> ReplayJob:
         if self._closing:
@@ -753,6 +756,8 @@ class RecordingReplayManager:
             raise RuntimeError("another recording replay is already running")
         if transcription_quality not in {"standard", "high_accuracy"}:
             raise ValueError("invalid transcription quality")
+        if generate_review_minutes and not review_only:
+            raise ValueError("generate_review_minutes requires review_only=true")
         if review_only:
             if not retranscribe:
                 raise ValueError("review_only requires retranscribe=true")
@@ -778,6 +783,7 @@ class RecordingReplayManager:
             retranscribe=retranscribe,
             transcription_quality=transcription_quality,
             review_only=review_only,
+            generate_review_minutes=generate_review_minutes,
             created_at=now,
             updated_at=now,
         )
@@ -887,8 +893,12 @@ class RecordingReplayManager:
                     config=getattr(self.bot, "config", None),
                 )
             if job.review_only:
-                heading = "⚠️ 中断録音の確認用文字起こしを開始します。"
-                method = "不完全PCMの確認専用"
+                if job.generate_review_minutes:
+                    heading = "⚠️ 中断録音から参考議事録を作成します。"
+                    method = "不完全PCMの再文字起こし＋参考議事録"
+                else:
+                    heading = "⚠️ 中断録音の確認用文字起こしを開始します。"
+                    method = "不完全PCMの確認専用"
             else:
                 heading = "🧪 長時間録音のテスト議事録生成を開始します。"
                 method = (
@@ -965,8 +975,47 @@ class RecordingReplayManager:
                     target_channel=target_channel,
                     review_actor=review_actor,
                 )
+                minutes = ""
+                if job.generate_review_minutes:
+                    self._stage(job, "generating_partial_minutes")
+                    generated = await generate_minutes(
+                        new_genai_client(os.environ.get("GOOGLE_API_KEY", "")),
+                        transcript,
+                        title=f"【参考・不完全】{artifact.channel_name}",
+                        glossary_text=self.bot.config.get_glossary_text(
+                            artifact.source_guild_id
+                        ),
+                        speaker_roster=self.bot._build_members_info(
+                            artifact.source_guild_id
+                        ),
+                        meeting_date=display_meeting_date(artifact.started_at or None),
+                        checkpoint_dir=work_dir / "partial-minutes-checkpoints",
+                    )
+                    if not generated.strip():
+                        raise RuntimeError("partial minutes generation returned empty content")
+                    warning = (
+                        "> [!WARNING]\n"
+                        "> この議事録は、途中で切断された録音の保存済み範囲だけを"
+                        "基に生成した参考資料です。会議全体を網羅していません。\n\n"
+                    )
+                    minutes = warning + generated.lstrip()
+                    minutes_path = work_dir / "INCOMPLETE-minutes.md"
+                    minutes_path.write_text(minutes, encoding="utf-8")
+                    job.minutes_path = str(minutes_path)
+                    self._persist_job(job)
+                    # Permission may have changed during the model call.
+                    validate_recording_review_context(
+                        artifact,
+                        bot=self.bot,
+                        target_channel=target_channel,
+                        review_actor=review_actor,
+                    )
                 embed = discord.Embed(
-                    title=f"⚠️ 確認専用・不完全な文字起こし - {artifact.channel_name}",
+                    title=(
+                        f"⚠️ 参考議事録・不完全な録音 - {artifact.channel_name}"
+                        if job.generate_review_minutes
+                        else f"⚠️ 確認専用・不完全な文字起こし - {artifact.channel_name}"
+                    ),
                     description=(
                         "録音中断前に保存できた範囲だけを文字起こししたものです。"
                         "完全な会議記録ではなく、Drive・Knowledge・検索には公開していません。"
@@ -978,25 +1027,57 @@ class RecordingReplayManager:
                     value=f"`{artifact.session_id}`",
                     inline=False,
                 )
-                await target_channel.send(
-                    embed=embed,
-                    file=discord.File(
+                files = [
+                    discord.File(
                         io.BytesIO(transcript.encode()),
                         filename=f"{job.id}-INCOMPLETE-transcript.md",
-                    ),
-                    silent=True,
+                    )
+                ]
+                if minutes:
+                    files.insert(
+                        0,
+                        discord.File(
+                            io.BytesIO(minutes.encode()),
+                            filename=f"{job.id}-INCOMPLETE-minutes.md",
+                        ),
+                    )
+                send_kwargs = {"embed": embed, "silent": True}
+                if minutes:
+                    send_kwargs["files"] = files
+                else:
+                    send_kwargs["file"] = files[0]
+                await target_channel.send(**send_kwargs)
+                terminal_status = (
+                    "partial_minutes_completed"
+                    if job.generate_review_minutes
+                    else "review_completed"
                 )
-                job.status = "review_completed"
-                self._stage(job, "review_completed")
+                job.status = terminal_status
+                self._stage(job, terminal_status)
                 self._mark_checkpoint(
                     replay_sink,
-                    REPLAY_TERMINAL_CHECKPOINTS["review_completed"],
+                    REPLAY_TERMINAL_CHECKPOINTS[terminal_status],
                     job_status=job.status,
                     job_stage=job.stage,
                     review_only=True,
+                    partial_minutes=job.generate_review_minutes,
                     transcript_complete=False,
                     capture_integrity_failed=True,
                 )
+                if job.generate_review_minutes:
+                    self.bot.operations.record_event(
+                        "recording_replay",
+                        "partial_minutes",
+                        "success",
+                        guild_id=job.target_guild_id,
+                        item_key=job.id,
+                        details={
+                            "source_guild_id": artifact.source_guild_id,
+                            "source_session_id": artifact.session_id,
+                            "retranscribe": job.retranscribe,
+                            "published_externally": False,
+                        },
+                    )
                 return
 
             self._stage(job, "generating_minutes")

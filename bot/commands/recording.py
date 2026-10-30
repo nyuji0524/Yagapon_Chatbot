@@ -165,3 +165,47 @@ def register(bot):
                 "完了後にこのチャンネルへ議事録と生文字起こしを投稿します。"
             )
         await ctx.followup.send(message, ephemeral=True)
+
+    @group.command(
+        name="partial_minutes",
+        description="中断録音から警告付きの参考議事録を作成する",
+    )
+    @discord.default_permissions(administrator=True)
+    @discord.option("session_id", description="/recording list に表示されたセッションID")
+    @discord.option(
+        "quality",
+        description="通常は標準を選択。重要会議だけ高精度を使用",
+        choices=[
+            discord.OptionChoice("標準（低コスト・推奨）", "standard"),
+            discord.OptionChoice("高精度（話者分離・高コスト）", "high_accuracy"),
+        ],
+        default="standard",
+    )
+    async def recording_partial_minutes(
+        ctx: discord.ApplicationContext,
+        session_id: str,
+        quality: str = "standard",
+    ):
+        if not await _require_operator(ctx, bot):
+            return
+        await ctx.defer(ephemeral=True)
+        try:
+            artifact = await asyncio.to_thread(find_recording_artifact, session_id)
+            job = bot.recording_replays.start(
+                artifact=artifact,
+                target_channel=ctx.channel,
+                retranscribe=True,
+                transcription_quality=quality,
+                review_only=True,
+                generate_review_minutes=True,
+                review_actor=ctx.author,
+            )
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            await ctx.followup.send(f"開始できません: {exc}", ephemeral=True)
+            return
+        await ctx.followup.send(
+            f"参考議事録ジョブ `{job.id}` を開始しました。"
+            "中断前に保存できた範囲から、警告付き議事録と文字起こしを作成します。"
+            "Drive・Knowledge・検索には登録しません。",
+            ephemeral=True,
+        )

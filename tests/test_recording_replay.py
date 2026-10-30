@@ -958,6 +958,85 @@ async def test_review_only_transcribes_interrupted_pcm_without_any_publisher(
     assert review_provenance["status"] == "review_only_partial"
 
 
+@pytest.mark.asyncio
+async def test_partial_minutes_from_interrupted_pcm_stays_local_and_is_labelled(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setenv("YAGAPON_REPLAY_DIR", str(tmp_path / "replays"))
+    session_dir, _ = _recording(tmp_path, raw=True, transcript=False)
+    metadata_path = session_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        status="capture_interrupted",
+        capture_ended_at="",
+        capture_integrity_failed=True,
+        capture_integrity_reason="voice-disconnected",
+    )
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    _patch_fake_retranscription(monkeypatch)
+    generate_minutes = AsyncMock(return_value="# 議事録\n\n## 決定事項\n- テスト")
+    upload_transcript = AsyncMock()
+    upload_minutes = AsyncMock()
+    index_meeting = AsyncMock()
+    monkeypatch.setattr("bot.recording_replay.generate_minutes", generate_minutes)
+    monkeypatch.setattr("bot.recording_replay.new_genai_client", lambda _key: object())
+    monkeypatch.setattr("bot.gdrive.upload_transcript", upload_transcript)
+    monkeypatch.setattr("bot.gdrive.upload_minutes", upload_minutes)
+    monkeypatch.setattr("bot.meeting_index.index_bot_meeting", index_meeting)
+    actor = SimpleNamespace(id=777)
+    channel = SimpleNamespace(
+        id=456,
+        send=AsyncMock(),
+        permissions_for=lambda _member: SimpleNamespace(view_channel=True),
+    )
+    source_guild = SimpleNamespace(
+        id=123,
+        get_member=lambda user_id: actor if user_id == actor.id else None,
+        get_channel_or_thread=lambda channel_id: (
+            channel if channel_id == channel.id else None
+        ),
+    )
+    actor.guild = source_guild
+    channel.guild = source_guild
+    bot = _replay_bot()
+    bot.get_guild = lambda guild_id: source_guild if guild_id == 123 else None
+    manager = RecordingReplayManager(bot)
+
+    job = manager.start(
+        artifact=find_recording_artifact("session-long"),
+        target_channel=channel,
+        retranscribe=True,
+        review_only=True,
+        generate_review_minutes=True,
+        review_actor=actor,
+    )
+    await asyncio.gather(*list(manager._tasks))
+
+    assert job.status == "partial_minutes_completed"
+    assert job.stage == "partial_minutes_completed"
+    assert job.drive_transcript_url == ""
+    assert job.drive_minutes_url == ""
+    assert Path(job.minutes_path).name == "INCOMPLETE-minutes.md"
+    minutes = Path(job.minutes_path).read_text(encoding="utf-8")
+    assert "途中で切断された録音" in minutes
+    assert "# 議事録" in minutes
+    result_kwargs = channel.send.await_args_list[-1].kwargs
+    assert len(result_kwargs["files"]) == 2
+    assert all("INCOMPLETE" in item.filename for item in result_kwargs["files"])
+    assert "参考議事録" in result_kwargs["embed"].title
+    generate_minutes.assert_awaited_once()
+    upload_transcript.assert_not_awaited()
+    upload_minutes.assert_not_awaited()
+    index_meeting.assert_not_awaited()
+    source_after = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert source_after["status"] == "capture_interrupted"
+    assert source_after["capture_integrity_failed"] is True
+    bot.operations.record_event.assert_called_once()
+
+
 def test_review_only_requires_retranscription(tmp_path, monkeypatch):
     monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
     monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
