@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from google import genai
 
 from bot.ai_models import fast_model, generation_config, log_usage
+from bot.recording_priority import recording_is_active
 
 log = logging.getLogger("yagapon.reactions")
 
@@ -122,6 +123,10 @@ async def _flush_reactions(bot) -> bool:
     async with _flush_lock:
         if not _buffer:
             return True
+        if recording_is_active():
+            # Reactions are optional. Keep the batch queued and avoid model/API
+            # work while voice capture owns the small production VM.
+            return False
 
         batch = _buffer[:BATCH_SIZE]
         _buffer = _buffer[BATCH_SIZE:]

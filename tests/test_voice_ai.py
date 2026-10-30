@@ -1069,6 +1069,55 @@ async def test_recorder_restart_clears_old_completion_event_and_marks_gap(
 
 
 @pytest.mark.asyncio
+async def test_lost_voice_connection_reconnects_into_same_session(
+    monkeypatch,
+    tmp_path,
+):
+    old_sink = PersistentPCMSink(
+        1,
+        "会議",
+        "listen",
+        session_dir=tmp_path / "reconnect-session",
+    )
+    old_sink.write(b"before-disconnect", 42)
+    old_client = SimpleNamespace(
+        is_connected=Mock(return_value=False),
+        is_recording=Mock(return_value=False),
+        disconnect=AsyncMock(),
+    )
+    new_client = SimpleNamespace(
+        is_connected=Mock(return_value=True),
+        is_recording=Mock(return_value=True),
+        start_recording=Mock(),
+        disconnect=AsyncMock(),
+    )
+    channel = SimpleNamespace(
+        id=10,
+        name="会議",
+        category_id=None,
+        category=None,
+        connect=AsyncMock(return_value=new_client),
+    )
+    session = VoiceSession(SimpleNamespace(), 1, channel, VoiceMode.LISTEN)
+    session.is_active = True
+    session.voice_client = old_client
+    session.recording_sink = old_sink
+    session._activate_capture_alert = AsyncMock(return_value=True)
+
+    healthy = await session._capture_connection_is_healthy()
+
+    assert healthy is True
+    assert session.voice_client is new_client
+    assert session.recording_sink.session_dir == old_sink.session_dir
+    assert session._capture_interrupted is True
+    new_client.start_recording.assert_called_once()
+    metadata = session.recording_sink.read_metadata()
+    assert metadata["capture_interruption_reason"] == "voice-connection-lost"
+    assert metadata["capture_gap_detected"] is True
+    session.recording_sink.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_recorder_restart_does_not_wait_for_warning_delivery(monkeypatch, tmp_path):
     monkeypatch.setattr("bot.voice.asyncio.sleep", AsyncMock())
     sink = PersistentPCMSink(

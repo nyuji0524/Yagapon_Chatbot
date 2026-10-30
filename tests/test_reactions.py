@@ -61,3 +61,20 @@ async def test_failed_reaction_flush_requeues_batch_for_retry():
 
     assert flushed is False
     assert reactions._buffer == [pending]
+
+
+@pytest.mark.asyncio
+async def test_reaction_flush_is_deferred_during_recording(monkeypatch):
+    generate = AsyncMock(return_value=SimpleNamespace(text='["none"]'))
+    reactions._client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+    )
+    pending = reactions.PendingMessage(1, 2, 3, "録音中は処理しない十分に長いメッセージです")
+    reactions._buffer.append(pending)
+    monkeypatch.setattr("bot.reactions.recording_is_active", lambda: True)
+
+    flushed = await reactions._flush_reactions(fake_bot())
+
+    assert flushed is False
+    assert reactions._buffer == [pending]
+    generate.assert_not_awaited()

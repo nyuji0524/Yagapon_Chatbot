@@ -28,6 +28,10 @@ from bot.knowledge_pipeline import knowledge_pipeline_lock
 from bot.knowledge_policy import knowledge_guild_allowed
 from bot.knowledge_publish import JST, publish_knowledge_bundle, retry_knowledge_delivery
 from bot.rag_store import RagStore
+from bot.recording_priority import (
+    wait_for_recording_idle,
+    wait_for_recording_idle_async,
+)
 from bot.scheduled_backfill import (
     CHECKPOINT_SCHEMA_VERSION,
     ScheduledBackfillConfigurationError,
@@ -1789,6 +1793,7 @@ async def _finalize_curation_delivery(
 
 
 async def curate_once(*, state_path: Path, limit: int) -> dict:
+    await wait_for_recording_idle_async()
     if os.environ.get("YAGAPON_KNOWLEDGE_CURATION_ENABLED", "false").lower() != "true":
         return {"enabled": False, "processed": 0, "queued": 0, "skipped": 0}
     checkpoint_ready, checkpoint_reason = backfill_checkpoint_status()
@@ -1991,6 +1996,7 @@ async def curate_once(*, state_path: Path, limit: int) -> dict:
     generation_budget = _positive_int_env("YAGAPON_KNOWLEDGE_CURATION_GENERATIONS_PER_RUN", 3, maximum=20)
     generated = 0
     for document in pending:
+        await wait_for_recording_idle_async()
         key = str(document["document_key"])
         digest = _digest(document)
         processed += 1
@@ -2312,6 +2318,7 @@ def main() -> None:
         cycle_result = None
         cycle_failed = False
         try:
+            wait_for_recording_idle()
             with curation_lock(args.state):
                 cycle_result = asyncio.run(
                     curate_once(state_path=args.state, limit=args.limit)

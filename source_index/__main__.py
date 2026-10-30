@@ -28,6 +28,7 @@ from bot.config import ConfigManager
 from bot.corpus import CorpusManager
 from bot.festival import current_festival, festival_number
 from bot.knowledge_publish import SENSITIVE_PATTERNS
+from bot.recording_priority import wait_for_recording_idle_async
 from bot.secret_value import read_secret
 from source_index.github_auth import (
     GITHUB_API_VERSION,
@@ -3087,6 +3088,7 @@ async def preflight_once(args) -> dict:
 async def sync_once(args) -> dict:
     if os.environ.get("YAGAPON_SOURCE_INDEX_ENABLED", "false").lower() != "true":
         return {"disabled": True}
+    await wait_for_recording_idle_async()
     repositories = load_repositories(args.manifest)
     client = GitHubSourceClient(github_token_provider(repositories))
     history_settings = source_history_settings()
@@ -3125,6 +3127,7 @@ async def sync_once(args) -> dict:
     statuses: dict[str, str] = {}
     current_fast_paths: dict[str, bool] = {}
     for repository in repositories:
+        await wait_for_recording_idle_async()
         commit = await asyncio.to_thread(
             client.resolve,
             repository.name,
@@ -3197,6 +3200,7 @@ async def sync_once(args) -> dict:
     archives: dict[str, list[tuple[str, bytes]]] = {}
     history_details: dict[str, list[SourceHistoryCommit]] = {}
     for repository in repositories:
+        await wait_for_recording_idle_async()
         if not current_fast_paths[repository.name]:
             if repository.fetch == "tree":
                 archives[repository.name] = await asyncio.to_thread(
@@ -3231,6 +3235,7 @@ async def sync_once(args) -> dict:
                 )
 
     for repository in repositories:
+        await wait_for_recording_idle_async()
         manifest_digest = repository_manifest_digest(repository)
         commit = resolved_commits[repository.name]
         authority = authorities[repository.name]
@@ -3442,6 +3447,7 @@ async def sync_once(args) -> dict:
                 item: tuple[SourceChunk, str, dict | None, dict | None]
             ):
                 async with upload_semaphore:
+                    await wait_for_recording_idle_async()
                     chunk, digest, previous, old_snapshot = item
                     remote_name = await corpus._upload_document(
                         store_name,

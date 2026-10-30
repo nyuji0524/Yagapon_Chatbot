@@ -31,6 +31,10 @@ from bot.knowledge_policy import (
     automatic_knowledge_promotion_allowed,
     protected_channel,
 )
+from bot.recording_priority import (
+    recording_is_active,
+    wait_for_recording_idle_async,
+)
 
 log = logging.getLogger("yagapon.scheduled_backfill")
 
@@ -566,6 +570,33 @@ class ScheduledBackfillManager:
             history_promotion_guild_id = int(history_promotion_guild_id)
             if history_promotion_guild_id <= 0:
                 raise ValueError("history_promotion_guild_id must be positive")
+        if recording_is_active():
+            now = datetime.now(timezone.utc).isoformat()
+            return {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "started_at": now,
+                "completed_at": now,
+                "status": "deferred",
+                "reason": "recording-active",
+                "mode": "historical" if full_history else "incremental",
+                "history_promotion_guild_id": (
+                    str(history_promotion_guild_id)
+                    if history_promotion_guild_id is not None
+                    else None
+                ),
+                "configured_guild_ids": [
+                    str(value) for value in configured_guild_ids()
+                ],
+                "configured_channel_ids": [
+                    str(value) for value in sorted(configured_channel_ids())
+                ],
+                "discovered_channel_ids": [],
+                "eligible_channel_ids": [],
+                "current_curation_eligible_channel_ids": [],
+                "current_public_curation_channel_ids": [],
+                "missing_channel_ids": [],
+                "guilds": {},
+            }
         if self._run_lock.locked():
             now = datetime.now(timezone.utc).isoformat()
             return {
@@ -859,12 +890,17 @@ class ScheduledBackfillManager:
 
         async def process_channel(channel) -> None:
             try:
+                # A refresh can already be running when a meeting starts.
+                # Yield between channel/festival slices instead of competing
+                # with Discord voice receive for memory, disk and network I/O.
+                await wait_for_recording_idle_async()
                 latest_message_id = None
                 latest_message_at = None
                 if full_history:
                     oldest = await _oldest_message_at(channel, before=session.cutoff)
                     festivals = _historical_festivals(oldest, session.cutoff)
                     for index, festival in enumerate(festivals):
+                        await wait_for_recording_idle_async()
                         after, before = _festival_bounds(festival, session.cutoff)
                         if before <= after:
                             continue
