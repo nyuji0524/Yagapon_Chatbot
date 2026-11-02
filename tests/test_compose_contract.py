@@ -15,6 +15,14 @@ def test_bot_uses_long_recording_io_timeout_large_enough_for_vm_storage():
     ] == "${YAGAPON_FINAL_REPROCESS_IO_TIMEOUT_SECONDS:-120}"
 
 
+def test_committee_email_verification_defaults_to_enabled():
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+
+    assert compose["services"]["yagapon"]["environment"][
+        "YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED"
+    ] == "${YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED:-true}"
+
+
 def test_bot_and_worker_receive_the_same_curation_policy():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     bot_environment = compose["services"]["yagapon"]["environment"]
