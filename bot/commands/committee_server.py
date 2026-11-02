@@ -123,7 +123,7 @@ def _has_completed_registration(config, guild_id: int, member) -> bool:
     if not registration or not registration.get("bureau") or not registration.get("grade"):
         return False
     if registration.get("registration_completed") is True:
-        return True
+        return bool(registration.get("email"))
     return bool(registration.get("email_verified") is True and registration.get("email"))
 
 
@@ -182,13 +182,9 @@ def _role_panel_embed() -> discord.Embed:
     completion_step = (
         "**3. 「登録を完了」から慶應メールを入力**"
         if email_verification_enabled
-        else "**3. 「登録を完了」を押す（現在はメール認証なし）**"
+        else "**3. 「登録を完了」から慶應メールを入力（確認コードなし）**"
     )
-    registration_summary = (
-        "**所属局・学年 → 慶應メール**"
-        if email_verification_enabled
-        else "**所属局・学年**"
-    )
+    registration_summary = "**所属局・学年 → 慶應メール**"
     embed = discord.Embed(
         title="🎫 委員プロフィールを設定",
         description=(
@@ -391,7 +387,7 @@ async def _submit_position_request(
         return
     email_verification_enabled = _committee_email_verification_enabled()
     if not _has_completed_registration(interaction.client.config, guild.id, member):
-        requirement = "所属局・学年・慶應メール" if email_verification_enabled else "所属局・学年"
+        requirement = "所属局・学年・慶應メール"
         await _respond_ephemeral(interaction, f"先に{requirement}の登録を完了してほしいぽん。")
         return
     if role in member.roles:
@@ -627,6 +623,15 @@ class RegistrationModal(discord.ui.Modal):
             await _respond_ephemeral(interaction, "先に所属局と学年の両方を選んでほしいぽん。")
             return
 
+        if not _committee_email_verification_enabled():
+            await _complete_registration_without_verification(
+                interaction,
+                email=email,
+                bureau=bureau,
+                grade=grade,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
         try:
             await interaction.client.committee_backend.request_code(
@@ -818,22 +823,20 @@ class SelfRolePanelView(discord.ui.View):
         custom_id="yagapon:committee:registration:v1",
     )
     async def registration(self, _button: discord.ui.Button, interaction: discord.Interaction):
-        if not _committee_email_verification_enabled():
-            await _complete_registration_without_email(interaction)
-            return
         await interaction.response.send_modal(RegistrationModal())
 
 
-async def _complete_registration_without_email(interaction: discord.Interaction) -> None:
+async def _complete_registration_without_verification(
+    interaction: discord.Interaction,
+    *,
+    email: str,
+    bureau: str,
+    grade: str,
+) -> None:
     guild = interaction.guild
     member = interaction.user
     if not guild or not isinstance(member, discord.Member):
         await _respond_ephemeral(interaction, "サーバー内で実行してほしいぽん。")
-        return
-    bureau = next((role.name for role in member.roles if role.name in _role_names(BUREAU_ROLES)), None)
-    grade = next((role.name for role in member.roles if role.name in GRADE_ROLES), None)
-    if not bureau or not grade:
-        await _respond_ephemeral(interaction, "先に所属局と学年の両方を選んでほしいぽん。")
         return
     await interaction.response.defer(ephemeral=True)
     config = interaction.client.config
@@ -842,11 +845,12 @@ async def _complete_registration_without_email(interaction: discord.Interaction)
     members[str(member.id)] = {
         **existing,
         "name": member.display_name,
+        "email": email,
         "bureau": bureau,
         "grade": grade,
         "email_verified": False,
         "registration_completed": True,
-        "registration_mode": "email_verification_disabled",
+        "registration_mode": "email_collected_verification_disabled",
         "support_status": "not_checked",
         "role": _position_role_summary(member.roles),
         "roles": _position_role_names(member.roles),
@@ -858,7 +862,8 @@ async def _complete_registration_without_email(interaction: discord.Interaction)
                 "✅ 委員プロフィールの登録が完了したぽん！",
                 f"表示名: **{member.display_name}**",
                 f"所属: **{bureau} / {grade}**",
-                "現在はメール認証を使用していないため、やがサポ照合は未実施だぽん。",
+                f"慶應メール: **{email}**",
+                "現在は確認コードを使用していないため、メール確認とやがサポ照合は未実施だぽん。",
                 "企画長・副局長・局長に該当する場合は、下から申告できるぽん。",
             ]
         ),
@@ -2008,7 +2013,7 @@ def register(bot):
             await ctx.respond("サーバー内で実行してほしいぽん。", ephemeral=True)
             return
         if not _has_completed_registration(bot.config, guild.id, member):
-            requirement = "所属局・学年・慶應メール" if _committee_email_verification_enabled() else "所属局・学年"
+            requirement = "所属局・学年・慶應メール"
             await ctx.respond(
                 f"先にロール選択パネルから{requirement}の登録を完了してほしいぽん。",
                 ephemeral=True,

@@ -74,13 +74,13 @@ def test_email_verification_switch_is_fail_safe(monkeypatch):
         assert _committee_email_verification_enabled() is False
 
 
-def test_role_panel_explains_temporary_email_free_mode(monkeypatch):
+def test_role_panel_explains_temporary_email_input_only_mode(monkeypatch):
     monkeypatch.setenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", "false")
 
     embed = _role_panel_embed()
 
-    assert "現在はメール認証なし" in embed.description
-    assert embed.fields[0].value == "**所属局・学年**"
+    assert "慶應メールを入力（確認コードなし）" in embed.description
+    assert embed.fields[0].value == "**所属局・学年 → 慶應メール**"
 
 
 def test_overwrite_signature_compares_ids_and_permission_bits():
@@ -105,6 +105,7 @@ def test_registration_accepts_explicit_local_completion_and_legacy_email_record(
         "local": {
             "bureau": "IT局",
             "grade": "１年生",
+            "email": "local@keio.jp",
             "registration_completed": True,
             "email_verified": False,
         },
@@ -117,6 +118,14 @@ def test_registration_accepts_explicit_local_completion_and_legacy_email_record(
     }
     config = SimpleNamespace(get_member=lambda _guild_id, _member_id: records["local"])
     assert _has_completed_registration(config, 10, member) is True
+
+    config.get_member = lambda _guild_id, _member_id: {
+        "bureau": "IT局",
+        "grade": "１年生",
+        "registration_completed": True,
+        "email_verified": False,
+    }
+    assert _has_completed_registration(config, 10, member) is False
 
     config.get_member = lambda _guild_id, _member_id: records["email"]
     assert _has_completed_registration(config, 10, member) is True
