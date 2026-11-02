@@ -81,6 +81,8 @@ def test_role_panel_explains_temporary_email_input_only_mode(monkeypatch):
 
     assert "慶應メールを入力（確認コードなし）" in embed.description
     assert embed.fields[0].value == "**所属局・学年 → 慶應メール**"
+    assert "ご自身でサーバーの表示名を本名に変更して下さい。" in embed.description
+    assert "Firebase側の準備完了後" not in embed.description
 
 
 def test_overwrite_signature_compares_ids_and_permission_bits():
