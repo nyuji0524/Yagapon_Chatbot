@@ -7,6 +7,8 @@ import pytest
 from bot.commands.committee_server import (
     BUREAU_ROLES,
     GRADE_ROLES,
+    LEGACY_GRADE_ROLES,
+    LIAISON_CHANNELS,
     OFFICER_POSITIONS,
     POSITION_ROLES,
     SERVER_ADMIN_ROLE,
@@ -17,15 +19,26 @@ from bot.commands.committee_server import (
     SelfRolePanelView,
     _bot_can_run_committee_setup,
     _bot_guide_embed,
+    _committee_email_verification_enabled,
     _embed_field_id,
+    _ensure_category,
+    _ensure_forum,
     _ensure_setup_actor_is_server_admin,
+    _ensure_text,
+    _ensure_voice,
     _handle_position_request,
+    _has_completed_registration,
     _is_keio_email,
+    _migrate_legacy_grade_roles,
+    _overwrite_signature,
     _position_role_names,
     _position_role_summary,
     _post_once,
+    _queue_local_role_for_firebase,
     _replace_role_group,
+    _role_panel_embed,
     _roles_after_position_approval,
+    _sync_pending_local_roles,
     _sync_role_decision,
 )
 
@@ -40,6 +53,160 @@ def test_registration_roles_use_only_bureau_grade_and_declared_positions():
     assert "一般委員" not in POSITION_ROLES
     assert "28th委員" not in POSITION_ROLES
     assert SERVER_ADMIN_ROLE == "サーバー管理者"
+
+
+def test_all_28_liaison_channels_are_declared_once():
+    bureau_names = {item[0] for item in BUREAU_ROLES}
+    channel_names = []
+    for first_bureau, second_bureau, channel_name in LIAISON_CHANNELS:
+        assert {first_bureau, second_bureau} <= bureau_names
+        assert first_bureau != second_bureau
+        channel_names.append(channel_name)
+    assert len(channel_names) == len(set(channel_names)) == 28
+
+
+def test_email_verification_switch_is_fail_safe(monkeypatch):
+    monkeypatch.delenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", raising=False)
+    assert _committee_email_verification_enabled() is True
+
+    for value in ("false", "0", "off", "NO"):
+        monkeypatch.setenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", value)
+        assert _committee_email_verification_enabled() is False
+
+
+def test_role_panel_explains_temporary_email_free_mode(monkeypatch):
+    monkeypatch.setenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", "false")
+
+    embed = _role_panel_embed()
+
+    assert "現在はメール認証なし" in embed.description
+    assert embed.fields[0].value == "**所属局・学年**"
+
+
+def test_overwrite_signature_compares_ids_and_permission_bits():
+    expected = {
+        discord.Object(id=10): discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=False,
+        ),
+    }
+    actual = {
+        discord.Object(id=10): discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=False,
+        ),
+    }
+    assert _overwrite_signature(actual) == _overwrite_signature(expected)
+
+
+def test_registration_accepts_explicit_local_completion_and_legacy_email_record():
+    member = SimpleNamespace(id=20)
+    records = {
+        "local": {
+            "bureau": "IT局",
+            "grade": "１年生",
+            "registration_completed": True,
+            "email_verified": False,
+        },
+        "email": {
+            "bureau": "IT局",
+            "grade": "２年生",
+            "email_verified": True,
+            "email": "member@keio.jp",
+        },
+    }
+    config = SimpleNamespace(get_member=lambda _guild_id, _member_id: records["local"])
+    assert _has_completed_registration(config, 10, member) is True
+
+    config.get_member = lambda _guild_id, _member_id: records["email"]
+    assert _has_completed_registration(config, 10, member) is True
+
+    config.get_member = lambda _guild_id, _member_id: {
+        "bureau": "IT局",
+        "grade": "１年生",
+        "email_verified": False,
+    }
+    assert _has_completed_registration(config, 10, member) is False
+
+
+def test_local_role_queue_is_idempotent():
+    record = {}
+
+    for _ in range(2):
+        _queue_local_role_for_firebase(
+            record,
+            application_id="local-1",
+            role_name="企画長",
+            organization_name="ITラボ",
+            approved_by=99,
+        )
+
+    assert record["firebase_role_sync_queue"] == [
+        {
+            "local_application_id": "local-1",
+            "role": "企画長",
+            "kind": "project_leader",
+            "organization_name": "ITラボ",
+            "organization_not_listed": True,
+            "approved_by_discord_id": "99",
+            "status": "pending_registration",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_verified_member_replays_local_role_to_firebase():
+    record = {
+        "email_verified": True,
+        "firebase_role_sync_queue": [
+            {
+                "local_application_id": "local-1",
+                "role": "局長",
+                "kind": "officer",
+                "organization_name": None,
+                "organization_not_listed": False,
+                "approved_by_discord_id": "99",
+                "status": "pending_registration",
+            }
+        ],
+    }
+    members = {"20": record}
+    backend = SimpleNamespace(
+        create_application=AsyncMock(return_value={"applicationId": "firebase-1"}),
+        decide_application=AsyncMock(),
+        acknowledge_decision=AsyncMock(),
+    )
+    config = SimpleNamespace(
+        get_members=lambda _guild_id: members,
+        set_members=AsyncMock(),
+    )
+    bot = SimpleNamespace(committee_backend=backend, config=config)
+    guild = SimpleNamespace(id=10)
+    member = SimpleNamespace(id=20, display_name="委員")
+
+    synced = await _sync_pending_local_roles(bot, guild, member)
+
+    assert synced == 1
+    backend.create_application.assert_awaited_once_with(
+        guildId="10",
+        discordUserId="20",
+        applicantDisplayName="委員",
+        kind="officer",
+        role="局長",
+        organizationId=None,
+        organizationNotListed=False,
+        manualReason=None,
+    )
+    backend.decide_application.assert_awaited_once_with(
+        application_id="firebase-1",
+        approved=True,
+        actor_discord_id=99,
+    )
+    backend.acknowledge_decision.assert_awaited_once_with(
+        guild_id=10,
+        application_id="firebase-1",
+    )
+    assert record["firebase_role_sync_queue"][0]["status"] == "synced"
 
 
 def test_committee_setup_requires_bot_administrator_permission():
@@ -230,6 +397,51 @@ async def test_replace_role_group_removes_old_role_and_adds_selected():
 
 
 @pytest.mark.asyncio
+async def test_channel_creators_omit_none_overwrites():
+    category = SimpleNamespace(id=1)
+    guild = SimpleNamespace(
+        categories=[],
+        text_channels=[],
+        forum_channels=[],
+        voice_channels=[],
+        create_category=AsyncMock(return_value=category),
+        create_text_channel=AsyncMock(return_value=SimpleNamespace()),
+        create_forum_channel=AsyncMock(return_value=SimpleNamespace()),
+        create_voice_channel=AsyncMock(return_value=SimpleNamespace()),
+    )
+
+    await _ensure_category(guild, "category")
+    await _ensure_text(guild, "text", category, topic="topic")
+    await _ensure_forum(guild, "forum", category, topic="topic", tags=("tag",))
+    await _ensure_voice(guild, "voice", category)
+
+    assert "overwrites" not in guild.create_category.await_args.kwargs
+    assert "overwrites" not in guild.create_text_channel.await_args.kwargs
+    assert "overwrites" not in guild.create_forum_channel.await_args.kwargs
+    assert "overwrites" not in guild.create_voice_channel.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_legacy_grade_roles_are_migrated_then_deleted():
+    desired = SimpleNamespace(id=2, name="１年生")
+    unrelated = SimpleNamespace(id=3, name="IT局")
+    member = SimpleNamespace(roles=[], edit=AsyncMock())
+    legacy = SimpleNamespace(id=1, name="1年", members=[member], delete=AsyncMock())
+    member.roles = [legacy, unrelated]
+    guild = SimpleNamespace(roles=[legacy, desired, unrelated])
+
+    migrated, deleted = await _migrate_legacy_grade_roles(guild)
+
+    assert LEGACY_GRADE_ROLES["1年"] == "１年生"
+    assert (migrated, deleted) == (1, 1)
+    member.edit.assert_awaited_once_with(
+        roles=[unrelated, desired],
+        reason="学年ロールを １年生 へ移行",
+    )
+    legacy.delete.assert_awaited_once_with(reason="１年生 への移行完了")
+
+
+@pytest.mark.asyncio
 async def test_post_once_repins_an_existing_guide():
     message = SimpleNamespace(
         id=30,
@@ -325,3 +537,51 @@ async def test_officer_approval_requires_officer_role_before_backend_decision():
     backend.decide_application.assert_not_awaited()
     response.send_message.assert_awaited_once()
     assert "役員ロールが見つからない" in response.send_message.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_local_position_approval_skips_backend_and_updates_discord():
+    applicant = SimpleNamespace(id=20, roles=[], edit=AsyncMock(), send=AsyncMock())
+    project_leader = SimpleNamespace(id=30, name="企画長")
+    guild = SimpleNamespace(
+        id=10,
+        roles=[project_leader],
+        get_member=lambda member_id: applicant if member_id == 20 else None,
+        get_role=lambda role_id: project_leader if role_id == 30 else None,
+    )
+    embed = discord.Embed(title="企画長申請")
+    embed.add_field(name="申請者ID", value="20")
+    embed.add_field(name="役職ロールID", value="30")
+    embed.add_field(name="申請ID", value="local-test")
+    embed.add_field(name="処理方式", value="Discord内の暫定申請")
+    backend = SimpleNamespace(
+        decide_application=AsyncMock(),
+        acknowledge_decision=AsyncMock(),
+    )
+    config = SimpleNamespace(
+        get_members=lambda _guild_id: {},
+        set_members=AsyncMock(),
+    )
+    message = SimpleNamespace(embeds=[embed], edit=AsyncMock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(
+            id=99,
+            mention="<@99>",
+            guild_permissions=SimpleNamespace(manage_roles=True),
+        ),
+        guild=guild,
+        message=message,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        client=SimpleNamespace(committee_backend=backend, config=config),
+    )
+
+    await _handle_position_request(interaction, approve=True)
+
+    backend.decide_application.assert_not_awaited()
+    backend.acknowledge_decision.assert_not_awaited()
+    applicant.edit.assert_awaited_once()
+    config.set_members.assert_awaited_once()
+    message.edit.assert_awaited_once()
+    saved_record = config.set_members.await_args.args[1]["20"]
+    assert saved_record["firebase_role_sync_queue"][0]["role"] == "企画長"
