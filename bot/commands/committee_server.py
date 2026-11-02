@@ -192,7 +192,7 @@ def _role_panel_embed() -> discord.Embed:
             "**1. Discordのサーバープロフィールから表示名を自分で変更**\n"
             "**2. 所属局と学年を選択**\n"
             f"{completion_step}\n\n"
-            "表示名はやがぽんから変更しません。選び直した局・学年は自動で置き換わります。"
+            "ご自身でサーバーの表示名を本名に変更して下さい。"
         ),
         color=discord.Color(COMMITTEE_COLOR),
     )
