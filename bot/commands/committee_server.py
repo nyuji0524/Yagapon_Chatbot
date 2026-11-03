@@ -103,6 +103,23 @@ async def _replace_role_group(
     await member.edit(roles=desired_roles, reason=reason)
 
 
+async def _update_saved_registration_selection(
+    config,
+    guild_id: int,
+    member_id: int,
+    *,
+    field: str,
+    value: str,
+) -> None:
+    """Keep the local registration record aligned with a changed Discord role."""
+    members = config.get_members(guild_id)
+    existing = members.get(str(member_id))
+    if not isinstance(existing, dict) or existing.get(field) == value:
+        return
+    members[str(member_id)] = {**existing, field: value}
+    await config.set_members(guild_id, members)
+
+
 def _position_role_names(roles: Iterable[discord.Role]) -> list[str]:
     names = {role.name for role in roles}
     return [name for name in POSITION_ROLE_ORDER if name in names]
@@ -335,11 +352,23 @@ class BureauSelect(discord.ui.Select):
         if not guild or not isinstance(member, discord.Member) or role is None:
             await _respond_ephemeral(interaction, "対象ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
             return
+        await interaction.response.defer(ephemeral=True)
         try:
             await _replace_role_group(member, role, _role_names(BUREAU_ROLES))
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
             return
+        except discord.HTTPException:
+            log.exception("Failed to replace bureau role guild=%s member=%s", guild.id, member.id)
+            await _respond_ephemeral(interaction, "所属局を変更できなかったぽん。少し待ってからもう一度試してほしいぽん。")
+            return
+        await _update_saved_registration_selection(
+            interaction.client.config,
+            guild.id,
+            member.id,
+            field="bureau",
+            value=role.name,
+        )
         await _respond_ephemeral(interaction, f"✅ 所属局を **{role.name}** に設定したぽん！")
 
 
@@ -361,11 +390,23 @@ class GradeSelect(discord.ui.Select):
         if not guild or not isinstance(member, discord.Member) or role is None:
             await _respond_ephemeral(interaction, "対象ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
             return
+        await interaction.response.defer(ephemeral=True)
         try:
             await _replace_role_group(member, role, GRADE_ROLES)
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
             return
+        except discord.HTTPException:
+            log.exception("Failed to replace grade role guild=%s member=%s", guild.id, member.id)
+            await _respond_ephemeral(interaction, "学年を変更できなかったぽん。少し待ってからもう一度試してほしいぽん。")
+            return
+        await _update_saved_registration_selection(
+            interaction.client.config,
+            guild.id,
+            member.id,
+            field="grade",
+            value=role.name,
+        )
         await _respond_ephemeral(interaction, f"✅ 学年を **{role.name}** に設定したぽん！")
 
 
