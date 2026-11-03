@@ -26,6 +26,7 @@ from bot.commands.committee_server import (
     _ensure_setup_actor_is_server_admin,
     _ensure_text,
     _ensure_voice,
+    _find_role_request_channel,
     _handle_position_request,
     _has_completed_registration,
     _is_keio_email,
@@ -63,6 +64,15 @@ def test_all_28_liaison_channels_are_declared_once():
         assert first_bureau != second_bureau
         channel_names.append(channel_name)
     assert len(channel_names) == len(set(channel_names)) == 28
+
+
+def test_role_request_channel_prefers_production_name_and_supports_legacy_name():
+    production = SimpleNamespace(name="役職申請")
+    legacy = SimpleNamespace(name="ロール申請🔑")
+
+    assert _find_role_request_channel(SimpleNamespace(text_channels=[legacy, production])) is production
+    assert _find_role_request_channel(SimpleNamespace(text_channels=[legacy])) is legacy
+    assert _find_role_request_channel(SimpleNamespace(text_channels=[])) is None
 
 
 def test_email_verification_switch_is_fail_safe(monkeypatch):
@@ -430,6 +440,28 @@ async def test_channel_creators_omit_none_overwrites():
     assert "overwrites" not in guild.create_text_channel.await_args.kwargs
     assert "overwrites" not in guild.create_forum_channel.await_args.kwargs
     assert "overwrites" not in guild.create_voice_channel.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_ensure_text_reuses_legacy_alias_in_same_category():
+    category = SimpleNamespace(id=1)
+    legacy = SimpleNamespace(name="ロール申請🔑", category_id=1)
+    guild = SimpleNamespace(
+        text_channels=[legacy],
+        create_text_channel=AsyncMock(),
+    )
+
+    channel, created = await _ensure_text(
+        guild,
+        "役職申請",
+        category,
+        topic="topic",
+        aliases=("ロール申請🔑",),
+    )
+
+    assert channel is legacy
+    assert created is False
+    guild.create_text_channel.assert_not_awaited()
 
 
 @pytest.mark.asyncio
