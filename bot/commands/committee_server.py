@@ -56,7 +56,8 @@ DECLARABLE_POSITIONS = ("企画長", "副局長", "局長")
 OFFICER_POSITIONS = ("副局長", "局長")
 POSITION_ROLE_ORDER = ("執行部", "局長", "副局長", "企画長", "役員")
 SERVER_ADMIN_ROLE = "サーバー管理者"
-ROLE_REQUEST_CHANNEL = "ロール申請🔑"
+ROLE_REQUEST_CHANNEL = "役職申請"
+LEGACY_ROLE_REQUEST_CHANNELS = ("ロール申請🔑",)
 ROLE_PANEL_CHANNEL = "ロール選択"
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
 COMMITTEE_COLOR = 0xF2A900
@@ -69,6 +70,18 @@ def _role_names(entries: Iterable[tuple[str, int, str, str]]) -> tuple[str, ...]
 
 def _find_named(items, name: str):
     return discord.utils.get(items, name=name)
+
+
+def _find_role_request_channel(guild):
+    """Resolve the production request channel while keeping old servers usable."""
+    return next(
+        (
+            channel
+            for name in (ROLE_REQUEST_CHANNEL, *LEGACY_ROLE_REQUEST_CHANNELS)
+            if (channel := _find_named(guild.text_channels, name)) is not None
+        ),
+        None,
+    )
 
 
 def _find_in_category(items, name: str, category):
@@ -381,7 +394,7 @@ async def _submit_position_request(
     guild = interaction.guild
     member = interaction.user
     role = _find_named(guild.roles, role_name) if guild else None
-    request_channel = _find_named(guild.text_channels, ROLE_REQUEST_CHANNEL) if guild else None
+    request_channel = _find_role_request_channel(guild) if guild else None
     if not guild or not isinstance(member, discord.Member) or role is None or request_channel is None:
         await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
         return
@@ -1365,8 +1378,26 @@ async def _ensure_category(guild: discord.Guild, name: str, *, overwrites=None):
     return await guild.create_category(name, **kwargs), True
 
 
-async def _ensure_text(guild, name: str, category, *, topic: str, overwrites=None, read_only=False):
+async def _ensure_text(
+    guild,
+    name: str,
+    category,
+    *,
+    topic: str,
+    overwrites=None,
+    read_only=False,
+    aliases=(),
+):
     channel = _find_in_category(guild.text_channels, name, category)
+    if channel is None:
+        channel = next(
+            (
+                existing
+                for alias in aliases
+                if (existing := _find_in_category(guild.text_channels, alias, category)) is not None
+            ),
+            None,
+        )
     if channel:
         return channel, False
     if read_only:
@@ -1587,7 +1618,15 @@ async def _bootstrap_committee_channels(guild: discord.Guild, *, key_store) -> d
             await category.edit(overwrites=overwrites, reason="28thカテゴリ権限を同期")
         return category
 
-    async def ensure_text(name: str, category, *, topic: str, overwrites=None, read_only=False):
+    async def ensure_text(
+        name: str,
+        category,
+        *,
+        topic: str,
+        overwrites=None,
+        read_only=False,
+        aliases=(),
+    ):
         effective_overwrites = overwrites
         if read_only:
             effective_overwrites = dict(overwrites or {})
@@ -1607,6 +1646,7 @@ async def _bootstrap_committee_channels(guild: discord.Guild, *, key_store) -> d
             topic=topic,
             overwrites=overwrites,
             read_only=read_only,
+            aliases=aliases,
         )
         counts["channels"] += int(created)
         if not created:
@@ -1676,6 +1716,7 @@ async def _bootstrap_committee_channels(guild: discord.Guild, *, key_store) -> d
         start,
         topic="企画長・副局長・局長の申告と例外対応。サーバー管理者と執行部のみ閲覧できます。",
         overwrites=request_overwrites,
+        aliases=LEGACY_ROLE_REQUEST_CHANNELS,
     )
 
     general = await ensure_category("01｜全体")
