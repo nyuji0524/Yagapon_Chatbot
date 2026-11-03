@@ -40,6 +40,7 @@ from bot.commands.committee_server import (
     _roles_after_position_approval,
     _sync_pending_local_roles,
     _sync_role_decision,
+    _update_saved_registration_selection,
 )
 
 
@@ -322,6 +323,56 @@ def test_position_role_summary_is_stable_for_combined_roles_and_empty_input():
     assert _position_role_summary(roles) == "局長, 企画長, 役員"
     assert _position_role_names([]) == []
     assert _position_role_summary([]) == "なし"
+
+
+@pytest.mark.asyncio
+async def test_changed_grade_is_persisted_without_losing_email_or_roles():
+    members = {
+        "20": {
+            "email": "member@keio.jp",
+            "bureau": "IT局",
+            "grade": "１年生",
+            "roles": ["企画長"],
+        }
+    }
+    config = SimpleNamespace(
+        get_members=lambda _guild_id: members,
+        set_members=AsyncMock(),
+    )
+
+    await _update_saved_registration_selection(
+        config,
+        10,
+        20,
+        field="grade",
+        value="２年生",
+    )
+
+    assert members["20"] == {
+        "email": "member@keio.jp",
+        "bureau": "IT局",
+        "grade": "２年生",
+        "roles": ["企画長"],
+    }
+    config.set_members.assert_awaited_once_with(10, members)
+
+
+@pytest.mark.asyncio
+async def test_selection_change_before_registration_does_not_create_partial_record():
+    config = SimpleNamespace(
+        get_members=lambda _guild_id: {},
+        set_members=AsyncMock(),
+    )
+
+    await _update_saved_registration_selection(
+        config,
+        10,
+        20,
+        field="grade",
+        value="２年生",
+    )
+
+    config.set_members.assert_not_awaited()
 
 
 def test_project_organizations_are_sorted_before_discord_option_limit():
