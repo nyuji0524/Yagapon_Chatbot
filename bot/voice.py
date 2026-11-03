@@ -877,6 +877,12 @@ class VoiceSession:
                 "⚠️ 会議時間に対する受信PCMが少ないぽん。静かな会議でも出る警告なので、"
                 "録音は続けたままマイク状態を確認してほしいぽん。元録音は保持するぽん。"
             )
+        if reason == "durable-checkpoint-timeout":
+            return (
+                "⚠️ 録音の定期保存確認に時間がかかっているぽん。"
+                "録音受信は止めずに継続し、元PCMを保持するぽん。"
+                "このセッションは安全のため自動公開せず、終了後に再処理するぽん。"
+            )
         return (
             "🚨 録音データの保存または整合性に異常を検出したぽん。"
             f"理由: `{reason}`。不完全な議事録は自動公開せず、"
@@ -1304,6 +1310,20 @@ class VoiceSession:
             sink = self.recording_sink
             if sink is None:
                 return
+            if self._sink_io_stalled:
+                inflight = self._sink_worker_count()
+                if inflight:
+                    log.warning(
+                        "Previous recording checkpoint still running; continuing capture without overlap "
+                        "guild=%s session=%s workers=%s",
+                        self.guild_id,
+                        self.session_id,
+                        inflight,
+                    )
+                    continue
+                # The timed-out worker has now returned. Allow a later
+                # checkpoint and normal leave cleanup to retry persistence.
+                self._sink_io_stalled = False
             try:
                 def durable_checkpoint() -> None:
                     refresh_capacity = getattr(
@@ -1335,6 +1355,30 @@ class VoiceSession:
                 )
             except asyncio.CancelledError:
                 raise
+            except TimeoutError:
+                # A slow fsync is not proof that capture has failed. The worker
+                # continues in its dedicated thread, so keep receiving PCM and
+                # avoid starting another checkpoint until it exits. Publication
+                # remains fail-closed because the durable boundary is uncertain.
+                self._capture_suspicious = True
+                self._capture_suspicious_reason = "durable-checkpoint-timeout"
+                latch = getattr(sink, "latch_capture_integrity", None)
+                if callable(latch):
+                    latch(
+                        "durable-checkpoint-timeout",
+                        status="capture_suspicious",
+                    )
+                await self._activate_capture_alert(
+                    "durable-checkpoint-timeout",
+                    fail_closed=True,
+                )
+                log.error(
+                    "Recording durability checkpoint timed out; capture continues fail-closed "
+                    "guild=%s session=%s",
+                    self.guild_id,
+                    self.session_id,
+                )
+                continue
             except Exception as exc:
                 # wait_for cannot stop a running to_thread worker. It may still
                 # hold the sink RLock inside fsync, so never touch the sink
