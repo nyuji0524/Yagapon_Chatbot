@@ -867,6 +867,46 @@ async def test_periodic_durability_failure_warns_and_blocks_publication(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_periodic_durability_timeout_keeps_recording_active(monkeypatch):
+    session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
+    session.is_active = True
+    session.recording_sink = SimpleNamespace(
+        latch_capture_integrity=Mock(),
+    )
+    session._run_sink_worker = AsyncMock(side_effect=TimeoutError())
+    session._activate_capture_alert = AsyncMock(return_value=False)
+    session._finalize_interrupted_capture = AsyncMock()
+    active_when_alerted = []
+
+    async def alert(*_args, **_kwargs):
+        active_when_alerted.append(session.is_active)
+        return False
+
+    session._activate_capture_alert.side_effect = alert
+    sleeps = 0
+
+    async def advance(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            session.is_active = False
+
+    monkeypatch.setattr("bot.voice.asyncio.sleep", advance)
+
+    await session._durability_loop()
+    await asyncio.sleep(0)
+
+    assert active_when_alerted == [True]
+    assert session._capture_suspicious is True
+    assert session._capture_suspicious_reason == "durable-checkpoint-timeout"
+    session.recording_sink.latch_capture_integrity.assert_called_once_with(
+        "durable-checkpoint-timeout",
+        status="capture_suspicious",
+    )
+    session._finalize_interrupted_capture.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unexpected_recorder_stop_is_persisted_as_capture_gap():
     session = VoiceSession(SimpleNamespace(), 1, SimpleNamespace(), VoiceMode.LISTEN)
     session._loop = asyncio.get_running_loop()

@@ -33,6 +33,11 @@ services:
       # long meeting; rollback restores the old Compose file and leaves the
       # old generation's runtime environment untouched.
       YAGAPON_MAX_RECORDING_BYTES: "0"
+      # Frequent fsync stalls small persistent disks long enough to miss
+      # Discord heartbeats. PCM writes are unbuffered and final leave/cleanup
+      # still fsyncs; keep the periodic power-loss checkpoint outside normal
+      # meeting duration unless an operator explicitly opts into it.
+      YAGAPON_CAPTURE_DURABILITY_INTERVAL_SECONDS: ${YAGAPON_CAPTURE_DURABILITY_INTERVAL_SECONDS:-86400}
       YAGAPON_AI_PROFILE: ${YAGAPON_AI_PROFILE:-budget}
       YAGAPON_RAG_MODEL: ${YAGAPON_RAG_MODEL:-}
       YAGAPON_RESPONSE_MODEL: ${YAGAPON_RESPONSE_MODEL:-}
