@@ -190,19 +190,23 @@ def register(bot):
             )
         except Exception:
             log.exception("Could not post voice join notice guild=%s", ctx.guild_id)
-            session._mark_capture_interrupted("join-notice-failed")
+            # Consent/retention was already announced before capture started.
+            # A second, decorative confirmation must never destroy a healthy
+            # recording merely because Discord HTTP is temporarily degraded.
             try:
-                await leave_voice(ctx.guild_id)
+                await asyncio.wait_for(
+                    ctx.followup.send(
+                        "⚠️ 録音開始後の案内送信に失敗したけれど、録音は継続しているぽん。"
+                        "終了時は `/leave` を実行してほしいぽん。",
+                        ephemeral=True,
+                    ),
+                    timeout=5,
+                )
             except Exception:
                 log.exception(
-                    "Could not stop recording after join notice failure guild=%s",
+                    "Could not deliver fallback join confirmation guild=%s",
                     ctx.guild_id,
                 )
-            await ctx.followup.send(
-                "❌ 録音開始の確定案内を送れなかったため、録音を停止したぽん。"
-                "保存できた断片は復旧用に保持しているぽん。",
-                ephemeral=True,
-            )
             return
         await ctx.followup.send(joined_message, ephemeral=True)
 
