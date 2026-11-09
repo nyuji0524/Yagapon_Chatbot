@@ -1,0 +1,121 @@
+name: Set committee registration mode
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Committee registration backend mode
+        required: true
+        type: choice
+        default: firebase_email_only
+        options:
+          - firebase_email_only
+          - otp
+          - local
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: yagapon-production
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCE_INSTANCE: ${{ vars.GCE_INSTANCE }}
+      GCE_ZONE: ${{ vars.GCE_ZONE }}
+      COMMITTEE_MODE: ${{ inputs.mode }}
+    steps:
+      - name: Validate configuration
+        run: |
+          set -eu
+          test -n "$GCP_PROJECT_ID"
+          test -n "$GCE_INSTANCE"
+          test -n "$GCE_ZONE"
+          case "$COMMITTEE_MODE" in
+            otp|firebase_email_only|local) ;;
+            *) echo "Unsupported committee registration mode" >&2; exit 2 ;;
+          esac
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          version: ">= 506.0.0"
+
+      - name: Update mode and verify health
+        run: |
+          set -Eeuo pipefail
+          remote_script=$(cat <<'REMOTE_SCRIPT'
+          set -Eeuo pipefail
+          env_file=/etc/yagapon/yagapon.env
+          deploy_env=/etc/yagapon/deploy.env
+          app_dir=/opt/yagapon
+          test -f "$env_file"
+          test -f "$deploy_env"
+          case "$COMMITTEE_MODE" in
+            otp|firebase_email_only|local) ;;
+            *) echo "Unsupported committee registration mode" >&2; exit 2 ;;
+          esac
+
+          tmp=$(mktemp /etc/yagapon/yagapon.env.XXXXXX)
+          cleanup() { rm -f -- "$tmp"; }
+          trap cleanup EXIT
+          awk -v mode="$COMMITTEE_MODE" '
+            BEGIN { replaced = 0 }
+            /^YAGAPON_COMMITTEE_REGISTRATION_MODE=/ {
+              if (!replaced) print "YAGAPON_COMMITTEE_REGISTRATION_MODE=" mode
+              replaced = 1
+              next
+            }
+            { print }
+            END {
+              if (!replaced) print "YAGAPON_COMMITTEE_REGISTRATION_MODE=" mode
+            }
+          ' "$env_file" > "$tmp"
+          chown --reference="$env_file" "$tmp"
+          chmod --reference="$env_file" "$tmp"
+          mv -f -- "$tmp" "$env_file"
+          trap - EXIT
+
+          systemctl restart yagapon
+          host_port=$(sed -n 's/^YAGAPON_HOST_PORT=//p' "$deploy_env" | tail -1)
+          host_port=${host_port:-8000}
+          for _ in $(seq 1 36); do
+            container_id=$(docker compose \
+              --project-directory "$app_dir" \
+              --env-file "$deploy_env" \
+              ps --status running --quiet yagapon)
+            if [[ -n "$container_id" ]] \
+              && systemctl is-active --quiet yagapon \
+              && [[ "$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" | sed -n 's/^YAGAPON_COMMITTEE_REGISTRATION_MODE=//p' | tail -1)" == "$COMMITTEE_MODE" ]] \
+              && curl --fail --silent --show-error --max-time 5 \
+                "http://127.0.0.1:${host_port}/ready" >/dev/null; then
+              echo "Committee registration mode is active: $COMMITTEE_MODE"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Bot did not become ready with committee mode $COMMITTEE_MODE" >&2
+          exit 1
+          REMOTE_SCRIPT
+          )
+          payload=$(printf '%s' "$remote_script" | base64 -w 0)
+          quoted_mode=$(printf '%q' "$COMMITTEE_MODE")
+          gcloud compute ssh "$GCE_INSTANCE" \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$GCE_ZONE" \
+            --tunnel-through-iap \
+            --command "printf '%s' '$payload' | base64 -d | sudo env COMMITTEE_MODE=$quoted_mode bash"
