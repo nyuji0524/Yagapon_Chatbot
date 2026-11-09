@@ -21,6 +21,9 @@ def test_committee_email_verification_defaults_to_enabled():
     assert compose["services"]["yagapon"]["environment"][
         "YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED"
     ] == "${YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED:-true}"
+    assert compose["services"]["yagapon"]["environment"][
+        "YAGAPON_COMMITTEE_REGISTRATION_MODE"
+    ] == "${YAGAPON_COMMITTEE_REGISTRATION_MODE:-}"
 
 
 def test_bot_and_worker_receive_the_same_curation_policy():

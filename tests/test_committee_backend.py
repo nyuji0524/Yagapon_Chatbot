@@ -51,6 +51,15 @@ async def test_registration_and_application_payloads_are_server_bound():
         email="student@keio.jp",
         bureau="IT局",
         grade="２年生",
+        display_name="矢上 太郎",
+    )
+    await backend.register_email_only(
+        guild_id=10,
+        discord_user_id=20,
+        email="student@keio.jp",
+        bureau="IT局",
+        grade="１年生",
+        display_name="矢上 太郎",
     )
     await backend.create_application(
         guildId="10",
@@ -71,7 +80,17 @@ async def test_registration_and_application_payloads_are_server_bound():
         "email": "student@keio.jp",
         "bureau": "IT局",
         "grade": "２年生",
+        "displayName": "矢上 太郎",
     }
-    assert backend.calls[1][1]["organizationId"] == "organization-1"
+    assert backend.calls[1][1] == {
+        "action": "register_email_only",
+        "guildId": "10",
+        "discordUserId": "20",
+        "email": "student@keio.jp",
+        "bureau": "IT局",
+        "grade": "１年生",
+        "displayName": "矢上 太郎",
+    }
+    assert backend.calls[2][1]["organizationId"] == "organization-1"
     assert organizations == [{"id": "organization-1", "name": "ITラボ"}]
     assert decisions == [{"id": "application-1"}]

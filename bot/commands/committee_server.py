@@ -112,10 +112,23 @@ def _position_role_summary(roles: Iterable[discord.Role]) -> str:
     return ", ".join(_position_role_names(roles)) or "なし"
 
 
-def _committee_email_verification_enabled() -> bool:
-    """Return the fail-safe email verification switch."""
+def _committee_registration_mode() -> str:
+    """Return otp, firebase_email_only, or local with legacy compatibility."""
+    configured = os.getenv("YAGAPON_COMMITTEE_REGISTRATION_MODE", "").strip().lower()
+    if configured in {"otp", "firebase_email_only", "local"}:
+        return configured
     value = os.getenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", "true")
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+    return "otp" if value.strip().lower() not in {"0", "false", "no", "off"} else "local"
+
+
+def _committee_email_verification_enabled() -> bool:
+    """Return whether OTP verification is active."""
+    return _committee_registration_mode() == "otp"
+
+
+def _committee_firebase_registration_enabled() -> bool:
+    """Return whether committee registration and applications use Firebase."""
+    return _committee_registration_mode() in {"otp", "firebase_email_only"}
 
 
 def _has_completed_registration(config, guild_id: int, member) -> bool:
@@ -179,6 +192,7 @@ def _channel_mention(guild: discord.Guild, name: str) -> str:
 
 def _role_panel_embed() -> discord.Embed:
     email_verification_enabled = _committee_email_verification_enabled()
+    firebase_registration_enabled = _committee_firebase_registration_enabled()
     completion_step = (
         "**3. 「登録を完了」から慶應メールを入力**"
         if email_verification_enabled
@@ -197,6 +211,12 @@ def _role_panel_embed() -> discord.Embed:
         color=discord.Color(COMMITTEE_COLOR),
     )
     embed.add_field(name="1️⃣ 登録時", value=registration_summary, inline=True)
+    if firebase_registration_enabled and not email_verification_enabled:
+        embed.add_field(
+            name="Firebase連携",
+            value="確認コードは使用せず、申告内容とやがサポ照合結果を保存します。",
+            inline=False,
+        )
     embed.add_field(
         name="2️⃣ 登録後（該当者のみ）",
         value="**企画長申告／役員申告**\n※両方を兼任できます",
@@ -385,7 +405,7 @@ async def _submit_position_request(
     if not guild or not isinstance(member, discord.Member) or role is None or request_channel is None:
         await _respond_ephemeral(interaction, "役職申請の設定が見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
         return
-    email_verification_enabled = _committee_email_verification_enabled()
+    firebase_registration_enabled = _committee_firebase_registration_enabled()
     if not _has_completed_registration(interaction.client.config, guild.id, member):
         requirement = "所属局・学年・慶應メール"
         await _respond_ephemeral(interaction, f"先に{requirement}の登録を完了してほしいぽん。")
@@ -394,7 +414,7 @@ async def _submit_position_request(
         await _respond_ephemeral(interaction, f"**{role.name}** は既に付いているぽん！")
         return
     await interaction.response.defer(ephemeral=True)
-    if email_verification_enabled:
+    if firebase_registration_enabled:
         kind = "project_leader" if role_name == "企画長" else "officer"
         try:
             result = await interaction.client.committee_backend.create_application(
@@ -432,7 +452,7 @@ async def _submit_position_request(
     embed.add_field(name="役職ロールID", value=str(role.id), inline=True)
     embed.add_field(name="申請種別", value=application_kind, inline=True)
     embed.add_field(name="申請ID", value=application_id, inline=False)
-    if not email_verification_enabled:
+    if not firebase_registration_enabled:
         embed.add_field(name="処理方式", value="Discord内の暫定申請", inline=False)
     if role_name == "企画長":
         embed.add_field(
@@ -467,7 +487,7 @@ class ProjectLeaderApplicationButton(discord.ui.Button):
         if not _has_completed_registration(interaction.client.config, guild.id, member):
             await _respond_ephemeral(interaction, "先に委員プロフィールの登録を完了してほしいぽん。")
             return
-        if not _committee_email_verification_enabled():
+        if not _committee_firebase_registration_enabled():
             await interaction.response.send_modal(ManualProjectLeaderModal())
             return
         await interaction.response.defer(ephemeral=True)
@@ -623,8 +643,18 @@ class RegistrationModal(discord.ui.Modal):
             await _respond_ephemeral(interaction, "先に所属局と学年の両方を選んでほしいぽん。")
             return
 
-        if not _committee_email_verification_enabled():
+        registration_mode = _committee_registration_mode()
+        if registration_mode == "local":
             await _complete_registration_without_verification(
+                interaction,
+                email=email,
+                bureau=bureau,
+                grade=grade,
+            )
+            return
+
+        if registration_mode == "firebase_email_only":
+            await _complete_firebase_email_only_registration(
                 interaction,
                 email=email,
                 bureau=bureau,
@@ -640,6 +670,7 @@ class RegistrationModal(discord.ui.Modal):
                 email=email,
                 bureau=bureau,
                 grade=grade,
+                display_name=member.display_name,
             )
         except CommitteeBackendError as exc:
             log.warning(
@@ -721,6 +752,7 @@ class EmailCodeModal(discord.ui.Modal):
                 guild_id=self.guild_id,
                 discord_user_id=self.member_id,
                 code=code,
+                display_name=getattr(interaction.user, "display_name", None),
             )
         except CommitteeBackendError as exc:
             message = {
@@ -872,6 +904,90 @@ async def _complete_registration_without_verification(
     )
 
 
+async def _complete_firebase_email_only_registration(
+    interaction: discord.Interaction,
+    *,
+    email: str,
+    bureau: str,
+    grade: str,
+) -> None:
+    guild = interaction.guild
+    member = interaction.user
+    if not guild or not isinstance(member, discord.Member):
+        await _respond_ephemeral(interaction, "サーバー内で実行してほしいぽん。")
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        result = await interaction.client.committee_backend.register_email_only(
+            guild_id=guild.id,
+            discord_user_id=member.id,
+            email=email,
+            bureau=bureau,
+            grade=grade,
+            display_name=member.display_name,
+        )
+    except CommitteeBackendError as exc:
+        log.warning(
+            "Committee email-only registration failed guild=%s member=%s status=%s",
+            guild.id,
+            member.id,
+            exc.status,
+        )
+        await interaction.followup.send(
+            "Firebaseへ委員登録を保存できなかったぽん。少し待ってからもう一度試してほしいぽん。",
+            ephemeral=True,
+        )
+        return
+
+    config = interaction.client.config
+    members = config.get_members(guild.id)
+    existing = members.get(str(member.id), {})
+    members[str(member.id)] = {
+        **existing,
+        "name": member.display_name,
+        "email": result["email"],
+        "bureau": result["bureau"],
+        "grade": result["grade"],
+        "email_verified": False,
+        "email_ownership_verified": False,
+        "registration_completed": True,
+        "registration_mode": "firebase_email_only",
+        "firebase_registration_synced": True,
+        "support_user_exists": result.get("userExists") is True,
+        "support_staff_info_exists": result.get("staffInfoExists") is True,
+        "support_uid": result.get("userUid"),
+        "support_departments": result.get("userDepartments") or [],
+        "support_status": "matched" if result.get("userExists") else "not_found",
+        "role": _position_role_summary(member.roles),
+        "roles": _position_role_names(member.roles),
+    }
+    await config.set_members(guild.id, members)
+    synced_roles = await _sync_pending_local_roles(interaction.client, guild, member)
+    support_line = (
+        "users登録あり"
+        if result.get("userExists")
+        else f"users登録なし。後から {YAGA_SUPPORT_URL} へサインインできるぽん。"
+    )
+    await interaction.followup.send(
+        "\n".join(
+            [
+                "✅ 委員プロフィールをFirebaseへ保存したぽん！",
+                f"表示名: **{member.display_name}**",
+                f"所属: **{result['bureau']} / {result['grade']}**",
+                f"やがサポ: {support_line}",
+                "確認コードは使用していないため、メールの所有確認は未実施だぽん。",
+                (
+                    f"暫定期間の承認済み役職 {synced_roles}件をFirebaseへ移行したぽん。"
+                    if synced_roles
+                    else "企画長・副局長・局長に該当する場合は、下から申告できるぽん。"
+                ),
+            ]
+        ),
+        view=PostRegistrationRoleView(),
+        ephemeral=True,
+    )
+
+
 def _embed_field_id(embed: discord.Embed, field_name: str) -> int | None:
     for field in embed.fields:
         if field.name == field_name:
@@ -914,10 +1030,10 @@ def _queue_local_role_for_firebase(
 
 
 async def _sync_pending_local_roles(bot, guild: discord.Guild, member: discord.Member) -> int:
-    """Replay locally approved roles after the member completes email verification."""
+    """Replay locally approved roles after Firebase registration completes."""
     members = bot.config.get_members(guild.id)
     record = members.get(str(member.id), {})
-    if record.get("email_verified") is not True:
+    if record.get("email_verified") is not True and record.get("registration_completed") is not True:
         return 0
     queue = record.get("firebase_role_sync_queue")
     if not isinstance(queue, list):
@@ -992,6 +1108,52 @@ async def _sync_pending_local_roles(bot, guild: discord.Guild, member: discord.M
         members[str(member.id)] = record
         await bot.config.set_members(guild.id, members)
     return synced
+
+
+async def _sync_email_only_registration(
+    bot,
+    guild: discord.Guild,
+    member: discord.Member,
+    record: dict,
+) -> bool:
+    """Backfill a registration collected during the previous local-only period."""
+    if record.get("firebase_registration_synced") is True or record.get("email_verified") is True:
+        return False
+    email = str(record.get("email") or "").strip().lower()
+    bureau = str(record.get("bureau") or "").strip()
+    grade = str(record.get("grade") or "").strip()
+    if not _is_keio_email(email) or bureau not in _role_names(BUREAU_ROLES) or grade not in GRADE_ROLES:
+        return False
+    result = await bot.committee_backend.register_email_only(
+        guild_id=guild.id,
+        discord_user_id=member.id,
+        email=email,
+        bureau=bureau,
+        grade=grade,
+        display_name=member.display_name,
+    )
+    record.update(
+        {
+            "name": member.display_name,
+            "email": result["email"],
+            "bureau": result["bureau"],
+            "grade": result["grade"],
+            "email_verified": False,
+            "email_ownership_verified": False,
+            "registration_completed": True,
+            "registration_mode": "firebase_email_only",
+            "firebase_registration_synced": True,
+            "support_user_exists": result.get("userExists") is True,
+            "support_staff_info_exists": result.get("staffInfoExists") is True,
+            "support_uid": result.get("userUid"),
+            "support_departments": result.get("userDepartments") or [],
+            "support_status": "matched" if result.get("userExists") else "not_found",
+        }
+    )
+    members = bot.config.get_members(guild.id)
+    members[str(member.id)] = record
+    await bot.config.set_members(guild.id, members)
+    return True
 
 
 async def _handle_position_request(interaction: discord.Interaction, *, approve: bool) -> None:
@@ -1189,7 +1351,7 @@ async def _sync_role_decision(bot, guild: discord.Guild, application: dict) -> N
 async def committee_role_sync_loop(bot) -> None:
     """Apply Yaga Support decisions to Discord with idempotent acknowledgement."""
     while not bot.is_closed():
-        if not _committee_email_verification_enabled():
+        if not _committee_firebase_registration_enabled():
             await asyncio.sleep(45)
             continue
         for guild in bot.guilds:
@@ -1206,16 +1368,33 @@ async def committee_role_sync_loop(bot) -> None:
                 for member_id, record in list(registration_records.items()):
                     if not isinstance(record, dict):
                         continue
-                    queue = record.get("firebase_role_sync_queue")
-                    if record.get("email_verified") is not True or not isinstance(queue, list):
-                        continue
-                    if not any(isinstance(item, dict) and item.get("status") != "synced" for item in queue):
-                        continue
                     try:
                         member = guild.get_member(int(member_id))
                     except (TypeError, ValueError):
                         member = None
-                    if member is not None:
+                    if member is None:
+                        continue
+                    if _committee_registration_mode() == "firebase_email_only":
+                        try:
+                            await _sync_email_only_registration(bot, guild, member, record)
+                        except CommitteeBackendError as exc:
+                            log.warning(
+                                "Committee registration backfill failed guild=%s member=%s status=%s",
+                                guild.id,
+                                member.id,
+                                exc.status,
+                            )
+                            continue
+                    queue = record.get("firebase_role_sync_queue")
+                    if (
+                        record.get("email_verified") is not True
+                        and record.get("registration_completed") is not True
+                    ) or not isinstance(queue, list):
+                        continue
+                    if any(
+                        isinstance(item, dict) and item.get("status") != "synced"
+                        for item in queue
+                    ):
                         await _sync_pending_local_roles(bot, guild, member)
                 decisions = await bot.committee_backend.list_decisions(guild.id)
                 for application in decisions:
