@@ -70,24 +70,35 @@ jobs:
             *) echo "Unsupported committee registration mode" >&2; exit 2 ;;
           esac
 
-          tmp=$(mktemp /etc/yagapon/yagapon.env.XXXXXX)
-          cleanup() { rm -f -- "$tmp"; }
+          runtime_tmp=$(mktemp /etc/yagapon/yagapon.env.XXXXXX)
+          deploy_tmp=$(mktemp /etc/yagapon/deploy.env.XXXXXX)
+          cleanup() { rm -f -- "$runtime_tmp" "$deploy_tmp"; }
           trap cleanup EXIT
-          awk -v mode="$COMMITTEE_MODE" '
-            BEGIN { replaced = 0 }
-            /^YAGAPON_COMMITTEE_REGISTRATION_MODE=/ {
-              if (!replaced) print "YAGAPON_COMMITTEE_REGISTRATION_MODE=" mode
-              replaced = 1
-              next
-            }
-            { print }
-            END {
-              if (!replaced) print "YAGAPON_COMMITTEE_REGISTRATION_MODE=" mode
-            }
-          ' "$env_file" > "$tmp"
-          chown --reference="$env_file" "$tmp"
-          chmod --reference="$env_file" "$tmp"
-          mv -f -- "$tmp" "$env_file"
+          render_mode() {
+            local source=$1
+            local destination=$2
+            awk -v mode="$COMMITTEE_MODE" '
+              BEGIN { replaced = 0 }
+              /^YAGAPON_COMMITTEE_REGISTRATION_MODE=/ {
+                if (!replaced) print "YAGAPON_COMMITTEE_REGISTRATION_MODE=" mode
+                replaced = 1
+                next
+              }
+              { print }
+              END {
+                if (!replaced) print "YAGAPON_COMMITTEE_REGISTRATION_MODE=" mode
+              }
+            ' "$source" > "$destination"
+            chown --reference="$source" "$destination"
+            chmod --reference="$source" "$destination"
+          }
+          # compose.yaml exposes this value through its environment mapping,
+          # so deploy.env wins over the service env_file. Keep both sources in
+          # sync to make the selected mode effective and visible to operators.
+          render_mode "$env_file" "$runtime_tmp"
+          render_mode "$deploy_env" "$deploy_tmp"
+          mv -f -- "$runtime_tmp" "$env_file"
+          mv -f -- "$deploy_tmp" "$deploy_env"
           trap - EXIT
 
           systemctl restart yagapon
