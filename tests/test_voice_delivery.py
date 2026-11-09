@@ -220,18 +220,17 @@ async def test_automatic_listen_leave_does_not_deliver_empty_minutes(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_bot_move_stops_capture_and_never_publishes_under_old_channel(monkeypatch):
+async def test_bot_move_marks_capture_and_reconnects_without_publishing(monkeypatch):
     bot, _member, before, _after, session = _automatic_leave_context()
     member = SimpleNamespace(id=999, guild=_member.guild)
     moved_to = SimpleNamespace(id=99, name="別のVC")
     session._capture_interrupted = False
     session._transcription_failed = False
     session.is_active = True
+    session._reconnect_voice_capture = AsyncMock(return_value=True)
     monkeypatch.setattr("bot.voice.get_session", lambda _guild_id: session)
-    monkeypatch.setattr(
-        "bot.voice.leave_voice",
-        AsyncMock(side_effect=RuntimeError("capture interrupted")),
-    )
+    leave = AsyncMock(side_effect=RuntimeError("capture interrupted"))
+    monkeypatch.setattr("bot.voice.leave_voice", leave)
 
     await YagaPon.on_voice_state_update(
         bot,
@@ -241,22 +240,21 @@ async def test_bot_move_stops_capture_and_never_publishes_under_old_channel(monk
     )
 
     assert session._capture_interrupted is True
-    assert session.is_active is False
+    assert session.is_active is True
+    session._reconnect_voice_capture.assert_awaited_once()
+    leave.assert_not_awaited()
     session.publish_knowledge.assert_not_awaited()
-    session._mark_recording_sink.assert_awaited_with(
-        "capture_interrupted",
-        error="RuntimeError",
-    )
 
 
 @pytest.mark.asyncio
-async def test_bot_disconnect_metadata_failure_still_runs_leave(monkeypatch):
+async def test_bot_disconnect_metadata_failure_still_attempts_reconnect(monkeypatch):
     bot, _member, before, _after, session = _automatic_leave_context()
     member = SimpleNamespace(id=999, guild=_member.guild)
     session._capture_interrupted = False
     session._transcription_failed = False
     session.is_active = True
     session.recording_sink.mark.side_effect = OSError("metadata disk unavailable")
+    session._reconnect_voice_capture = AsyncMock(return_value=True)
     leave = AsyncMock(side_effect=RuntimeError("capture interrupted"))
     monkeypatch.setattr("bot.voice.get_session", lambda _guild_id: session)
     monkeypatch.setattr("bot.voice.leave_voice", leave)
@@ -268,9 +266,24 @@ async def test_bot_disconnect_metadata_failure_still_runs_leave(monkeypatch):
         SimpleNamespace(channel=None),
     )
 
-    leave.assert_awaited_once_with(member.guild.id)
+    leave.assert_not_awaited()
+    session._reconnect_voice_capture.assert_awaited_once()
     assert session._capture_interrupted is True
-    assert session.is_active is False
+    assert session.is_active is True
+
+
+@pytest.mark.asyncio
+async def test_empty_channel_event_does_not_stop_replacement_receiver(monkeypatch):
+    bot, member, before, after, session = _automatic_leave_context()
+    session.receiver_recovery_in_progress = True
+    leave = AsyncMock(return_value=None)
+    monkeypatch.setattr("bot.voice.get_session", lambda _guild_id: session)
+    monkeypatch.setattr("bot.voice.leave_voice", leave)
+
+    await YagaPon.on_voice_state_update(bot, member, before, after)
+
+    leave.assert_not_awaited()
+    session.claim_delivery.assert_not_awaited()
 
 
 @pytest.mark.asyncio

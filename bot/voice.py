@@ -23,6 +23,7 @@ from bot.ai_retry import RateLimitCircuitBreaker, RateLimitExceeded, new_genai_c
 from bot.corpus import sensitive_request_response
 from bot.meeting_time import display_meeting_date
 from bot.minutes_generation import generate_minutes
+from bot.pycord_voice_receive import install_pycord_voice_receive_fix
 from bot.recording import (
     PersistentPCMSink,
     RecordingLimitExceeded,
@@ -39,6 +40,11 @@ from bot.transcription import transcribe_audio
 
 log = logging.getLogger("yagapon.voice")
 
+# Install before any VoiceClient starts its receive thread.  The dependency is
+# pinned to an experimental upstream receive commit; see the compatibility
+# module for the two fail-open DAVE paths it corrects.
+install_pycord_voice_receive_fix()
+
 # リアルタイム処理の間隔（秒）
 REALTIME_INTERVAL_CHAT = 5  # chatモード: 短い間隔で即応答
 REALTIME_INTERVAL_MEETING = 15  # meetingモード: 会議の邪魔にならないよう長め
@@ -49,6 +55,7 @@ CAPTURE_ALERT_COOLDOWN_SECONDS = 300
 CAPTURE_NOTICE_TIMEOUT_SECONDS = 5
 CAPTURE_DURABILITY_INTERVAL_SECONDS = 10
 CAPTURE_DURABILITY_TIMEOUT_SECONDS = 10
+CAPTURE_DAVE_READY_TIMEOUT_SECONDS = 15
 STOP_RECORDING_TIMEOUT_SECONDS = 10
 TRANSCRIPTION_CHUNK_BYTES_REALTIME = 5 * 1024 * 1024
 TRANSCRIPTION_CHUNK_BYTES_LISTEN = 50 * 1024 * 1024
@@ -246,6 +253,47 @@ class VoiceSession:
         self._start_abort_succeeded = False
         self._recording_priority_lease: RecordingActivityLease | None = None
         self._receiver_recovery_lock = asyncio.Lock()
+
+    @property
+    def receiver_recovery_in_progress(self) -> bool:
+        """Whether the voice receiver currently owns the reconnect path."""
+
+        return self._receiver_recovery_lock.locked()
+
+    async def _wait_for_dave_ready(self, voice_client) -> None:
+        """Do not start a decoder while Discord's DAVE keys are unavailable.
+
+        The pinned experimental Pycord receiver otherwise forwards encrypted
+        media to Opus during the MLS handshake.  Failing the start is safer
+        than creating a plausible-looking PCM archive made from concealment
+        frames.
+        """
+
+        is_dave_connection = getattr(voice_client, "is_dave_connection", None)
+        if not callable(is_dave_connection) or not is_dave_connection():
+            return
+        try:
+            timeout = max(
+                1.0,
+                float(
+                    os.environ.get(
+                        "YAGAPON_CAPTURE_DAVE_READY_TIMEOUT_SECONDS",
+                        CAPTURE_DAVE_READY_TIMEOUT_SECONDS,
+                    )
+                ),
+            )
+        except ValueError:
+            timeout = float(CAPTURE_DAVE_READY_TIMEOUT_SECONDS)
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            connection = getattr(voice_client, "_connection", None)
+            session = getattr(connection, "dave_session", None)
+            if session is not None and getattr(session, "ready", False):
+                return
+            if self._intentional_stop or self._start_abort_requested:
+                raise asyncio.CancelledError
+            await asyncio.sleep(0.25)
+        raise RuntimeError("Discord DAVE voice decryption did not become ready")
 
     def _activate_recording_priority(self) -> None:
         if self._recording_priority_lease is None:
@@ -589,6 +637,7 @@ class VoiceSession:
                 raise asyncio.CancelledError
             if not self.voice_client or not self.voice_client.is_connected():
                 raise RuntimeError("Voice client did not connect")
+            await self._wait_for_dave_ready(self.voice_client)
             self.voice_client.start_recording(
                 self.recording_sink,
                 self._recording_finished,
@@ -761,6 +810,7 @@ class VoiceSession:
                     # This event may have been set by an earlier receiver. The
                     # next normal stop must wait for the new receiver's tail.
                     self._recording_done.clear()
+                    await self._wait_for_dave_ready(voice_client)
                     voice_client.start_recording(
                         replacement_sink,
                         self._recording_finished,
@@ -1462,6 +1512,7 @@ class VoiceSession:
                 self.recording_sink = replacement
                 replacement_adopted = True
                 self._recording_done.clear()
+                await self._wait_for_dave_ready(new_client)
                 new_client.start_recording(
                     replacement,
                     self._recording_finished,
@@ -3445,6 +3496,17 @@ async def leave_voice(guild_id: int) -> str | None:
 
 def get_session(guild_id: int) -> VoiceSession | None:
     return _sessions.get(guild_id)
+
+
+def has_active_voice_sessions() -> bool:
+    """Return whether capture/start/stop work currently owns voice resources."""
+
+    return any(
+        session.is_active
+        or session._starting
+        or (session._stop_task is not None and not session._stop_task.done())
+        for session in _sessions.values()
+    )
 
 
 async def checkpoint_voice_sessions_for_shutdown(

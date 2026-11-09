@@ -5,6 +5,7 @@ import asyncio
 import discord
 
 from bot.authorization import require_guild_admin
+from bot.recording_import import import_drive_recording
 from bot.recording_replay import find_recording_artifact, list_recording_artifacts
 
 
@@ -28,6 +29,77 @@ async def _require_operator(ctx, bot) -> bool:
 
 def register(bot):
     group = bot.create_group("recording", "保存済み録音の確認・議事録作成")
+
+    @group.command(
+        name="import_drive",
+        description="Driveの録音URLから文字起こしと議事録を作成する",
+    )
+    @discord.default_permissions(administrator=True)
+    @discord.option(
+        "drive_url",
+        description="drive_set配下に置いた音声・動画ファイルの共有URL",
+    )
+    @discord.option("title", description="会議名（Google Docsの名前に使用）")
+    @discord.option(
+        "quality",
+        description="通常は低コスト。重要会議だけ高精度を選択",
+        choices=[
+            discord.OptionChoice("標準（低コスト・推奨）", "standard"),
+            discord.OptionChoice("高精度（話者分離・高コスト）", "high_accuracy"),
+        ],
+        default="standard",
+    )
+    async def recording_import_drive(
+        ctx: discord.ApplicationContext,
+        drive_url: str,
+        title: str,
+        quality: str = "standard",
+    ):
+        if not await require_guild_admin(ctx):
+            return
+        from bot.voice import has_active_voice_sessions
+
+        if has_active_voice_sessions():
+            await ctx.respond(
+                "録音中はDrive取込とAI処理を開始できません。録音保存後にもう一度実行してください。",
+                ephemeral=True,
+            )
+            return
+        if bot.recording_replays.active():
+            await ctx.respond(
+                "別の文字起こし・議事録ジョブが実行中です。完了後にもう一度実行してください。",
+                ephemeral=True,
+            )
+            return
+        await ctx.defer(ephemeral=True)
+        try:
+            category = getattr(ctx.channel, "category", None)
+            imported = await asyncio.to_thread(
+                import_drive_recording,
+                bot.config,
+                guild_id=ctx.guild_id,
+                channel_id=ctx.channel.id,
+                category_id=getattr(category, "id", None),
+                category_name=getattr(category, "name", ""),
+                actor_id=ctx.author.id,
+                drive_url=drive_url,
+                title=title,
+            )
+            job = bot.recording_replays.start(
+                artifact=imported.artifact,
+                target_channel=ctx.channel,
+                retranscribe=True,
+                transcription_quality=quality,
+                review_only=False,
+            )
+        except (FileNotFoundError, PermissionError, ValueError, RuntimeError) as exc:
+            await ctx.followup.send(f"取込を開始できません: {exc}", ephemeral=True)
+            return
+        await ctx.followup.send(
+            f"Drive録音 **{imported.source_name}** を保存し、ジョブ `{job.id}` を開始しました。"
+            "完了後にこのチャンネルへ文字起こし・要約・議事録を投稿します。",
+            ephemeral=True,
+        )
 
     @group.command(name="minutes", description="保存済み録音から文字起こしと議事録を作成する")
     @discord.default_permissions(administrator=True)

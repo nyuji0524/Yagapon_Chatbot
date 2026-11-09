@@ -3,6 +3,7 @@
 import io
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -27,6 +28,7 @@ class DriveDocument:
     modified_time: str
     web_view_link: str
     parents: list[str]
+    size: int = 0
     removed: bool = False
 
 
@@ -78,7 +80,7 @@ class DriveReader:
         """Resolve one explicitly submitted Drive file, including Shared Drives."""
         item = self._service.files().get(
             fileId=file_id,
-            fields="id,name,mimeType,modifiedTime,webViewLink,parents,trashed",
+            fields="id,name,mimeType,modifiedTime,webViewLink,parents,size,trashed",
             supportsAllDrives=True,
         ).execute(num_retries=5)
         if item.get("trashed"):
@@ -104,7 +106,7 @@ class DriveReader:
                 q=query,
                 pageSize=1000,
                 pageToken=page_token,
-                fields="nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,parents,trashed)",
+                fields="nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,parents,size,trashed)",
             ).execute(num_retries=5)
             batch = [self._to_document(item) for item in response.get("files", [])]
             documents.extend(doc for doc in batch if self._is_in_scope(doc))
@@ -127,7 +129,7 @@ class DriveReader:
                     pageSize=1000,
                     fields=(
                         "nextPageToken,newStartPageToken,changes(removed,fileId,"
-                        "file(id,name,mimeType,modifiedTime,webViewLink,parents,trashed))"
+                        "file(id,name,mimeType,modifiedTime,webViewLink,parents,size,trashed))"
                     ),
                 ).execute(num_retries=5)
             except HttpError as exc:
@@ -174,6 +176,48 @@ class DriveReader:
             _, done = downloader.next_chunk(num_retries=5)
         return output.getvalue().decode("utf-8", errors="replace")
 
+    def download_binary(
+        self,
+        document: DriveDocument,
+        destination: Path,
+        *,
+        max_bytes: int,
+    ) -> int:
+        """Download one non-Google binary with a strict byte ceiling."""
+
+        if document.mime_type in EXPORT_TYPES or document.mime_type.startswith(
+            "application/vnd.google-apps."
+        ):
+            raise ValueError("Google形式のファイルは録音としてダウンロードできません")
+        if max_bytes <= 0:
+            raise ValueError("download limit must be positive")
+        if document.size and document.size > max_bytes:
+            raise ValueError("録音ファイルが大きすぎます")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        request = self._service.files().get_media(
+            fileId=document.file_id,
+            supportsAllDrives=True,
+        )
+        try:
+            with destination.open("wb") as output:
+                downloader = MediaIoBaseDownload(
+                    output,
+                    request,
+                    chunksize=4 * 1024 * 1024,
+                )
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk(num_retries=5)
+                    if output.tell() > max_bytes:
+                        raise ValueError("録音ファイルが大きすぎます")
+                output.flush()
+                os.fsync(output.fileno())
+            destination.chmod(0o600)
+            return destination.stat().st_size
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+
     def is_in_scope(self, document: DriveDocument) -> bool:
         """Return whether an explicitly resolved file belongs to the configured folder tree."""
         return self._is_in_scope(document)
@@ -219,4 +263,5 @@ class DriveReader:
             modified_time=item.get("modifiedTime") or "",
             web_view_link=item.get("webViewLink") or "",
             parents=item.get("parents") or [],
+            size=int(item.get("size") or 0),
         )
