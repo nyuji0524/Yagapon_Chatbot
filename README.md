@@ -95,6 +95,7 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 | `/recording list` | 再生可能な保存録音・文字起こしを確認（Bot所有者のみ） |
 | `/recording minutes <session_id> [quality]` | 保存録音から議事録を作成。既定は低コスト、重要会議は専用Transcribeも選択可能 |
 | `/recording replay <session_id>` | `/leave` 相当の議事録生成を元データ非破壊で再実行 |
+| `/recording import_drive <drive_url> <title> [quality]` | `/drive_set`配下の録音・動画を取り込み、文字起こし・要約・議事録を生成（管理者のみ） |
 | `/member sync` | サーバーメンバーをロールから自動登録 |
 | `/member roles` | 役職・担当・学年のロールを分類 |
 | `/member register <name> [@user]` | 呼び名を設定 |
@@ -249,6 +250,9 @@ YAGAPON_CAPTURE_HEALTH_MAX_SILENCE_SECONDS=300
 YAGAPON_CAPTURE_ALERT_COOLDOWN_SECONDS=300
 YAGAPON_CAPTURE_DURABILITY_INTERVAL_SECONDS=10
 YAGAPON_STOP_RECORDING_TIMEOUT_SECONDS=10
+YAGAPON_CAPTURE_DAVE_READY_TIMEOUT_SECONDS=15
+YAGAPON_MAX_IMPORTED_SOURCE_BYTES=1073741824
+YAGAPON_MAX_IMPORTED_DURATION_SECONDS=14400
 YAGAPON_KNOWLEDGE_GUILD_ID=your_discord_guild_id
 YAGAPON_KNOWLEDGE_ALLOWED_GUILD_IDS=your_discord_guild_id
 YAGAPON_MEETING_EXPORT_CHANNEL_IDS=
@@ -329,6 +333,10 @@ docker compose up --build
 ```
 
 コンテナにはffmpeg、libopus、音声受信用Pycordの固定コミットが含まれる。設定と音声サンプルは`data/`に永続化される。VC録音は`data/recordings/`へPCMと受信順timelineを非バッファ書込みし、既定10秒ごとに全トラックを`fsync`するため、メモリ量を録音時間に依存させずプロセス異常終了時の末尾損失も抑える。逐語文字起こしは議事録とは別に`data/transcripts/`とGoogle Docsへ保存し、同じ場所の`*.provenance.json`に最終文字起こしの完全性と録音経路の健全性を保存する。正常配信・復旧・再処理の成否を問わず、PCM、timeline、セッションmetadataは自動削除せず、明示削除まで再処理可能な状態で保持する。起動時のretention cleanupも録音ディレクトリを変更しない。ディスク空き容量の監視と、確認後の明示的な削除は運用者の責任で行う。
+
+`/recording import_drive`は、同じサーバーで`/drive_set`したフォルダ配下のGoogle Driveファイルだけを受け付ける。録音・動画を一時ダウンロードし、ffmpegで48kHz stereo PCMへストリーム変換しながら通常の耐久録音形式へ保存するため、元ファイルとPCMを同時にメモリへ載せない。既定では1GiB・4時間を上限とし、変換後は通常の再処理経路で文字起こし、要約、議事録、Drive出力を作る。任意の外部URLはSSRFと権限漏えいを避けるため受け付けない。
+
+Discordの音声E2EE（DAVE）は受信準備完了後に録音を開始し、準備前の暗号化packetや復号に失敗したpacketをOpusへ渡さない。一時切断時は既存セッションを終了せず、DAVEを含む受信状態を再確立して同じ耐久録音へ追記する。復旧処理中は「人がいない」判定による自動退出を抑止する。
 
 録音中に既定5分間PCMが増えない場合は、実際に全員が無言のケースも含む運用警告を元VCの内蔵テキストchatへ一度だけ通常通知する。PCMの増加を確認すると静かな復旧通知を一度だけ送る。警告後も録音は継続するが、終了まで新しいPCMを一度も確認できなければ完全性を証明できないため自動議事録公開を止め、保存済みPCMからの手動再処理対象にする。Discord切断・recorder停止、容量上限、PCM/timeline/metadataの書込異常、fsync/cleanup異常は即座に完全性障害として警告し、不完全な自動公開を止める。通知はincident状態とcooldownで抑制し、メンションを許可しない。
 

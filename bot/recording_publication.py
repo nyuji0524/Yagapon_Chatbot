@@ -28,6 +28,9 @@ APPROVED_SOURCE_EXPORT_REASONS = frozenset(
     {
         "explicit-channel-allowlist",
         "guildwide-channel-audience",
+        # An administrator explicitly imports a Drive recording from the
+        # configured guild folder in a non-protected Discord channel.
+        "operator-explicit-import",
     }
 )
 

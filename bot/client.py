@@ -494,7 +494,6 @@ class YagaPon(discord.Bot):
             interruption_reason = (
                 "bot-moved" if after.channel is not None else "bot-disconnected"
             )
-            session.is_active = False
             # Metadata failure must not skip stop/fsync. The session helper
             # latches the integrity failure in memory and absorbs mark errors.
             mark_interrupted = getattr(session, "_mark_capture_interrupted", None)
@@ -512,9 +511,49 @@ class YagaPon(discord.Bot):
                     )
                 )
 
+            # An involuntary Discord voice disconnect is not a user-requested
+            # `/leave`.  Finalizing here races the receiver watchdog and can
+            # tear down the replacement VoiceClient just after it reconnects.
+            # Keep the session active, let the single reconnect lock own the
+            # transition, and retain the sticky interruption marker so the
+            # gap is never presented as a complete recording.
+            reconnect = getattr(session, "_reconnect_voice_capture", None)
+            if callable(reconnect):
+                try:
+                    await reconnect()
+                except Exception:
+                    log.exception(
+                        "Immediate voice reconnect failed for guild %s; watchdog will retry",
+                        member.guild.id,
+                    )
+            if capture_notice_task is not None:
+                await asyncio.gather(capture_notice_task, return_exceptions=True)
+            return
+
         # VCに残っているのがbotだけか確認
-        humans = [] if bot_departed_source else [m for m in before.channel.members if not m.bot]
+        await asyncio.sleep(0)
+        live_channel = member.guild.get_channel(session.channel.id) or session.channel
+        humans = [m for m in live_channel.members if not m.bot]
         if len(humans) == 0:
+            # Voice reconnect and member-cache updates are independent Discord
+            # events.  Never allow an empty-channel event from the old voice
+            # generation to stop the replacement receiver.
+            if getattr(session, "receiver_recovery_in_progress", False):
+                log.warning(
+                    "Deferring empty-channel leave during voice recovery guild=%s",
+                    member.guild.id,
+                )
+                return
+            try:
+                connected = bool(session.voice_client.is_connected())
+            except Exception:
+                connected = False
+            if not connected:
+                log.warning(
+                    "Deferring empty-channel leave while voice is disconnected guild=%s",
+                    member.guild.id,
+                )
+                return
             log.info(f"VC {before.channel.name} に誰もいなくなったので自動退出")
 
             if not await session.claim_delivery():
