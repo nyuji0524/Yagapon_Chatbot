@@ -89,6 +89,7 @@ class CommitteeBackend:
         email: str,
         bureau: str,
         grade: str,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             self.registration_url,
@@ -99,6 +100,30 @@ class CommitteeBackend:
                 "email": email,
                 "bureau": bureau,
                 "grade": grade,
+                "displayName": display_name,
+            },
+        )
+
+    async def register_email_only(
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: int,
+        email: str,
+        bureau: str,
+        grade: str,
+        display_name: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._post(
+            self.registration_url,
+            {
+                "action": "register_email_only",
+                "guildId": str(guild_id),
+                "discordUserId": str(discord_user_id),
+                "email": email,
+                "bureau": bureau,
+                "grade": grade,
+                "displayName": display_name,
             },
         )
 
@@ -108,6 +133,7 @@ class CommitteeBackend:
         guild_id: int,
         discord_user_id: int,
         code: str,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             self.registration_url,
@@ -116,6 +142,7 @@ class CommitteeBackend:
                 "guildId": str(guild_id),
                 "discordUserId": str(discord_user_id),
                 "code": code,
+                "displayName": display_name,
             },
         )
 

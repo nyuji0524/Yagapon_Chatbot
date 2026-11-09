@@ -20,6 +20,8 @@ from bot.commands.committee_server import (
     _bot_can_run_committee_setup,
     _bot_guide_embed,
     _committee_email_verification_enabled,
+    _committee_firebase_registration_enabled,
+    _committee_registration_mode,
     _embed_field_id,
     _ensure_category,
     _ensure_forum,
@@ -38,6 +40,7 @@ from bot.commands.committee_server import (
     _replace_role_group,
     _role_panel_embed,
     _roles_after_position_approval,
+    _sync_email_only_registration,
     _sync_pending_local_roles,
     _sync_role_decision,
 )
@@ -66,6 +69,7 @@ def test_all_28_liaison_channels_are_declared_once():
 
 
 def test_email_verification_switch_is_fail_safe(monkeypatch):
+    monkeypatch.delenv("YAGAPON_COMMITTEE_REGISTRATION_MODE", raising=False)
     monkeypatch.delenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", raising=False)
     assert _committee_email_verification_enabled() is True
 
@@ -74,8 +78,24 @@ def test_email_verification_switch_is_fail_safe(monkeypatch):
         assert _committee_email_verification_enabled() is False
 
 
-def test_role_panel_explains_temporary_email_input_only_mode(monkeypatch):
+def test_explicit_firebase_email_only_mode_uses_backend_without_otp(monkeypatch):
+    monkeypatch.setenv("YAGAPON_COMMITTEE_REGISTRATION_MODE", "firebase_email_only")
+
+    assert _committee_registration_mode() == "firebase_email_only"
+    assert _committee_email_verification_enabled() is False
+    assert _committee_firebase_registration_enabled() is True
+
+
+def test_legacy_false_switch_remains_local_only(monkeypatch):
+    monkeypatch.delenv("YAGAPON_COMMITTEE_REGISTRATION_MODE", raising=False)
     monkeypatch.setenv("YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED", "false")
+
+    assert _committee_registration_mode() == "local"
+    assert _committee_firebase_registration_enabled() is False
+
+
+def test_role_panel_explains_temporary_email_input_only_mode(monkeypatch):
+    monkeypatch.setenv("YAGAPON_COMMITTEE_REGISTRATION_MODE", "firebase_email_only")
 
     embed = _role_panel_embed()
 
@@ -83,6 +103,7 @@ def test_role_panel_explains_temporary_email_input_only_mode(monkeypatch):
     assert embed.fields[0].value == "**所属局・学年 → 慶應メール**"
     assert "ご自身でサーバーの表示名を本名に変更して下さい。" in embed.description
     assert "Firebase側の準備完了後" not in embed.description
+    assert any("申告内容とやがサポ照合結果を保存" in field.value for field in embed.fields)
 
 
 def test_overwrite_signature_compares_ids_and_permission_bits():
@@ -218,6 +239,82 @@ async def test_verified_member_replays_local_role_to_firebase():
         application_id="firebase-1",
     )
     assert record["firebase_role_sync_queue"][0]["status"] == "synced"
+
+
+@pytest.mark.asyncio
+async def test_local_registration_is_backfilled_to_firebase_email_only_mode():
+    record = {
+        "name": "旧表示名",
+        "email": "first-year@keio.jp",
+        "bureau": "IT局",
+        "grade": "１年生",
+        "email_verified": False,
+        "registration_completed": True,
+        "registration_mode": "email_collected_verification_disabled",
+    }
+    members = {"20": record}
+    backend = SimpleNamespace(
+        register_email_only=AsyncMock(
+            return_value={
+                "email": "first-year@keio.jp",
+                "bureau": "IT局",
+                "grade": "１年生",
+                "userExists": True,
+                "staffInfoExists": False,
+                "userUid": "uid-20",
+                "userDepartments": ["IT局"],
+            }
+        )
+    )
+    config = SimpleNamespace(
+        get_members=lambda _guild_id: members,
+        set_members=AsyncMock(),
+    )
+    bot = SimpleNamespace(committee_backend=backend, config=config)
+    guild = SimpleNamespace(id=10)
+    member = SimpleNamespace(id=20, display_name="矢上 一郎")
+
+    changed = await _sync_email_only_registration(bot, guild, member, record)
+
+    assert changed is True
+    backend.register_email_only.assert_awaited_once_with(
+        guild_id=10,
+        discord_user_id=20,
+        email="first-year@keio.jp",
+        bureau="IT局",
+        grade="１年生",
+        display_name="矢上 一郎",
+    )
+    assert record["firebase_registration_synced"] is True
+    assert record["registration_mode"] == "firebase_email_only"
+    assert record["email_ownership_verified"] is False
+    assert record["support_uid"] == "uid-20"
+    config.set_members.assert_awaited_once_with(10, members)
+
+
+@pytest.mark.asyncio
+async def test_verified_registration_is_not_downgraded_by_email_only_backfill():
+    record = {
+        "email": "verified@keio.jp",
+        "bureau": "IT局",
+        "grade": "１年生",
+        "email_verified": True,
+        "registration_completed": True,
+    }
+    backend = SimpleNamespace(register_email_only=AsyncMock())
+    config = SimpleNamespace(get_members=lambda _guild_id: {"20": record}, set_members=AsyncMock())
+    bot = SimpleNamespace(committee_backend=backend, config=config)
+
+    changed = await _sync_email_only_registration(
+        bot,
+        SimpleNamespace(id=10),
+        SimpleNamespace(id=20, display_name="矢上 一郎"),
+        record,
+    )
+
+    assert changed is False
+    backend.register_email_only.assert_not_awaited()
+    config.set_members.assert_not_awaited()
 
 
 def test_committee_setup_requires_bot_administrator_permission():

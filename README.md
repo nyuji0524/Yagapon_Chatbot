@@ -66,7 +66,8 @@ Discordの会話を学習し、RAG（検索拡張生成）で質問に回答。�
 - `/committee_setup` で28th向けロール・カテゴリ・チャンネル・操作パネルを重複なく一括整備
 - 実行者にはDiscordのAdministrator権限を持つ `サーバー管理者` ロールを付与
 - 表示名は本人がサーバープロフィールで変更し、所属局・学年（`１年生`〜`３年生`）を選んでから登録。通常は慶應メール認証を行い、登録後だけ企画長・役員を個別申請でき、兼任にも対応
-- `YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED=false` の期間も慶應メール入力は必須とし、確認コード送信・Functions照合だけを省略してDiscord内で登録・役職申請・承認を完結できる（既定値は安全側の `true`）
+- `YAGAPON_COMMITTEE_REGISTRATION_MODE` で登録方式を切り替える。`otp` は確認コードとFirebase保存、`firebase_email_only` は確認コードなしでFirebase保存・やがサポ照合、`local` は従来のDiscord内だけの暫定登録（既定は`otp`）
+- 旧設定 `YAGAPON_COMMITTEE_EMAIL_VERIFICATION_ENABLED` は新設定が未指定の場合だけ互換利用する
 - 暫定期間にDiscordで承認した企画長・副局長・局長は同期待ちとして保持し、認証を再有効化して本人のメール認証が完了するとFunctionsへ申請・承認を再送してFirebaseへ反映する
 - 慶應メールはサーバー資格情報でYaga Supportのusers/staffInfosと照合し、UID確定は非公開申請の管理者承認後に行う。未登録・照合保留でもDiscord登録は継続
 - 全28通りの局間連絡は、関係する2局と執行部だけが見えるようDiscord側で手動整備
