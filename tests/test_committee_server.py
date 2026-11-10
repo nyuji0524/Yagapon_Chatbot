@@ -434,6 +434,7 @@ def test_project_organizations_are_sorted_before_discord_option_limit():
         "屋外企画",
         "この中にない",
     ]
+    assert select.options[-1].description == "新企画や登録漏れなど"
 
 
 @pytest.mark.asyncio
