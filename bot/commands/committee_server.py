@@ -550,7 +550,7 @@ class ProjectOrganizationSelect(discord.ui.Select):
             discord.SelectOption(
                 label="この中にない",
                 value="__not_listed__",
-                description="新企画・登録漏れ・誤りを手動で確認します",
+                description="新企画や登録漏れなど",
                 emoji="🔑",
             )
         )
@@ -975,7 +975,6 @@ async def _complete_firebase_email_only_registration(
                 f"表示名: **{member.display_name}**",
                 f"所属: **{result['bureau']} / {result['grade']}**",
                 f"やがサポ: {support_line}",
-                "確認コードは使用していないため、メールの所有確認は未実施だぽん。",
                 (
                     f"暫定期間の承認済み役職 {synced_roles}件をFirebaseへ移行したぽん。"
                     if synced_roles
