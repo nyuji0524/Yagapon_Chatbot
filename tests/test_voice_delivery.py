@@ -320,6 +320,38 @@ def _registered_voice_commands():
 
 
 @pytest.mark.asyncio
+async def test_join_notice_failure_keeps_started_recording_active(monkeypatch):
+    join = _registered_voice_commands()["join"]
+    destination = SimpleNamespace(send=AsyncMock(side_effect=[None, TimeoutError()]))
+    channel = SimpleNamespace(id=10, name="会議用")
+    member = SimpleNamespace(id=42, voice=SimpleNamespace(channel=channel))
+    guild = SimpleNamespace(get_member=lambda _member_id: member)
+    ctx = SimpleNamespace(
+        guild_id=1,
+        guild=guild,
+        author=member,
+        defer=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+        respond=AsyncMock(),
+    )
+    session = SimpleNamespace(add_meeting_material=AsyncMock())
+    start = AsyncMock(return_value=session)
+    stop = AsyncMock()
+    monkeypatch.setattr(voice_cmd, "require_registered_member", AsyncMock(return_value=True))
+    monkeypatch.setattr(voice_cmd, "get_session", lambda _guild_id: None)
+    monkeypatch.setattr(voice_cmd, "resolve_minutes_notification_channel", lambda *_args: destination)
+    monkeypatch.setattr(voice_cmd, "join_voice", start)
+    monkeypatch.setattr(voice_cmd, "leave_voice", stop)
+
+    await join(ctx, "listen")
+
+    start.assert_awaited_once()
+    stop.assert_not_awaited()
+    assert destination.send.await_count == 2
+    assert "録音は継続" in ctx.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_recording_status_reports_wall_audio_and_track_counts(monkeypatch):
     command = _registered_voice_commands()["recording_status"]
     channel = SimpleNamespace(id=10)
