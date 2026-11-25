@@ -19,6 +19,7 @@ from bot.commands.committee_server import (
     SelfRolePanelView,
     _bot_can_run_committee_setup,
     _bot_guide_embed,
+    _committee_adoption_inventory,
     _committee_email_verification_enabled,
     _committee_firebase_registration_enabled,
     _committee_registration_mode,
@@ -68,6 +69,41 @@ def test_all_28_liaison_channels_are_declared_once():
         assert first_bureau != second_bureau
         channel_names.append(channel_name)
     assert len(channel_names) == len(set(channel_names)) == 28
+
+
+def test_adoption_inventory_accepts_production_channel_alias_without_mutation():
+    class RankedRole(SimpleNamespace):
+        def __gt__(self, other):
+            return self.position > other.position
+
+    expected_names = [item[0] for item in BUREAU_ROLES] + list(GRADE_ROLES) + list(POSITION_ROLES)
+    expected_names.append(SERVER_ADMIN_ROLE)
+    roles = [RankedRole(id=index, name=name, position=index) for index, name in enumerate(expected_names, 1)]
+    top_role = RankedRole(id=999, name="おしゃべりやがぽん", position=999)
+    category = SimpleNamespace(id=100, name="03｜会議")
+    channels = [
+        SimpleNamespace(id=1, name="局選択", category_id=None),
+        SimpleNamespace(id=2, name="ロール申請🔑", category_id=None),
+        SimpleNamespace(id=3, name="報告", category_id=None),
+        SimpleNamespace(id=4, name="鍵管理状況", category_id=None),
+        SimpleNamespace(id=5, name="209利用申請", category_id=None),
+        SimpleNamespace(id=6, name="議事録", category_id=category.id),
+    ]
+    guild = SimpleNamespace(
+        roles=roles,
+        channels=channels,
+        text_channels=channels,
+        categories=[category],
+        me=SimpleNamespace(top_role=top_role),
+    )
+
+    inventory = _committee_adoption_inventory(guild)
+
+    assert inventory["missing_roles"] == []
+    assert inventory["missing_channels"] == []
+    assert inventory["hierarchy_conflicts"] == []
+    assert inventory["aliases"] == ["局選択 → ロール選択 として利用"]
+    assert inventory["channels"]["ロール選択パネル"].id == 1
 
 
 def test_email_verification_switch_is_fail_safe(monkeypatch):
