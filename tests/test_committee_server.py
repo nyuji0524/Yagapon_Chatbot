@@ -17,6 +17,7 @@ from bot.commands.committee_server import (
     ProjectOrganizationSelect,
     RegistrationModal,
     SelfRolePanelView,
+    refresh_existing_role_panels,
     _bot_can_run_committee_setup,
     _bot_guide_embed,
     _committee_email_verification_enabled,
@@ -358,9 +359,9 @@ async def test_persistent_role_panel_has_stable_custom_ids():
     view = SelfRolePanelView()
     assert view.timeout is None
     assert {item.custom_id for item in view.children} == {
-        "yagapon:committee:bureau:v1",
-        "yagapon:committee:grade:v1",
-        "yagapon:committee:registration:v1",
+        "yagapon:committee:bureau:v2",
+        "yagapon:committee:grade:v2",
+        "yagapon:committee:registration:v2",
     }
 
 
@@ -583,6 +584,39 @@ async def test_post_once_repins_an_existing_guide():
     message.edit.assert_awaited_once_with(content="updated guide", embed=None, view=None)
     message.pin.assert_awaited_once_with(reason="28thサーバー案内")
     channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_rebinds_existing_role_panel_without_creating_messages():
+    message = SimpleNamespace(
+        id=30,
+        author=SimpleNamespace(id=10),
+        content="`yagapon-role-panel-v1`",
+        edit=AsyncMock(),
+    )
+
+    async def history(*, limit):
+        assert limit == 50
+        yield message
+
+    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=10))
+    channel = SimpleNamespace(
+        id=20,
+        name="ロール選択",
+        guild=guild,
+        history=history,
+    )
+    guild.text_channels = [channel]
+
+    refreshed = await refresh_existing_role_panels(SimpleNamespace(guilds=[guild]))
+
+    assert refreshed == 1
+    view = message.edit.await_args.kwargs["view"]
+    assert {item.custom_id for item in view.children} == {
+        "yagapon:committee:bureau:v2",
+        "yagapon:committee:grade:v2",
+        "yagapon:committee:registration:v2",
+    }
 
 
 @pytest.mark.asyncio
