@@ -30,6 +30,7 @@ from bot.key_management import (
 )
 
 log = logging.getLogger("yagapon.committee_server")
+_dispatched_component_interactions: set[int] = set()
 
 BUREAU_ROLES = (
     ("IT局", 0x58A6FF, "🩵", "it"),
@@ -334,6 +335,49 @@ class CommitteeGuideView(discord.ui.View):
                 )
 
 
+def _mark_component_dispatched(interaction: discord.Interaction) -> None:
+    interaction_id = getattr(interaction, "id", None)
+    if not isinstance(interaction_id, int):
+        return
+    _dispatched_component_interactions.add(interaction_id)
+    asyncio.get_running_loop().call_later(
+        10,
+        _dispatched_component_interactions.discard,
+        interaction_id,
+    )
+
+
+async def _handle_bureau_selection(interaction: discord.Interaction, value: str | None) -> None:
+    log.info(
+        "Committee bureau selection received guild=%s member=%s value=%s",
+        getattr(interaction.guild, "id", None),
+        getattr(interaction.user, "id", None),
+        value,
+    )
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    member = interaction.user
+    role = _find_named(guild.roles, value) if guild and value else None
+    if not guild or not isinstance(member, discord.Member) or role is None:
+        await _respond_ephemeral(interaction, "対象ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
+        return
+    try:
+        await _replace_role_group(member, role, _role_names(BUREAU_ROLES))
+    except discord.Forbidden:
+        await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
+        return
+    except discord.HTTPException:
+        log.exception(
+            "Committee bureau role update failed guild=%s member=%s role=%s",
+            getattr(guild, "id", None),
+            getattr(member, "id", None),
+            getattr(role, "name", None),
+        )
+        await _respond_ephemeral(interaction, "Discordのロール更新に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
+        return
+    await _respond_ephemeral(interaction, f"✅ 所属局を **{role.name}** に設定したぽん！")
+
+
 class BureauSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
@@ -349,38 +393,8 @@ class BureauSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        log.info(
-            "Committee bureau selection received guild=%s member=%s value=%s",
-            getattr(interaction.guild, "id", None),
-            getattr(interaction.user, "id", None),
-            self.values[0] if self.values else None,
-        )
-        # Discord requires an initial interaction response within three seconds.
-        # Editing a member can wait on the Discord API, especially while the bot
-        # is also processing a knowledge refresh, so acknowledge the selection
-        # before touching roles.
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-        member = interaction.user
-        role = _find_named(guild.roles, self.values[0]) if guild else None
-        if not guild or not isinstance(member, discord.Member) or role is None:
-            await _respond_ephemeral(interaction, "対象ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
-            return
-        try:
-            await _replace_role_group(member, role, _role_names(BUREAU_ROLES))
-        except discord.Forbidden:
-            await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
-            return
-        except discord.HTTPException:
-            log.exception(
-                "Committee bureau role update failed guild=%s member=%s role=%s",
-                getattr(guild, "id", None),
-                getattr(member, "id", None),
-                getattr(role, "name", None),
-            )
-            await _respond_ephemeral(interaction, "Discordのロール更新に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
-            return
-        await _respond_ephemeral(interaction, f"✅ 所属局を **{role.name}** に設定したぽん！")
+        _mark_component_dispatched(interaction)
+        await _handle_bureau_selection(interaction, self.values[0] if self.values else None)
 
 
 class GradeSelect(discord.ui.Select):
@@ -395,34 +409,39 @@ class GradeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        log.info(
-            "Committee grade selection received guild=%s member=%s value=%s",
-            getattr(interaction.guild, "id", None),
-            getattr(interaction.user, "id", None),
-            self.values[0] if self.values else None,
+        _mark_component_dispatched(interaction)
+        await _handle_grade_selection(interaction, self.values[0] if self.values else None)
+
+
+async def _handle_grade_selection(interaction: discord.Interaction, value: str | None) -> None:
+    log.info(
+        "Committee grade selection received guild=%s member=%s value=%s",
+        getattr(interaction.guild, "id", None),
+        getattr(interaction.user, "id", None),
+        value,
+    )
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    member = interaction.user
+    role = _find_named(guild.roles, value) if guild and value else None
+    if not guild or not isinstance(member, discord.Member) or role is None:
+        await _respond_ephemeral(interaction, "対象ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
+        return
+    try:
+        await _replace_role_group(member, role, GRADE_ROLES)
+    except discord.Forbidden:
+        await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
+        return
+    except discord.HTTPException:
+        log.exception(
+            "Committee grade role update failed guild=%s member=%s role=%s",
+            getattr(guild, "id", None),
+            getattr(member, "id", None),
+            getattr(role, "name", None),
         )
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-        member = interaction.user
-        role = _find_named(guild.roles, self.values[0]) if guild else None
-        if not guild or not isinstance(member, discord.Member) or role is None:
-            await _respond_ephemeral(interaction, "対象ロールが見つからないぽん。管理者に再セットアップを依頼してほしいぽん。")
-            return
-        try:
-            await _replace_role_group(member, role, GRADE_ROLES)
-        except discord.Forbidden:
-            await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
-            return
-        except discord.HTTPException:
-            log.exception(
-                "Committee grade role update failed guild=%s member=%s role=%s",
-                getattr(guild, "id", None),
-                getattr(member, "id", None),
-                getattr(role, "name", None),
-            )
-            await _respond_ephemeral(interaction, "Discordのロール更新に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
-            return
-        await _respond_ephemeral(interaction, f"✅ 学年を **{role.name}** に設定したぽん！")
+        await _respond_ephemeral(interaction, "Discordのロール更新に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
+        return
+    await _respond_ephemeral(interaction, f"✅ 学年を **{role.name}** に設定したぽん！")
 
 
 async def handle_committee_component_fallback(interaction: discord.Interaction) -> bool:
@@ -444,9 +463,11 @@ async def handle_committee_component_fallback(interaction: discord.Interaction) 
         return False
 
     await asyncio.sleep(0.25)
-    if interaction.response.is_done():
+    interaction_id = getattr(interaction, "id", None)
+    if isinstance(interaction_id, int) and interaction_id in _dispatched_component_interactions:
         return True
 
+    _mark_component_dispatched(interaction)
     log.warning(
         "Committee component view dispatch missed; using fallback guild=%s member=%s custom_id=%s",
         getattr(interaction.guild, "id", None),
@@ -465,9 +486,10 @@ async def handle_committee_component_fallback(interaction: discord.Interaction) 
         )
         return True
 
-    select = BureauSelect() if custom_id == "yagapon:committee:bureau:v2" else GradeSelect()
-    select._selected_values = values
-    await select.callback(interaction)
+    if custom_id == "yagapon:committee:bureau:v2":
+        await _handle_bureau_selection(interaction, values[0])
+    else:
+        await _handle_grade_selection(interaction, values[0])
     return True
 
 
@@ -937,6 +959,7 @@ class SelfRolePanelView(discord.ui.View):
         custom_id="yagapon:committee:registration:v2",
     )
     async def registration(self, _button: discord.ui.Button, interaction: discord.Interaction):
+        _mark_component_dispatched(interaction)
         log.info(
             "Committee registration modal requested guild=%s member=%s",
             getattr(interaction.guild, "id", None),
