@@ -17,7 +17,6 @@ from bot.commands.committee_server import (
     ProjectOrganizationSelect,
     RegistrationModal,
     SelfRolePanelView,
-    refresh_existing_role_panels,
     _bot_can_run_committee_setup,
     _bot_guide_embed,
     _committee_email_verification_enabled,
@@ -44,6 +43,7 @@ from bot.commands.committee_server import (
     _sync_email_only_registration,
     _sync_pending_local_roles,
     _sync_role_decision,
+    refresh_existing_role_panels,
 )
 
 
