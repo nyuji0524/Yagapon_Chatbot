@@ -175,6 +175,11 @@ services:
     image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
     build:
       context: .
+    # Repository/File Search reconciliation can briefly use every available
+    # core while paginating a large store. Reserve host capacity for Discord
+    # interactions and recording during a full inventory.
+    cpus: "${YAGAPON_SOURCE_INDEX_CPUS:-0.50}"
+    cpu_shares: 128
     depends_on:
       yagapon:
         condition: service_healthy
