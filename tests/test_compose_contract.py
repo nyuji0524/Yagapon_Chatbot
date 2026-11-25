@@ -163,12 +163,15 @@ def test_source_and_knowledge_github_apps_are_isolated_by_service():
         )
 
 
-def test_source_index_worker_cannot_starve_discord_interactions():
+def test_knowledge_workers_cannot_starve_discord_interactions():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     source_worker = compose["services"]["source-index-watch"]
+    curation_worker = compose["services"]["knowledge-curation-watch"]
 
     assert source_worker["cpus"] == "${YAGAPON_SOURCE_INDEX_CPUS:-0.50}"
     assert source_worker["cpu_shares"] == 128
+    assert curation_worker["cpus"] == "${YAGAPON_KNOWLEDGE_CURATION_CPUS:-0.50}"
+    assert curation_worker["cpu_shares"] == 128
 
 
 def test_empty_knowledge_direct_secret_falls_back_to_dedicated_mounted_file(

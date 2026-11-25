@@ -251,6 +251,10 @@ services:
     image: ${YAGAPON_IMAGE:-yagapon-chatbot:local}
     build:
       context: .
+    # Curation can briefly consume every core while parsing and bundling a
+    # backlog. Keep Discord interactions and voice capture responsive.
+    cpus: "${YAGAPON_KNOWLEDGE_CURATION_CPUS:-0.50}"
+    cpu_shares: 128
     depends_on:
       yagapon:
         condition: service_healthy
