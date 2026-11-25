@@ -59,6 +59,7 @@ POSITION_ROLE_ORDER = ("執行部", "局長", "副局長", "企画長", "役員"
 SERVER_ADMIN_ROLE = "サーバー管理者"
 ROLE_REQUEST_CHANNEL = "ロール申請🔑"
 ROLE_PANEL_CHANNEL = "ロール選択"
+ROLE_PANEL_CHANNEL_ALIASES = (ROLE_PANEL_CHANNEL, "局選択")
 ROLE_PANEL_MARKER = "yagapon-role-panel-v1"
 COMMITTEE_COLOR = 0xF2A900
 YAGA_SUPPORT_URL = "https://yagasupport.yagamifes.com"
@@ -70,6 +71,11 @@ def _role_names(entries: Iterable[tuple[str, int, str, str]]) -> tuple[str, ...]
 
 def _find_named(items, name: str):
     return discord.utils.get(items, name=name)
+
+
+def _find_named_any(items, names: Iterable[str]):
+    """Resolve an existing object by an approved name without renaming it."""
+    return next((item for name in names if (item := _find_named(items, name)) is not None), None)
 
 
 def _find_in_category(items, name: str, category):
@@ -183,7 +189,13 @@ async def _respond_ephemeral(interaction: discord.Interaction, message: str) -> 
 
 
 def _named_channel(guild: discord.Guild, name: str):
+    if name == ROLE_PANEL_CHANNEL:
+        return _find_named_any(guild.channels, ROLE_PANEL_CHANNEL_ALIASES)
     return _find_named(guild.channels, name)
+
+
+def _role_panel_channel(guild: discord.Guild):
+    return _find_named_any(guild.text_channels, ROLE_PANEL_CHANNEL_ALIASES)
 
 
 def _channel_mention(guild: discord.Guild, name: str) -> str:
@@ -1468,7 +1480,7 @@ async def committee_role_sync_loop(bot) -> None:
             # for committee registration has both the role panel and managed
             # committee roles, so avoid a paid Functions poll everywhere else.
             if (
-                _find_named(guild.text_channels, ROLE_PANEL_CHANNEL) is None
+                _role_panel_channel(guild) is None
                 or not any(_find_named(guild.roles, name) for name in GRADE_ROLES)
             ):
                 continue
@@ -2198,7 +2210,7 @@ async def refresh_existing_role_panels(bot) -> int:
 
     refreshed = 0
     for guild in bot.guilds:
-        channel = _find_named(guild.text_channels, ROLE_PANEL_CHANNEL)
+        channel = _role_panel_channel(guild)
         if channel is None:
             continue
         try:
@@ -2229,6 +2241,85 @@ async def refresh_existing_role_panels(bot) -> int:
     return refreshed
 
 
+def _find_category_channel(guild: discord.Guild, category_name: str, channel_name: str):
+    category = _find_named(guild.categories, category_name)
+    if category is None:
+        return None
+    return _find_in_category(guild.text_channels, channel_name, category)
+
+
+def _committee_adoption_inventory(guild: discord.Guild) -> dict[str, object]:
+    """Inspect the existing server layout without changing Discord state."""
+    expected_roles = (
+        *_role_names(BUREAU_ROLES),
+        *GRADE_ROLES,
+        *POSITION_ROLES,
+        SERVER_ADMIN_ROLE,
+    )
+    missing_roles = [name for name in expected_roles if _find_named(guild.roles, name) is None]
+    panel = _role_panel_channel(guild)
+    channels = {
+        "ロール選択パネル": panel,
+        ROLE_REQUEST_CHANNEL: _find_named(guild.text_channels, ROLE_REQUEST_CHANNEL),
+        KEY_ACTION_CHANNEL: _find_named(guild.text_channels, KEY_ACTION_CHANNEL),
+        KEY_REPORT_CHANNEL: _find_named(guild.text_channels, KEY_REPORT_CHANNEL),
+        KEY_REQUEST_CHANNEL: _find_named(guild.text_channels, KEY_REQUEST_CHANNEL),
+        "03｜会議/議事録": _find_category_channel(guild, "03｜会議", "議事録"),
+    }
+    missing_channels = [label for label, channel in channels.items() if channel is None]
+    me = guild.me
+    hierarchy_conflicts = [
+        role.name
+        for role in guild.roles
+        if role.name in expected_roles and me is not None and not me.top_role > role
+    ]
+    aliases = []
+    if panel is not None and panel.name != ROLE_PANEL_CHANNEL:
+        aliases.append(f"{panel.name} → {ROLE_PANEL_CHANNEL} として利用")
+    return {
+        "missing_roles": missing_roles,
+        "missing_channels": missing_channels,
+        "hierarchy_conflicts": hierarchy_conflicts,
+        "aliases": aliases,
+        "channels": channels,
+    }
+
+
+async def _adopt_existing_committee_server(bot, guild: discord.Guild) -> dict[str, int]:
+    """Attach controls to an existing server without editing its layout or ACLs."""
+    inventory = _committee_adoption_inventory(guild)
+    if inventory["missing_roles"] or inventory["missing_channels"] or inventory["hierarchy_conflicts"]:
+        raise ValueError("committee server inventory is incomplete")
+    channels = inventory["channels"]
+    messages = 0
+    for channel, marker, embed, view in (
+        (channels["ロール選択パネル"], ROLE_PANEL_MARKER, _role_panel_embed(), SelfRolePanelView()),
+        (channels[KEY_ACTION_CHANNEL], KEY_PANEL_MARKER, key_panel_embed(), KeyPanelView()),
+    ):
+        _message, created = await _post_once(
+            channel,
+            marker,
+            content=f"`{marker}`",
+            embed=embed,
+            view=view,
+        )
+        messages += int(created)
+    status_message, created = await _post_once(
+        channels[KEY_REPORT_CHANNEL],
+        KEY_STATUS_MARKER,
+        content=f"`{KEY_STATUS_MARKER}`",
+        embed=key_status_embed(guild, bot.key_management.store),
+    )
+    messages += int(created)
+    await asyncio.to_thread(
+        bot.key_management.store.set_status_message_id,
+        guild.id,
+        status_message.id,
+    )
+    await bot.config.set_minutes_channel(guild.id, channels["03｜会議/議事録"].id)
+    return {"messages": messages, "minutes_channel_id": channels["03｜会議/議事録"].id}
+
+
 def register_persistent_views(bot) -> None:
     bot.add_view(SelfRolePanelView())
     bot.add_view(PostRegistrationRoleView())
@@ -2239,6 +2330,60 @@ def register_persistent_views(bot) -> None:
 
 
 def register(bot):
+    @bot.slash_command(
+        name="committee_adopt",
+        description="既存の委員会サーバーを変更せず、やがぽんの操作パネルだけ引き継ぐぽん",
+    )
+    @discord.default_permissions(administrator=True)
+    @discord.option(
+        "apply",
+        description="falseは確認のみ、trueでBot所有パネルを接続",
+        type=bool,
+        default=False,
+    )
+    async def committee_adopt(ctx: discord.ApplicationContext, apply: bool = False):
+        if not await require_guild_admin(ctx):
+            return
+        inventory = _committee_adoption_inventory(ctx.guild)
+        missing_roles = inventory["missing_roles"]
+        missing_channels = inventory["missing_channels"]
+        hierarchy_conflicts = inventory["hierarchy_conflicts"]
+        aliases = inventory["aliases"]
+        if not apply:
+            lines = [
+                "🔎 **既存サーバー引き継ぎプレビュー**",
+                f"不足ロール: {', '.join(missing_roles) if missing_roles else 'なし'}",
+                f"不足チャンネル: {', '.join(missing_channels) if missing_channels else 'なし'}",
+                f"ロール順の問題: {', '.join(hierarchy_conflicts) if hierarchy_conflicts else 'なし'}",
+                f"名称互換: {', '.join(aliases) if aliases else 'なし'}",
+                "会話・スレッド・通常メッセージ・チャンネル権限は変更しません。",
+            ]
+            await ctx.respond("\n".join(lines), ephemeral=True)
+            return
+        if missing_roles or missing_channels or hierarchy_conflicts:
+            await ctx.respond(
+                "不足またはロール順の問題があるため、引き継ぎを中止したぽん。"
+                "先に `/committee_adopt apply:false` の結果を確認してほしいぽん。",
+                ephemeral=True,
+            )
+            return
+        await ctx.defer(ephemeral=True)
+        try:
+            result = await _adopt_existing_committee_server(bot, ctx.guild)
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Committee adoption failed guild=%s", ctx.guild_id)
+            await ctx.followup.send(
+                "Bot所有パネルの接続に失敗したぽん。既存構成は変更していないぽん。",
+                ephemeral=True,
+            )
+            return
+        await ctx.followup.send(
+            "✅ 既存構成を引き継いだぽん。\n"
+            f"新規操作メッセージ: {result['messages']}件\n"
+            "会話・スレッド・チャンネル名・配置・権限は変更していないぽん。",
+            ephemeral=True,
+        )
+
     @bot.slash_command(name="committee_setup", description="委員会サーバーのロールとチャンネルを一括整備するぽん")
     @discord.default_permissions(administrator=True)
     async def committee_setup(ctx: discord.ApplicationContext):
