@@ -349,6 +349,11 @@ class BureauSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        # Discord requires an initial interaction response within three seconds.
+        # Editing a member can wait on the Discord API, especially while the bot
+        # is also processing a knowledge refresh, so acknowledge the selection
+        # before touching roles.
+        await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         member = interaction.user
         role = _find_named(guild.roles, self.values[0]) if guild else None
@@ -359,6 +364,15 @@ class BureauSelect(discord.ui.Select):
             await _replace_role_group(member, role, _role_names(BUREAU_ROLES))
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
+            return
+        except discord.HTTPException:
+            log.exception(
+                "Committee bureau role update failed guild=%s member=%s role=%s",
+                getattr(guild, "id", None),
+                getattr(member, "id", None),
+                getattr(role, "name", None),
+            )
+            await _respond_ephemeral(interaction, "Discordのロール更新に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
             return
         await _respond_ephemeral(interaction, f"✅ 所属局を **{role.name}** に設定したぽん！")
 
@@ -375,6 +389,7 @@ class GradeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         member = interaction.user
         role = _find_named(guild.roles, self.values[0]) if guild else None
@@ -385,6 +400,15 @@ class GradeSelect(discord.ui.Select):
             await _replace_role_group(member, role, GRADE_ROLES)
         except discord.Forbidden:
             await _respond_ephemeral(interaction, "ロールを付ける権限が足りないぽん。やがぽんのロールを上に移動してほしいぽん。")
+            return
+        except discord.HTTPException:
+            log.exception(
+                "Committee grade role update failed guild=%s member=%s role=%s",
+                getattr(guild, "id", None),
+                getattr(member, "id", None),
+                getattr(role, "name", None),
+            )
+            await _respond_ephemeral(interaction, "Discordのロール更新に失敗したぽん。少し待ってからもう一度試してほしいぽん。")
             return
         await _respond_ephemeral(interaction, f"✅ 学年を **{role.name}** に設定したぽん！")
 
