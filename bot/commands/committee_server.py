@@ -425,6 +425,52 @@ class GradeSelect(discord.ui.Select):
         await _respond_ephemeral(interaction, f"✅ 学年を **{role.name}** に設定したぽん！")
 
 
+async def handle_committee_component_fallback(interaction: discord.Interaction) -> bool:
+    """Handle role-panel components when Pycord's view lookup misses them.
+
+    The normal persistent-view callback gets the first chance to acknowledge
+    the interaction.  This listener only takes over if that callback has not
+    responded after one event-loop turn and a short grace period.
+    """
+
+    data = interaction.data or {}
+    custom_id = data.get("custom_id")
+    supported = {
+        "yagapon:committee:bureau:v2",
+        "yagapon:committee:grade:v2",
+        "yagapon:committee:registration:v2",
+    }
+    if custom_id not in supported:
+        return False
+
+    await asyncio.sleep(0.25)
+    if interaction.response.is_done():
+        return True
+
+    log.warning(
+        "Committee component view dispatch missed; using fallback guild=%s member=%s custom_id=%s",
+        getattr(interaction.guild, "id", None),
+        getattr(interaction.user, "id", None),
+        custom_id,
+    )
+    if custom_id == "yagapon:committee:registration:v2":
+        await interaction.response.send_modal(RegistrationModal())
+        return True
+
+    values = data.get("values") or []
+    if len(values) != 1 or not isinstance(values[0], str):
+        await interaction.response.send_message(
+            "選択内容を確認できなかったぽん。もう一度選んでほしいぽん。",
+            ephemeral=True,
+        )
+        return True
+
+    select = BureauSelect() if custom_id == "yagapon:committee:bureau:v2" else GradeSelect()
+    select._selected_values = values
+    await select.callback(interaction)
+    return True
+
+
 async def _submit_position_request(
     interaction: discord.Interaction,
     role_name: str,

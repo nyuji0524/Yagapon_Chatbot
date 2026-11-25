@@ -43,6 +43,7 @@ from bot.commands.committee_server import (
     _sync_email_only_registration,
     _sync_pending_local_roles,
     _sync_role_decision,
+    handle_committee_component_fallback,
     refresh_existing_role_panels,
 )
 
@@ -617,6 +618,24 @@ async def test_startup_rebinds_existing_role_panel_without_creating_messages():
         "yagapon:committee:grade:v2",
         "yagapon:committee:registration:v2",
     }
+
+
+@pytest.mark.asyncio
+async def test_registration_component_fallback_opens_modal(monkeypatch):
+    monkeypatch.setattr("bot.commands.committee_server.asyncio.sleep", AsyncMock())
+    response = SimpleNamespace(is_done=lambda: False, send_modal=AsyncMock())
+    interaction = SimpleNamespace(
+        data={"custom_id": "yagapon:committee:registration:v2"},
+        response=response,
+        guild=SimpleNamespace(id=1),
+        user=SimpleNamespace(id=2),
+    )
+
+    handled = await handle_committee_component_fallback(interaction)
+
+    assert handled is True
+    response.send_modal.assert_awaited_once()
+    assert isinstance(response.send_modal.await_args.args[0], RegistrationModal)
 
 
 @pytest.mark.asyncio
