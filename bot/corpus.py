@@ -2470,7 +2470,25 @@ class CorpusManager:
                     # Yield between documents so a recording that starts in the
                     # middle of a large inventory immediately pauses the crawl.
                     wait_for_recording_idle()
-                    result.append(document)
+                    # Keep only the small reconciliation projection while the
+                    # pager is streaming. Retaining every generated SDK model
+                    # until a second conversion pass made the 1 GiB production
+                    # VM swap and delayed Discord gateway heartbeats.
+                    name = getattr(document, "name", None)
+                    if not name:
+                        continue
+                    state = getattr(document, "state", None)
+                    state_value = getattr(state, "value", state)
+                    result.append(
+                        {
+                            "name": str(name or ""),
+                            "display_name": str(
+                                getattr(document, "display_name", "") or ""
+                            ),
+                            "metadata": self._metadata_map(document),
+                            "state": str(state_value or ""),
+                        }
+                    )
                 return result
 
             return await loop.run_in_executor(
@@ -2478,27 +2496,10 @@ class CorpusManager:
                 collect_documents,
             )
 
-        documents = await retry_transient_api(
+        return await retry_transient_api(
             list_documents,
             operation_name="file_search_list_documents",
         )
-        result = []
-        for document in documents:
-            if not getattr(document, "name", None):
-                continue
-            state = getattr(document, "state", None)
-            state_value = getattr(state, "value", state)
-            result.append(
-                {
-                    "name": str(getattr(document, "name", "") or ""),
-                    "display_name": str(
-                        getattr(document, "display_name", "") or ""
-                    ),
-                    "metadata": self._metadata_map(document),
-                    "state": str(state_value or ""),
-                }
-            )
-        return result
 
     async def audit_remote_mirror(self, store_name: str, guild_id: int) -> dict:
         """Compare File Search identities with SQLite without mutating either."""

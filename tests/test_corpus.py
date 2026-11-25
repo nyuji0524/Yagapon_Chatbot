@@ -8316,6 +8316,37 @@ async def test_list_remote_documents_normalizes_metadata(corpus_manager):
 
 
 @pytest.mark.asyncio
+async def test_list_remote_documents_projects_sdk_models_while_streaming(
+    corpus_manager,
+):
+    """The event loop must never receive the full generated-model inventory."""
+
+    import threading
+
+    event_loop_thread = threading.get_ident()
+    projection_threads = []
+    original_metadata_map = corpus_manager._metadata_map
+
+    def tracked_metadata_map(document):
+        projection_threads.append(threading.get_ident())
+        return original_metadata_map(document)
+
+    corpus_manager._metadata_map = tracked_metadata_map
+    corpus_manager._client.file_search_stores.documents.list.return_value = [
+        SimpleNamespace(
+            name="documents/source",
+            display_name="source.py",
+            custom_metadata=[],
+        )
+    ]
+
+    await corpus_manager.list_remote_documents("fileSearchStores/test")
+
+    assert projection_threads
+    assert set(projection_threads) != {event_loop_thread}
+
+
+@pytest.mark.asyncio
 async def test_list_remote_documents_retries_transient_503(corpus_manager):
     document = SimpleNamespace(
         name="documents/source",

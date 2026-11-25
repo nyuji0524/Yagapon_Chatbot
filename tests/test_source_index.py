@@ -57,6 +57,33 @@ def curated_repository() -> Repository:
     )
 
 
+def test_release_cycle_memory_collects_and_trims_allocator(monkeypatch):
+    calls = []
+
+    class FakeMallocTrim:
+        argtypes = None
+        restype = None
+
+        def __call__(self, padding):
+            calls.append(("trim", padding))
+            return 1
+
+    monkeypatch.setattr(
+        source_index_module.gc,
+        "collect",
+        lambda: calls.append(("collect", None)),
+    )
+    monkeypatch.setattr(
+        source_index_module.ctypes,
+        "CDLL",
+        lambda _name: SimpleNamespace(malloc_trim=FakeMallocTrim()),
+    )
+
+    source_index_module.release_cycle_memory()
+
+    assert calls == [("collect", None), ("trim", 0)]
+
+
 def test_source_path_allowlist_excludes_generated_credentials_and_lockfiles():
     includes = ("lib/", "functions/", "Dockerfile")
 
