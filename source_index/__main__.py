@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import ctypes
+import gc
 import hashlib
 import io
 import json
@@ -36,6 +38,20 @@ from source_index.github_auth import (
 )
 
 log = logging.getLogger("yagapon.source_index")
+
+
+def release_cycle_memory() -> None:
+    """Return reconciliation allocations before the six-hour idle period."""
+
+    gc.collect()
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except (AttributeError, OSError):
+        # Non-glibc platforms still benefit from the collection above.
+        pass
 
 # Explicitly reviewed legacy Knowledge pages that predate ``access_scope``.
 # Unknown/missing declarations remain restricted. Remove entries after the
@@ -3663,6 +3679,9 @@ def main() -> None:
     if args.preflight and (args.dry_run or args.watch_interval):
         parser.error("--preflight cannot be combined with --dry-run or --watch-interval")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    # Full inventories page through thousands of records. Logging every HTTP
+    # 200 adds journal/disk pressure without useful operational information.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     if args.preflight:
         print(json.dumps(asyncio.run(preflight_once(args)), ensure_ascii=False), flush=True)
         return
@@ -3675,6 +3694,7 @@ def main() -> None:
             log.exception("Source indexing failed; retrying on the next interval")
         if not args.watch_interval:
             return
+        release_cycle_memory()
         time.sleep(args.watch_interval)
 
 
