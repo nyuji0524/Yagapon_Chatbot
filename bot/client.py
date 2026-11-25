@@ -366,6 +366,30 @@ class YagaPon(discord.Bot):
         minutes.register(self)
         drive.register(self)
         knowledge.register(self)
+        self.add_listener(self._log_committee_socket_response, "on_socket_response")
+        self.add_listener(self._handle_committee_interaction, "on_interaction")
+
+    async def _log_committee_socket_response(self, payload):
+        if payload.get("t") != "INTERACTION_CREATE":
+            return
+        data = payload.get("d") or {}
+        component = data.get("data") or {}
+        custom_id = component.get("custom_id")
+        if not isinstance(custom_id, str) or not custom_id.startswith("yagapon:committee:"):
+            return
+        member = data.get("member") or {}
+        user = member.get("user") or data.get("user") or {}
+        log.info(
+            "Raw committee interaction received guild=%s member=%s custom_id=%s",
+            data.get("guild_id"),
+            user.get("id"),
+            custom_id,
+        )
+
+    async def _handle_committee_interaction(self, interaction):
+        from bot.commands.committee_server import handle_committee_component_fallback
+
+        await handle_committee_component_fallback(interaction)
 
     async def on_ready(self):
         self.corpus.start_flush_loop()
