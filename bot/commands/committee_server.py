@@ -341,7 +341,7 @@ class BureauSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             row=0,
-            custom_id="yagapon:committee:bureau:v1",
+            custom_id="yagapon:committee:bureau:v2",
             options=[
                 discord.SelectOption(label=name, value=name, emoji=emoji)
                 for name, _color, emoji, _slug in BUREAU_ROLES
@@ -349,6 +349,12 @@ class BureauSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        log.info(
+            "Committee bureau selection received guild=%s member=%s value=%s",
+            getattr(interaction.guild, "id", None),
+            getattr(interaction.user, "id", None),
+            self.values[0] if self.values else None,
+        )
         # Discord requires an initial interaction response within three seconds.
         # Editing a member can wait on the Discord API, especially while the bot
         # is also processing a knowledge refresh, so acknowledge the selection
@@ -384,11 +390,17 @@ class GradeSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             row=1,
-            custom_id="yagapon:committee:grade:v1",
+            custom_id="yagapon:committee:grade:v2",
             options=[discord.SelectOption(label=name, value=name, emoji=f"{index}️⃣") for index, name in enumerate(GRADE_ROLES, 1)],
         )
 
     async def callback(self, interaction: discord.Interaction):
+        log.info(
+            "Committee grade selection received guild=%s member=%s value=%s",
+            getattr(interaction.guild, "id", None),
+            getattr(interaction.user, "id", None),
+            self.values[0] if self.values else None,
+        )
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         member = interaction.user
@@ -876,9 +888,14 @@ class SelfRolePanelView(discord.ui.View):
         emoji="✅",
         style=discord.ButtonStyle.success,
         row=2,
-        custom_id="yagapon:committee:registration:v1",
+        custom_id="yagapon:committee:registration:v2",
     )
     async def registration(self, _button: discord.ui.Button, interaction: discord.Interaction):
+        log.info(
+            "Committee registration modal requested guild=%s member=%s",
+            getattr(interaction.guild, "id", None),
+            getattr(interaction.user, "id", None),
+        )
         await interaction.response.send_modal(RegistrationModal())
 
 
@@ -2100,6 +2117,47 @@ async def _post_once(channel: discord.TextChannel, marker: str, *, content=None,
             exc,
         )
     return message, True
+
+
+async def refresh_existing_role_panels(bot) -> int:
+    """Rebind previously pinned role panels to the current persistent view.
+
+    Component messages can live much longer than a deployment. Re-edit only
+    the marker-owned panel on startup so its custom IDs always match the
+    handlers in the running release; never create channels or messages here.
+    """
+
+    refreshed = 0
+    for guild in bot.guilds:
+        channel = _find_named(guild.text_channels, ROLE_PANEL_CHANNEL)
+        if channel is None:
+            continue
+        try:
+            async for message in channel.history(limit=50):
+                if (
+                    message.author.id == guild.me.id
+                    and ROLE_PANEL_MARKER in (message.content or "")
+                ):
+                    await message.edit(
+                        content=f"`{ROLE_PANEL_MARKER}`",
+                        embed=_role_panel_embed(),
+                        view=SelfRolePanelView(),
+                    )
+                    refreshed += 1
+                    log.info(
+                        "Committee role panel rebound guild=%s channel=%s message=%s",
+                        guild.id,
+                        channel.id,
+                        message.id,
+                    )
+                    break
+        except discord.HTTPException:
+            log.exception(
+                "Could not rebind committee role panel guild=%s channel=%s",
+                guild.id,
+                channel.id,
+            )
+    return refreshed
 
 
 def register_persistent_views(bot) -> None:

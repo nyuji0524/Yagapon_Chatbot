@@ -371,6 +371,9 @@ class YagaPon(discord.Bot):
         self.corpus.start_flush_loop()
         self.key_management.start()
         self.scheduled_backfill.start()
+        from bot.commands.committee_server import refresh_existing_role_panels
+
+        await refresh_existing_role_panels(self)
         if self._recording_recovery_task is None or self._recording_recovery_task.done():
             from bot.voice import recording_recovery_loop
 
