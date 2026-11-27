@@ -1374,6 +1374,8 @@ async def test_listen_stop_only_saves_recording_without_any_ai_processing():
         raw_recording_retained=True,
         transcript_complete=False,
         post_processing_requested=False,
+        external_export_expected=False,
+        external_export_reason="channel-not-export-approved",
     )
     session._wait_for_inflight_stt.assert_not_awaited()
     session._reprocess_complete_recording.assert_not_awaited()

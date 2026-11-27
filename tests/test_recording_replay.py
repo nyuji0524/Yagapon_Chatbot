@@ -19,6 +19,7 @@ from bot.recording_replay import (
     find_recording_artifact,
     list_recording_artifacts,
     reconcile_completed_replay_checkpoints,
+    validate_recording_artifact_for_replay,
 )
 
 
@@ -80,6 +81,28 @@ def test_recording_inventory_finds_raw_audio_and_durable_transcript(tmp_path, mo
     assert find_recording_artifact("session-long") == artifact
     with pytest.raises(ValueError):
         find_recording_artifact("../../etc/passwd")
+
+
+def test_capture_only_recording_is_a_finalized_replay_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAGAPON_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("YAGAPON_TRANSCRIPT_DIR", str(tmp_path / "transcripts"))
+    session, _ = _recording(tmp_path, raw=True, transcript=False)
+    metadata_path = session / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        status="recording_saved",
+        transcript_complete=False,
+    )
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    artifact = find_recording_artifact("session-long")
+    validated = validate_recording_artifact_for_replay(
+        artifact,
+        retranscribe=True,
+        config=None,
+    )
+
+    assert validated["status"] == "recording_saved"
 
 
 @pytest.mark.parametrize("metadata_state", ["missing", "corrupt"])

@@ -68,6 +68,7 @@ TERMINAL_STATUSES = {
 # Successful replay may refresh the archived transcript for these retained
 # recordings, but it never changes the raw recording retention contract.
 REPLAY_FINALIZATION_STATUSES = {
+    "recording_saved",
     "delivered_recording_retained",
     "recovery_dead_letter",
 }
