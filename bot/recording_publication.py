@@ -19,6 +19,7 @@ from bot.recording import (
 
 FINALIZED_RECORDING_STATUSES = frozenset(
     {
+        "recording_saved",
         "delivered_recording_retained",
         "recovered",
     }

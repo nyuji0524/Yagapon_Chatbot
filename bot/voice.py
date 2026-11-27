@@ -2717,11 +2717,14 @@ class VoiceSession:
             )
 
         if self.recording_sink and self.mode == VoiceMode.LISTEN:
+            export_decision = self.external_export_decision()
             await self._mark_recording_sink(
                 "recording_saved",
                 raw_recording_retained=True,
                 transcript_complete=False,
                 post_processing_requested=False,
+                external_export_expected=export_decision.allowed,
+                external_export_reason=export_decision.reason,
             )
             return None
 
