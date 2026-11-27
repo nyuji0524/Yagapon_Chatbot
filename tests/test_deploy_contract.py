@@ -8,6 +8,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_voice_dependency_excludes_incompatible_davey_020():
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+    assert "davey>=0.1.4,<0.2.0" in requirements
+
+
 def test_container_healthcheck_allows_cold_vm_startup():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
